@@ -361,11 +361,30 @@ async fn main_async() {
                                     };
 
                                     if !api_key.is_empty() {
+                                        log::info!("[auth] authenticated! token ready.");
+                                        log::info!("[main] ========================================");
+                                        log::info!("[main] Press ENTER to send first message to Claude");
+                                        log::info!("[main] (costs ~100 output tokens)");
+                                        log::info!("[main] ========================================");
+
+                                        // Wait for Enter keypress
+                                        let kb = keyboard::ScancodeStream::new();
+                                        loop {
+                                            let key = kb.next_key().await;
+                                            match key {
+                                                pc_keyboard::DecodedKey::Unicode('\n') => break,
+                                                pc_keyboard::DecodedKey::Unicode('\r') => break,
+                                                _ => {}
+                                            }
+                                        }
+
                                         log::info!("[main] sending Messages API request...");
+                                        // Haiku — cheapest model. max_tokens:20 to minimize cost.
                                         let body = alloc::format!(
-                                            r#"{{"model":"claude-sonnet-4-20250514","max_tokens":100,"messages":[{{"role":"user","content":"Hello from ClaudioOS! I am a bare-metal Rust operating system with no Linux kernel, talking to you directly over VirtIO-net + smoltcp. What do you think about that?"}}]}}"#
+                                            r#"{{"model":"claude-haiku-4-5-20251001","max_tokens":20,"messages":[{{"role":"user","content":"Say hi from bare metal in 10 words"}}]}}"#
                                         );
-                                        let request = claudio_net::http::HttpRequest::post(
+
+                                        if let Some(resp) = do_http(&mut stack, claudio_net::http::HttpRequest::post(
                                             "api.anthropic.com",
                                             "/v1/messages",
                                             body.into_bytes(),
@@ -373,44 +392,18 @@ async fn main_async() {
                                         .header("Content-Type", "application/json")
                                         .header("x-api-key", api_key)
                                         .header("anthropic-version", "2023-06-01")
-                                        .header("Connection", "close");
-
-                                        let req_bytes = request.to_bytes();
-                                        log::info!("[main] sending {} bytes...", req_bytes.len());
-
-                                        match claudio_net::tls::tcp_send(&mut stack, handle, &req_bytes, now) {
-                                            Err(e) => log::error!("[main] send failed: {:?}", e),
-                                            Ok(()) => {
-                                                log::info!("[main] request sent! reading response...");
-                                                let mut resp_buf = alloc::vec![0u8; 16384];
-                                                let mut total = 0usize;
-                                                // Read response in chunks
-                                                for _ in 0..20 {
-                                                    match claudio_net::tls::tcp_recv(&mut stack, handle, &mut resp_buf[total..], now) {
-                                                        Ok(0) => break,
-                                                        Ok(n) => {
-                                                            total += n;
-                                                            // Check if we have complete response
-                                                            if let Ok(resp) = claudio_net::http::HttpResponse::parse(&resp_buf[..total]) {
-                                                                log::info!("[main] HTTP {} {}", resp.status, resp.reason);
-                                                                log::info!("[main] === CLAUDE'S RESPONSE FROM BARE METAL ===");
-                                                                // Try to extract text from JSON response
-                                                                if let Ok(json) = core::str::from_utf8(&resp.body) {
-                                                                    log::info!("[main] {}", json);
-                                                                }
-                                                                log::info!("[main] === END RESPONSE ===");
-                                                                break;
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            log::error!("[main] recv error: {:?}", e);
-                                                            break;
-                                                        }
-                                                    }
-                                                }
+                                        .header("Connection", "close")) {
+                                            log::info!("[main] HTTP {}", resp.status);
+                                            log::info!("[main] ============================================");
+                                            log::info!("[main]   CLAUDE'S RESPONSE FROM BARE METAL");
+                                            log::info!("[main] ============================================");
+                                            if let Ok(body) = core::str::from_utf8(&resp.body) {
+                                                log::info!("[main] {}", body);
                                             }
+                                            log::info!("[main] ============================================");
+                                        } else {
+                                            log::error!("[main] API request failed");
                                         }
-                                        claudio_net::tls::tcp_close(&mut stack, handle);
                                     }
                                 }
                             }
