@@ -29,8 +29,8 @@ pub enum DnsError {
     NotFound,
 }
 
-/// Maximum number of poll iterations before we declare a timeout.
-const DNS_TIMEOUT_POLLS: usize = 10_000;
+/// QEMU SLIRP DNS is slow. At ~18 Hz PIT rate, 100k polls ≈ ~90 seconds.
+const DNS_TIMEOUT_POLLS: usize = 100_000;
 
 /// Resolve a hostname to an IPv4 address.
 ///

@@ -259,7 +259,47 @@ async fn main_async() {
         }
     }
 
-    // ── Phase 1: Keyboard input loop ────────────────────────────────
+    // ── Phase 3: Authentication ──────────────────────────────────────
+    // Check for baked-in API key first (dev mode), then try OAuth
+    log::info!("[main] ClaudioOS Phase 3 — Authentication");
+
+    let credentials = if let Some(key) = option_env!("CLAUDIO_API_KEY") {
+        log::info!("[auth] using baked-in API key (dev mode)");
+        Some(claudio_auth::Credentials::ApiKey(alloc::string::String::from(key)))
+    } else {
+        // Try to load saved credentials from FAT32
+        match claudio_fs::read_credentials() {
+            Some(creds) if !creds.is_expired(interrupts::millis_since_boot() as u64 / 1000) => {
+                log::info!("[auth] loaded saved credentials");
+                Some(creds)
+            }
+            _ => {
+                log::info!("[auth] no valid credentials found");
+                log::info!("[auth] OAuth device flow requires TLS (not yet implemented)");
+                log::info!("[auth] set CLAUDIO_API_KEY env var at build time for dev mode");
+                // TODO: When TLS is working, implement:
+                // 1. POST to auth.anthropic.com/oauth/device/code (needs HTTPS)
+                // 2. Display user_code on framebuffer
+                // 3. Poll token endpoint until user authenticates
+                // 4. Save credentials to FAT32
+                None
+            }
+        }
+    };
+
+    match &credentials {
+        Some(claudio_auth::Credentials::ApiKey(_)) => {
+            log::info!("[auth] authenticated via API key");
+        }
+        Some(claudio_auth::Credentials::OAuth { .. }) => {
+            log::info!("[auth] authenticated via OAuth");
+        }
+        None => {
+            log::warn!("[auth] running without authentication — API calls will fail");
+        }
+    }
+
+    // ── Keyboard input loop ──────────────────────────────────────────
     log::info!("[main] keyboard input active, type away!");
 
     let stream = keyboard::ScancodeStream::new();
