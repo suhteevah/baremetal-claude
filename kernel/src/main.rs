@@ -234,22 +234,79 @@ async fn main_async() {
                         Ok(ip) => {
                             log::info!("[main] api.anthropic.com = {}", ip);
 
-                            // Step 7: Try a TCP connection on port 443.
-                            log::info!("[main] attempting TCP connection to {}:443...", ip);
+                            // Step 7: Connect through host TLS proxy at gateway:8443.
+                            // Run `python tools/tls-proxy.py 8443` on host first.
+                            let proxy_ip = claudio_net::Ipv4Address::new(10, 0, 2, 2);
+                            let proxy_port: u16 = 8443;
+                            log::info!("[main] connecting to TLS proxy at {}:{}...", proxy_ip, proxy_port);
                             match claudio_net::tls::tcp_connect(
-                                &mut stack, ip, 443, 49152, now,
+                                &mut stack, proxy_ip, proxy_port, 49152, now,
                             ) {
                                 Err(e) => {
-                                    log::error!("[main] TCP connect failed: {:?}", e);
+                                    log::error!("[main] proxy connect failed: {:?}", e);
+                                    log::info!("[main] run: python tools/tls-proxy.py 8443");
                                 }
                                 Ok(handle) => {
-                                    log::info!(
-                                        "[main] TCP connected to {}:443! Phase 2 networking COMPLETE.",
-                                        ip
-                                    );
-                                    // Clean up — we just wanted to prove connectivity.
-                                    claudio_net::tls::tcp_close(&mut stack, handle);
-                                    log::info!("[main] TCP connection closed.");
+                                    log::info!("[main] connected to TLS proxy!");
+
+                                    // Make an actual API call to Anthropic!
+                                    let api_key = option_env!("CLAUDIO_API_KEY").unwrap_or("");
+                                    if api_key.is_empty() {
+                                        log::warn!("[main] no API key — skipping API call");
+                                        log::info!("[main] rebuild with CLAUDIO_API_KEY=sk-... cargo build");
+                                        claudio_net::tls::tcp_close(&mut stack, handle);
+                                    } else {
+                                        log::info!("[main] sending Messages API request...");
+                                        let body = alloc::format!(
+                                            r#"{{"model":"claude-sonnet-4-20250514","max_tokens":100,"messages":[{{"role":"user","content":"Hello from ClaudioOS! I am a bare-metal Rust operating system with no Linux kernel, talking to you directly over VirtIO-net + smoltcp. What do you think about that?"}}]}}"#
+                                        );
+                                        let request = claudio_net::http::HttpRequest::post(
+                                            "api.anthropic.com",
+                                            "/v1/messages",
+                                            body.into_bytes(),
+                                        )
+                                        .header("Content-Type", "application/json")
+                                        .header("x-api-key", api_key)
+                                        .header("anthropic-version", "2023-06-01")
+                                        .header("Connection", "close");
+
+                                        let req_bytes = request.to_bytes();
+                                        log::info!("[main] sending {} bytes...", req_bytes.len());
+
+                                        match claudio_net::tls::tcp_send(&mut stack, handle, &req_bytes, now) {
+                                            Err(e) => log::error!("[main] send failed: {:?}", e),
+                                            Ok(()) => {
+                                                log::info!("[main] request sent! reading response...");
+                                                let mut resp_buf = alloc::vec![0u8; 16384];
+                                                let mut total = 0usize;
+                                                // Read response in chunks
+                                                for _ in 0..20 {
+                                                    match claudio_net::tls::tcp_recv(&mut stack, handle, &mut resp_buf[total..], now) {
+                                                        Ok(0) => break,
+                                                        Ok(n) => {
+                                                            total += n;
+                                                            // Check if we have complete response
+                                                            if let Ok(resp) = claudio_net::http::HttpResponse::parse(&resp_buf[..total]) {
+                                                                log::info!("[main] HTTP {} {}", resp.status, resp.reason);
+                                                                log::info!("[main] === CLAUDE'S RESPONSE FROM BARE METAL ===");
+                                                                // Try to extract text from JSON response
+                                                                if let Ok(json) = core::str::from_utf8(&resp.body) {
+                                                                    log::info!("[main] {}", json);
+                                                                }
+                                                                log::info!("[main] === END RESPONSE ===");
+                                                                break;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            log::error!("[main] recv error: {:?}", e);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        claudio_net::tls::tcp_close(&mut stack, handle);
+                                    }
                                 }
                             }
                         }

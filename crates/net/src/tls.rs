@@ -110,7 +110,10 @@ pub fn tcp_connect(
     );
 
     // Poll until connected or failed.
-    for _ in 0..TCP_POLL_LIMIT {
+    // HLT between polls to let the PIT timer tick — smoltcp needs advancing
+    // timestamps for ARP resolution and TCP retransmission.
+    let mut last_tick = 0i64;
+    for i in 0..TCP_POLL_LIMIT {
         let ts = now();
         stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
 
@@ -123,6 +126,20 @@ pub fn tcp_connect(
             log::warn!("[tcp] connection refused or reset");
             stack.sockets.remove(handle);
             return Err(TcpError::Refused);
+        }
+
+        // Log progress every ~2 seconds (36 ticks at 18 Hz)
+        let current_ms = ts.total_millis();
+        if current_ms - last_tick > 2000 {
+            log::debug!("[tcp] waiting... ({}ms, iter {})", current_ms, i);
+            last_tick = current_ms;
+        }
+
+        // Spin hint to let the CPU relax between polls.
+        // The caller's `now()` function reads from a timer interrupt counter,
+        // so we just need to not peg the CPU in a pure busy loop.
+        for _ in 0..1000 {
+            core::hint::spin_loop();
         }
     }
 
@@ -155,6 +172,7 @@ pub fn tcp_send(
                 return Ok(());
             }
         }
+        for _ in 0..100 { core::hint::spin_loop(); }
     }
 
     Err(TcpError::Timeout)

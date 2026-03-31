@@ -110,6 +110,12 @@ pub use tls::{TcpError, TlsError, TlsStream};
 /// Re-export smoltcp's Instant type so the kernel can construct timestamps
 /// without depending on smoltcp directly.
 pub use smoltcp::time::Instant;
+pub use smoltcp::wire::Ipv4Address;
+
+/// QEMU SLIRP gateway IP (host machine). The TLS proxy runs here.
+pub fn gateway_ip() -> smoltcp::wire::Ipv4Address {
+    smoltcp::wire::Ipv4Address::new(10, 0, 2, 2)
+}
 
 // ---------------------------------------------------------------------------
 // PCI device info (mirror of kernel's PciDevice, kept minimal to avoid

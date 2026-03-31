@@ -1,6 +1,7 @@
 # Building ClaudioOS
 
-Comprehensive guide for building, running, and debugging ClaudioOS.
+Comprehensive guide for building, running, and debugging ClaudioOS on Windows,
+Linux, and macOS.
 
 ---
 
@@ -10,6 +11,7 @@ Comprehensive guide for building, running, and debugging ClaudioOS.
 - [Two-Step Build Process](#two-step-build-process)
 - [Running in QEMU](#running-in-qemu)
 - [Troubleshooting](#troubleshooting)
+- [The Stack Overflow Fix](#the-stack-overflow-fix)
 - [Environment Variables](#environment-variables)
 - [Project File Layout](#project-file-layout)
 
@@ -19,7 +21,7 @@ Comprehensive guide for building, running, and debugging ClaudioOS.
 
 ### Rust Toolchain
 
-ClaudioOS requires nightly Rust. The `rust-toolchain.toml` in the repository root
+ClaudioOS requires **nightly Rust**. The `rust-toolchain.toml` in the repository root
 automatically installs the correct toolchain on first build:
 
 ```toml
@@ -29,24 +31,46 @@ components = ["rust-src", "rustfmt", "clippy", "llvm-tools-preview"]
 targets = ["x86_64-unknown-none"]
 ```
 
-- **`rust-src`**: Required for building core/alloc for the freestanding target
-- **`llvm-tools-preview`**: Required by the bootloader's image builder for `llvm-objcopy`
-- **`x86_64-unknown-none`**: The bare-metal target (no OS, no libc)
+- **`rust-src`**: Required by `-Zbuild-std` for building `core` and `alloc` from
+  source for the freestanding target
+- **`llvm-tools-preview`**: Required by the bootloader's image builder for
+  `llvm-objcopy` (converts ELF to raw binary)
+- **`x86_64-unknown-none`**: The bare-metal target (no OS, no libc, no std)
 
-You do not need to manually run `rustup target add` -- it happens automatically.
+You do **not** need to manually run `rustup target add` -- it happens automatically.
+
+### Build Configuration
+
+The `.cargo/config.toml` sets important build parameters:
+
+```toml
+[build]
+target = "x86_64-unknown-none"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+```
+
+- **`target = "x86_64-unknown-none"`**: All `cargo build` commands default to the
+  bare-metal target. The image builder is excluded from the workspace to avoid this.
+- **`build-std = ["core", "alloc"]`**: Builds the standard library from source with
+  our target's settings. Required because `x86_64-unknown-none` has no pre-built
+  standard library.
+- **`compiler-builtins-mem`**: Provides `memcpy`, `memset`, `memcmp` implementations
+  that would normally come from libc.
 
 ### Platform-Specific Requirements
 
 #### Windows
 
 - **MSVC Build Tools**: The image builder (`tools/image-builder/`) is a host-side
-  Rust binary that uses the MSVC linker. You need "Desktop development with C++"
-  from Visual Studio, or at minimum the MSVC Build Tools standalone installer.
+  binary that links with the MSVC linker. Install "Desktop development with C++"
+  from Visual Studio, or the MSVC Build Tools standalone installer.
 - **QEMU for Windows**: Download from https://www.qemu.org/download/#windows.
   Add the QEMU install directory to your PATH.
-- **OVMF** (for UEFI boot): QEMU for Windows may not include OVMF. Download
-  OVMF firmware from https://retrage.github.io/edk2-nightly/ or build from source.
-  BIOS boot works without OVMF.
+- **OVMF** (for UEFI boot): QEMU for Windows may not include OVMF firmware.
+  Download from https://retrage.github.io/edk2-nightly/ or use BIOS boot instead.
 
 #### Linux
 
@@ -61,8 +85,8 @@ sudo pacman -S qemu-system-x86 edk2-ovmf
 sudo dnf install qemu-system-x86 edk2-ovmf
 ```
 
-The Rust toolchain "just works" on Linux -- no special setup needed beyond having
-a C linker available (for the image builder).
+The Rust toolchain "just works" on Linux -- no special setup beyond having a C
+linker available (for the image builder, which is a host-side binary).
 
 #### macOS
 
@@ -75,8 +99,8 @@ brew install qemu
 
 ## Two-Step Build Process
 
-Building ClaudioOS is a two-step process: compile the kernel, then wrap it in a
-bootable disk image.
+Building ClaudioOS is a two-step process because the bootloader crate's disk image
+builder is a separate host-side tool.
 
 ### Step 1: Compile the Kernel
 
@@ -84,19 +108,30 @@ bootable disk image.
 cargo build
 ```
 
-This compiles the `claudio-os` kernel crate for `x86_64-unknown-none` (the target
-is set in `.cargo/config.toml`). The output is a bare ELF binary:
+This compiles the `claudio-os` kernel crate (and its dependencies including
+`claudio-terminal`) for the `x86_64-unknown-none` target. Output:
 
 ```
 target/x86_64-unknown-none/debug/claudio-os
 ```
 
-This ELF is NOT bootable on its own -- it needs to be wrapped with the bootloader.
+This is a bare ELF binary -- **not bootable on its own**. It needs to be wrapped
+with the bootloader.
 
-For a release build:
+For release builds (smaller, optimized, LTO enabled):
 
 ```bash
 cargo build --release
+```
+
+Release profile settings from `Cargo.toml`:
+```toml
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"    # Optimize for size
+strip = true
 ```
 
 ### Step 2: Create Bootable Disk Images
@@ -106,20 +141,43 @@ cargo run --manifest-path tools/image-builder/Cargo.toml -- \
     target/x86_64-unknown-none/debug/claudio-os
 ```
 
-The image builder uses the `bootloader` crate (v0.11) to produce two disk images:
+The image builder (`tools/image-builder/src/main.rs`) uses the `bootloader` crate
+(v0.11) to produce two disk images:
 
 | Image | Path | Boot method |
 |-------|------|-------------|
-| BIOS | `target/x86_64-unknown-none/debug/claudio-os-bios.img` | Legacy BIOS |
-| UEFI | `target/x86_64-unknown-none/debug/claudio-os-uefi.img` | UEFI firmware |
+| UEFI | `target/.../claudio-os-uefi.img` | UEFI firmware (OVMF) |
+| BIOS | `target/.../claudio-os-bios.img` | Legacy BIOS (simpler) |
 
-For release builds, replace `debug` with `release` in the paths.
+The image builder:
+1. Uses `bootloader::UefiBoot::new(kernel_path).create_disk_image(&uefi_path)`
+2. Uses `bootloader::BiosBoot::new(kernel_path).create_disk_image(&bios_path)`
+3. Prints file sizes and QEMU invocation hints
+
+**Why a separate tool?** The image builder runs on the host (`x86_64-pc-windows-msvc`
+or `x86_64-unknown-linux-gnu`), not the bare-metal target. It is excluded from the
+workspace (`exclude = ["tools/image-builder"]`) to prevent it from inheriting the
+`x86_64-unknown-none` build target.
+
+### Quick Build Script
+
+For repeated builds during development:
+
+```bash
+# Build kernel + create images + run QEMU (BIOS mode)
+cargo build && \
+cargo run --manifest-path tools/image-builder/Cargo.toml -- \
+    target/x86_64-unknown-none/debug/claudio-os && \
+qemu-system-x86_64 \
+    -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-bios.img \
+    -serial stdio -m 512M
+```
 
 ---
 
 ## Running in QEMU
 
-### BIOS Boot (Simplest)
+### BIOS Boot (Simplest, Recommended for Quick Testing)
 
 No OVMF firmware needed. Works out of the box:
 
@@ -173,14 +231,12 @@ qemu-system-x86_64 \
 ```
 
 SLIRP networking provides:
-- DHCP: Guest gets 10.0.2.x automatically
-- DNS: Available at 10.0.2.3
-- NAT: Outbound TCP/UDP works (HTTPS to api.anthropic.com)
-- No host configuration needed (no bridges, no tap devices)
+- **DHCP**: Guest gets 10.0.2.x automatically
+- **DNS**: Available at 10.0.2.3
+- **NAT**: Outbound TCP/UDP works (HTTPS to api.anthropic.com)
+- **No host configuration**: No bridges, no tap devices, no root required
 
-### With Port Forwarding
-
-To forward a port from host to guest (for debugging):
+With port forwarding (host port 5555 -> guest port 5555):
 
 ```bash
 -netdev user,id=net0,hostfwd=tcp::5555-:5555
@@ -191,13 +247,15 @@ To forward a port from host to guest (for debugging):
 | Flag | Purpose |
 |------|---------|
 | `-serial stdio` | Route serial port to terminal (see log output) |
-| `-m 512M` | Give the VM 512 MiB of RAM |
-| `-smp 4` | 4 CPU cores (unused by Phase 1 but needed for SMP later) |
-| `-d int` | Log all interrupts to stderr (very verbose, for debugging) |
-| `-no-reboot` | Don't reboot on triple fault -- stop instead |
+| `-m 512M` | 512 MiB RAM |
+| `-smp 4` | 4 CPU cores |
+| `-d int` | Log all interrupts to stderr (very verbose) |
+| `-no-reboot` | Stop on triple fault instead of rebooting |
 | `-no-shutdown` | Keep VM alive after power off |
-| `-s -S` | Start GDB server on port 1234, wait for connection |
-| `-monitor stdio` | QEMU monitor instead of serial (use `-serial file:serial.log`) |
+| `-s -S` | Start GDB server on port 1234, wait for debugger |
+| `-monitor stdio` | QEMU monitor (use `-serial file:serial.log` for serial) |
+| `-display none` | No graphical window (serial only) |
+| `-enable-kvm` | Use KVM acceleration (Linux, much faster) |
 
 ### GDB Debugging
 
@@ -205,8 +263,7 @@ To forward a port from host to guest (for debugging):
 # Terminal 1: Start QEMU with GDB server
 qemu-system-x86_64 \
     -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-bios.img \
-    -serial stdio \
-    -m 512M \
+    -serial stdio -m 512M \
     -s -S
 
 # Terminal 2: Connect GDB
@@ -222,8 +279,7 @@ gdb target/x86_64-unknown-none/debug/claudio-os \
 
 ### Windows: MSVC Linker Errors
 
-The image builder (`tools/image-builder/`) is a host-side binary that requires the
-MSVC linker. If you see errors like:
+The image builder is a host-side binary requiring the MSVC linker. If you see:
 
 ```
 error: linker `link.exe` not found
@@ -235,19 +291,19 @@ or:
 LINK : fatal error LNK1104: cannot open file 'kernel32.lib'
 ```
 
-**Fix**: Ensure "Desktop development with C++" is installed in Visual Studio. For
-partial installs, set the `LIB` environment variable:
+**Fix**: Install "Desktop development with C++" in Visual Studio. For partial
+installs where the linker is found but libraries are not, set the `LIB` variable:
 
 ```powershell
 $env:LIB = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.39.33519\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\um\x64"
 ```
 
-Adjust version numbers to match your installation.
+Adjust version numbers to match your installation. Use `vswhere` or check the
+Visual Studio install directories to find the correct paths.
 
 ### Windows: sccache Issues
 
-If you use `sccache` as a Rust compiler wrapper and see compilation failures on the
-kernel crate, try building without it:
+If `sccache` is configured as a Rust compiler wrapper and kernel compilation fails:
 
 ```powershell
 $env:RUSTC_WRAPPER = ""
@@ -259,26 +315,24 @@ some sccache versions.
 
 ### `fatfs` v0.3 Compilation Failure
 
-The `fatfs` crate at v0.3 has known compilation issues in `no_std` environments.
-If you see errors from `fatfs`:
+The `fatfs` crate at v0.3 has known compilation issues in `no_std` environments:
 
 ```
 error[E0433]: failed to resolve: use of undeclared type `std`
 ```
 
-Ensure the workspace has `fatfs` pinned with `default-features = false`:
+**Fix**: The workspace pins `fatfs` with `default-features = false`:
 
 ```toml
-[dependencies]
-fatfs = { version = "0.4", default-features = false }
+fatfs = { version = "0.3", default-features = false, features = ["alloc"] }
 ```
 
-Version 0.4 resolves most `no_std` issues.
+If compilation still fails, the `fs-persist` crate (Phase 3) may need to use a
+fork or wait for v0.4.
 
 ### `embedded-tls` LLVM Crashes
 
-The `embedded-tls` crate can trigger LLVM codegen crashes when compiled for
-`x86_64-unknown-none`:
+The `embedded-tls` crate triggers LLVM codegen crashes on `x86_64-unknown-none`:
 
 ```
 error: could not compile `embedded-tls`
@@ -287,46 +341,128 @@ Caused by:
 ```
 
 **Workarounds**:
-- Try `opt-level = 1` instead of the default for debug builds
-- Try `codegen-units = 1` in `[profile.dev]`
-- As a last resort, the TLS implementation may need to be swapped
+1. Set `opt-level = 1` in `[profile.dev]` (reduces optimization pressure)
+2. Set `codegen-units = 1` (single compilation unit avoids parallel LLVM issues)
+3. If neither works, the TLS implementation may need to be swapped to `rustls`
+   (no_std) or a custom solution
 
 ### Boot Hangs (No Serial Output)
 
 If QEMU starts but no serial output appears:
 
-1. Verify you are using `-serial stdio`
-2. Check the disk image path is correct
-3. Try BIOS boot instead of UEFI (simpler, fewer things can go wrong)
-4. Add `-d int` to see if interrupts are firing
-5. Add `-no-reboot` to catch triple faults
+1. Verify `-serial stdio` is in the QEMU command
+2. Check the disk image path is correct and the file exists
+3. Try BIOS boot instead of UEFI (fewer things can go wrong)
+4. Add `-d int` to see if the CPU is receiving interrupts
+5. Add `-no-reboot` to catch triple faults (VM stops instead of reboot loop)
+6. Check that the kernel was built recently (`cargo build` succeeded)
 
 ### Page Fault During Boot
 
-If you see `[int] PAGE FAULT` in serial output during init:
+If `[int] PAGE FAULT` appears in serial output:
 
-- Check if the heap pages are being mapped correctly (`memory::init`)
-- The framebuffer address from the bootloader may need page table fixup
-- Try increasing `HEAP_SIZE` if the allocator is running out of space
+- **During Phase 2**: Heap pages not mapping correctly. Check `memory::init()`.
+  Verify `phys_mem_offset` is correct (print it to serial).
+- **During Phase 4**: Framebuffer address translation failed. The kernel walks the
+  page table to find the framebuffer's physical address. If the bootloader's mapping
+  is unusual, this walk can fail.
+- **After Phase 6**: Likely the heap stack switch failed. Check that the new stack
+  is properly aligned and large enough.
+
+### Double Fault After Enabling Interrupts
+
+This was the most common Phase 1 failure mode. Possible causes:
+
+1. **Missing data segment in GDT**: See the [GDT data segment bug](kernel-internals.md#the-data-segment-bug-critical-phase-1-fix)
+   in kernel-internals.md. SS must be loaded with a valid data segment selector.
+   This was the hardest Phase 1 bug.
+2. **APIC not disabled**: UEFI enables the Local APIC. Both APIC and PIC delivering
+   timer interrupts simultaneously causes a double fault. Fix: clear bit 11 of
+   `IA32_APIC_BASE` MSR (0x1B) before PIC init.
+3. **Stack overflow**: The bootloader's 128 KiB stack is exhausted after init.
+   See the next section.
+
+---
+
+## The Stack Overflow Fix
+
+This is documented here because it is a critical build/run issue that manifests as
+seemingly random double faults after enabling interrupts.
+
+### Symptom
+
+After all init phases complete and interrupts are enabled, the first timer or
+keyboard interrupt causes a double fault. The fault appears to be a stack overflow
+(page fault at a guard page address).
+
+### Root Cause
+
+The bootloader provides a 128 KiB kernel stack. During boot, every `log::info!()`
+call performs `format_args!()` which pushes large stack frames (the `fmt::Arguments`
+type and its formatting machinery). After 6 phases of init with dozens of log calls
+plus PCI enumeration logging 30+ devices, the stack is nearly full.
+
+When interrupts are enabled, the ISR pushes an interrupt frame plus any handler
+logic onto this nearly-full stack -> overflow -> page fault -> double fault.
+
+### Solution (Two Parts)
+
+**Part 1**: Increase the bootloader stack to 128 KiB (from default ~16 KiB):
+
+```rust
+// kernel/src/main.rs
+static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.kernel_stack_size = 128 * 1024;
+    config
+};
+```
+
+**Part 2**: Allocate a fresh 256 KiB stack on the heap and switch to it before
+enabling interrupts:
+
+```rust
+const NEW_STACK_SIZE: usize = 256 * 1024;
+let new_stack = alloc::vec![0u8; NEW_STACK_SIZE];
+let new_stack_top = new_stack.as_ptr() as u64 + NEW_STACK_SIZE as u64;
+core::mem::forget(new_stack);  // Leak -- stack must never be freed
+
+unsafe {
+    core::arch::asm!(
+        "mov rsp, {stack}",
+        "call {entry}",
+        stack = in(reg) new_stack_top,
+        entry = in(reg) post_stack_switch as *const (),
+        options(noreturn)
+    );
+}
+```
+
+The `mem::forget()` is essential -- if the Vec were dropped, the stack memory would
+be freed while still in active use.
 
 ---
 
 ## Environment Variables
 
-These are **build-time** environment variables, read by `env!()` or `option_env!()`
-macros during compilation:
+Build-time environment variables read by `env!()` or `option_env!()` during
+compilation:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDIO_API_KEY` | (none) | Baked-in Anthropic API key. If set, skips OAuth device flow at boot. For development only -- do not bake production keys. |
-| `CLAUDIO_LOG_LEVEL` | `info` | Log level filter: `trace`, `debug`, `info`, `warn`, `error`. Currently not wired up (all levels enabled). |
-| `CLAUDIO_QEMU` | `0` | Set to `1` to compile with QEMU-friendly defaults (VirtIO device assumptions, SLIRP network defaults). |
+| `CLAUDIO_API_KEY` | (none) | Baked-in Anthropic API key. Skips OAuth device flow at boot. **Dev only** -- do not bake production keys. |
+| `CLAUDIO_LOG_LEVEL` | `info` | Log level filter: `trace`, `debug`, `info`, `warn`, `error`. (Not yet wired up -- all levels currently enabled.) |
+| `CLAUDIO_QEMU` | `0` | Set to `1` for QEMU-friendly defaults (VirtIO assumptions, SLIRP network defaults). |
 
 Example:
 
 ```bash
-# Build with a dev API key baked in
+# Build with a dev API key
 CLAUDIO_API_KEY=sk-ant-api03-xxx cargo build
+
+# Windows PowerShell
+$env:CLAUDIO_API_KEY = "sk-ant-api03-xxx"
+cargo build
 ```
 
 ---
@@ -335,62 +471,68 @@ CLAUDIO_API_KEY=sk-ant-api03-xxx cargo build
 
 ```
 J:\baremetal claude\
-|-- CLAUDE.md                  Project instructions and design doc
-|-- README.md                  User-facing README
-|-- Cargo.toml                 Workspace root
-|-- rust-toolchain.toml        Nightly Rust pinning
+|-- CLAUDE.md                  Project design document and architecture spec
+|-- README.md                  User-facing README with status and build guide
+|-- Cargo.toml                 Workspace root (shared dependency versions)
+|-- rust-toolchain.toml        Nightly Rust + components + targets
 |-- .cargo/
-|   `-- config.toml            Sets default target to x86_64-unknown-none
+|   +-- config.toml            Default target, build-std, QEMU runner
 |
 |-- kernel/
 |   |-- Cargo.toml             Binary crate: claudio-os
-|   `-- src/
-|       |-- main.rs            Entry point (kernel_main, panic handler)
-|       |-- gdt.rs             GDT + TSS
-|       |-- memory.rs          Physical frame allocator + heap
-|       |-- interrupts.rs      IDT + PIC + ISR handlers
-|       |-- keyboard.rs        Async PS/2 keyboard input
-|       |-- serial.rs          16550 UART + macros
-|       |-- logger.rs          log crate backend
-|       |-- framebuffer.rs     GOP framebuffer state + put_pixel
+|   +-- src/
+|       |-- main.rs            Entry point, boot phases, stack switch, panic
+|       |-- gdt.rs             GDT + TSS (data segment fix, IST stacks)
+|       |-- memory.rs          Frame allocator + heap mapping
+|       |-- interrupts.rs      IDT + APIC disable + PIC ICW + ISR handlers
+|       |-- keyboard.rs        Async PS/2 keyboard (ScancodeStream)
+|       |-- serial.rs          16550 UART + serial_print! macros
+|       |-- logger.rs          log crate backend -> serial
+|       |-- framebuffer.rs     GOP framebuffer (page table walk + put_pixel)
 |       |-- pci.rs             PCI config space enumeration
-|       `-- executor.rs        Async task executor
+|       +-- executor.rs        Cooperative async task executor
 |
 |-- crates/
-|   |-- terminal/              Framebuffer terminal renderer
-|   |   `-- src/
-|   |       |-- lib.rs         DrawTarget trait, LayoutNode types
-|   |       |-- render.rs      Font rendering (noto-sans-mono-bitmap)
-|   |       |-- pane.rs        Terminal pane (cell grid, VTE, cursor)
-|   |       `-- layout.rs      Binary split tree, focus management
+|   |-- terminal/              Split-pane framebuffer terminal renderer
+|   |   +-- src/
+|   |       |-- lib.rs         DrawTarget trait, LayoutNode, Viewport
+|   |       |-- render.rs      noto-sans-mono-bitmap font rendering, Color
+|   |       |-- pane.rs        Terminal pane (cells, VTE, cursor, SGR)
+|   |       +-- layout.rs      Binary split tree, focus, resize
 |   |
-|   |-- net/                   Networking stack
-|   |   `-- src/
-|   |       |-- lib.rs         NicDriver trait, high-level init
-|   |       |-- nic.rs         VirtIO-net driver
-|   |       |-- stack.rs       smoltcp interface wrapper
-|   |       |-- tls.rs         TLS stream
+|   |-- net/                   Networking stack (Phase 2)
+|   |   +-- src/
+|   |       |-- lib.rs         NicDriver trait, init + DHCP
+|   |       |-- nic.rs         VirtIO-net driver (757 lines)
+|   |       |-- stack.rs       smoltcp Device adapter, NetworkStack
 |   |       |-- dns.rs         DNS resolver
-|   |       `-- http.rs        HTTP/1.1 client + SSE parser
+|   |       |-- tls.rs         TLS stream (TCP helpers + stub)
+|   |       +-- http.rs        HTTP/1.1 + chunked + SSE parser
 |   |
-|   |-- api-client/            Anthropic Messages API client
-|   |   `-- src/
-|   |       |-- lib.rs         AnthropicClient struct
-|   |       |-- messages.rs    Message types (planned)
-|   |       |-- streaming.rs   SSE stream consumer (planned)
-|   |       `-- tools.rs       Tool use protocol (planned)
+|   |-- api-client/            Anthropic Messages API client (Phase 3)
+|   |   +-- src/
+|   |       |-- lib.rs         AnthropicClient, auth header
+|   |       |-- messages.rs    (stub)
+|   |       |-- streaming.rs   (stub)
+|   |       +-- tools.rs       (stub)
 |   |
-|   |-- auth/                  OAuth 2.0 device flow
-|   |   `-- src/
-|   |       `-- lib.rs         Credentials, DeviceFlowPrompt
+|   |-- auth/                  OAuth 2.0 device flow (Phase 3)
+|   |   +-- src/lib.rs         Credentials, DeviceFlowPrompt
 |   |
-|   |-- agent/                 Agent session lifecycle (planned)
-|   |-- fs-persist/            FAT32 persistence (planned)
+|   |-- agent/                 Agent session lifecycle (Phase 4, empty)
+|   +-- fs-persist/            FAT32 persistence (Phase 3, empty)
 |
 |-- tools/
-|   `-- image-builder/         Host-side disk image builder
-|       |-- Cargo.toml
-|       `-- src/main.rs
+|   +-- image-builder/         Host-side disk image builder
+|       |-- Cargo.toml         Depends on bootloader 0.11
+|       +-- src/main.rs        UefiBoot + BiosBoot image creation
 |
-`-- docs/                      This documentation
++-- docs/                      This documentation
+    |-- architecture.md        System overview, boot sequence, memory map
+    |-- kernel-internals.md    GDT, memory, PIC, serial, PCI
+    |-- terminal.md            Font rendering, VTE, split panes, colors
+    |-- networking.md          VirtIO-net, smoltcp, DNS, TLS, HTTP
+    |-- api-protocol.md        Messages API, SSE, OAuth, tokens
+    |-- building.md            This file
+    +-- contributing.md        Dev workflow, conventions, testing
 ```
