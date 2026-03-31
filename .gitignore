@@ -1,0 +1,12 @@
+/target
+**/*.img
+**/*.iso
+*.swp
+*.swo
+.DS_Store
+*.tar
+*.log
+serial_output*.txt
+serial_out*.txt
+qemu_debug.log
+tools/image-builder/target/

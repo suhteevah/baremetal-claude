@@ -1,0 +1,10 @@
+[package]
+name = "claudio-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vte = { workspace = true }
+noto-sans-mono-bitmap = { workspace = true }
+log = { workspace = true }
+spin = { workspace = true }

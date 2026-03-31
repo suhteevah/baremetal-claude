@@ -1,0 +1,10 @@
+[package]
+name = "claudio-image-builder"
+version = "0.1.0"
+edition = "2021"
+
+# This is a HOST-side tool (runs on your dev machine, not bare-metal).
+# It takes the compiled kernel binary and wraps it in a bootable UEFI disk image.
+
+[dependencies]
+bootloader = "0.11"

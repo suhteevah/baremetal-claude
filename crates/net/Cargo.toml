@@ -1,0 +1,11 @@
+[package]
+name = "claudio-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+smoltcp = { workspace = true }
+embedded-tls = { workspace = true }
+log = { workspace = true }
+spin = { workspace = true }
+x86_64 = { workspace = true }

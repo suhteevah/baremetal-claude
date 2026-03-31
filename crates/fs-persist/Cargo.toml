@@ -1,0 +1,10 @@
+[package]
+name = "claudio-fs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# fatfs = { workspace = true }  # TODO: Phase 3 — fatfs 0.3.6 needs core_io, use git fork later
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

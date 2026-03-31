@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "crates/terminal",
+    # Phase 2+ crates (uncomment when ready):
+    # "crates/net",
+    # "crates/api-client",
+    # "crates/auth",
+    # "crates/agent",
+    # "crates/fs-persist",
+]
+exclude = [
+    "tools/image-builder",  # Host-side tool, must NOT inherit x86_64-unknown-none target
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Matt Gates <ridgecellrepair@gmail.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/suhteevah/claudio-os"
+
+[workspace.dependencies]
+# Kernel foundations
+x86_64 = "0.15"
+bootloader_api = "0.11"
+bootloader = "0.11"
+linked_list_allocator = "0.10"
+spin = "0.9"
+log = "0.4"
+conquer-once = { version = "0.4", default-features = false }
+
+# Networking
+smoltcp = { version = "0.12", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "proto-dns",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dhcpv4",
+    "socket-dns",
+    "alloc",
+] }
+
+# TLS / Crypto
+embedded-tls = { version = "0.17", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["no_std"] }
+
+# Terminal
+vte = { version = "0.15", default-features = false }
+noto-sans-mono-bitmap = "0.3"
+pc-keyboard = "0.8"
+
+# Filesystem
+fatfs = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# Serialization (no_std JSON)
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true
