@@ -70,8 +70,9 @@ impl<'a> TxToken for SmoltcpTxToken<'a> {
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
 
+        log::trace!("[net] TX: sending {} byte Ethernet frame to NIC", len);
         if let Err(e) = self.nic.transmit(&buf) {
-            log::warn!("[net] TX failed: {:?}", e);
+            log::warn!("[net] TX failed: {:?} (frame len: {})", e, len);
         }
 
         result

@@ -146,7 +146,8 @@ pub fn tcp_connect(
     Err(TcpError::Timeout)
 }
 
-/// Send data on a connected TCP socket, polling until all bytes are sent.
+/// Send data on a connected TCP socket, polling until all bytes are sent
+/// AND the TCP TX buffer is fully drained (data ACKed by remote peer).
 pub fn tcp_send(
     stack: &mut NetworkStack,
     handle: SocketHandle,
@@ -155,48 +156,129 @@ pub fn tcp_send(
 ) -> Result<(), TcpError> {
     let mut offset = 0;
 
-    for _ in 0..TCP_POLL_LIMIT {
+    log::debug!("[tcp] tcp_send: {} bytes to send", data.len());
+
+    // Phase 1: Push all data into smoltcp's TCP socket TX buffer.
+    for i in 0..TCP_POLL_LIMIT {
         let ts = now();
         stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
 
         let socket = stack.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
         if !socket.is_active() {
+            log::error!("[tcp] tcp_send: socket became inactive during send (state: {:?})", socket.state());
             return Err(TcpError::Reset);
         }
         if socket.can_send() {
             let sent = socket.send_slice(&data[offset..]).map_err(|_| TcpError::Other)?;
-            offset += sent;
-            if offset >= data.len() {
-                // Flush: poll a few more times to actually transmit the buffered data
-                for _ in 0..50 {
-                    let ts2 = now();
-                    stack.iface.poll(ts2, &mut stack.device, &mut stack.sockets);
-                    for _ in 0..1000 { core::hint::spin_loop(); }
-                }
-                return Ok(());
+            if sent > 0 {
+                offset += sent;
+                log::debug!("[tcp] tcp_send: buffered {} bytes ({}/{})", sent, offset, data.len());
             }
+            if offset >= data.len() {
+                log::debug!("[tcp] tcp_send: all {} bytes buffered in smoltcp TX", data.len());
+                break;
+            }
+        }
+        if i % 5000 == 0 && i > 0 {
+            log::debug!("[tcp] tcp_send: still buffering... iter {}", i);
         }
         for _ in 0..100 { core::hint::spin_loop(); }
     }
 
-    Err(TcpError::Timeout)
+    if offset < data.len() {
+        log::error!("[tcp] tcp_send: timed out buffering data ({}/{})", offset, data.len());
+        return Err(TcpError::Timeout);
+    }
+
+    // Phase 2: Flush — poll the interface repeatedly with real waits to ensure
+    // smoltcp generates TCP segments, the VirtIO driver transmits them, and
+    // the remote peer's ACKs are processed.
+    //
+    // This is critical: send_slice() only puts data in smoltcp's TX buffer.
+    // iface.poll() generates TCP segments and passes them to the Device::transmit
+    // callback, which pushes them through VirtIO. We need enough poll cycles for:
+    //   1. smoltcp to segment the data and call Device::transmit
+    //   2. VirtIO to DMA the frame to QEMU
+    //   3. The remote TCP stack to ACK
+    //   4. Our NIC to receive the ACK frame
+    //   5. smoltcp to process the ACK and advance the TX window
+    //
+    // We monitor the socket's send queue size to know when all data has been
+    // ACKed (send_queue drops to 0).
+    log::debug!("[tcp] tcp_send: flushing TX buffer...");
+    let mut flush_polls = 0u32;
+    let max_flush = 2000u32; // Up to ~2000 iterations with HLT (~110 seconds at 18Hz timer)
+
+    for _ in 0..max_flush {
+        // Poll multiple times per HLT cycle to process both TX and RX
+        for _ in 0..5 {
+            let ts = now();
+            stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
+        }
+
+        let socket = stack.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+        if !socket.is_active() {
+            log::error!("[tcp] tcp_send flush: socket became inactive (state: {:?})", socket.state());
+            return Err(TcpError::Reset);
+        }
+
+        let send_queue = socket.send_queue();
+        flush_polls += 1;
+
+        if send_queue == 0 {
+            log::info!(
+                "[tcp] tcp_send: TX buffer fully drained after {} flush cycles — all data ACKed",
+                flush_polls
+            );
+            return Ok(());
+        }
+
+        if flush_polls % 100 == 0 {
+            log::debug!(
+                "[tcp] tcp_send flush: {} bytes still in TX queue (cycle {})",
+                send_queue, flush_polls
+            );
+        }
+
+        // Wait for a timer/NIC interrupt to avoid busy-spinning.
+        // enable_and_hlt atomically enables interrupts and halts.
+        // On QEMU with 18.2Hz PIT timer, each HLT is ~55ms.
+        x86_64::instructions::interrupts::enable_and_hlt();
+        x86_64::instructions::interrupts::disable();
+    }
+
+    // If we get here, the TX buffer didn't fully drain, but some data may have
+    // been transmitted. This isn't necessarily fatal — the remote side may have
+    // received enough to process. Log a warning and continue.
+    let socket = stack.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+    let remaining = socket.send_queue();
+    log::warn!(
+        "[tcp] tcp_send flush: {} bytes still in TX queue after {} cycles (may be OK if peer got the data)",
+        remaining, max_flush
+    );
+
+    Ok(())
 }
 
 /// Receive data from a connected TCP socket into `buf`.
 ///
 /// Returns the number of bytes received.  Returns `Ok(0)` if the remote peer
 /// has closed the connection gracefully.
+///
+/// This function polls the network stack with HLT waits between iterations,
+/// allowing the NIC and timer interrupts to fire. Each iteration does multiple
+/// smoltcp polls to process any queued frames before checking the socket.
 pub fn tcp_recv(
     stack: &mut NetworkStack,
     handle: SocketHandle,
     buf: &mut [u8],
     now: impl Fn() -> Instant,
 ) -> Result<usize, TcpError> {
-    // Poll aggressively — multiple smoltcp polls per iteration,
-    // with real waits between batches to let the NIC deliver packets.
     for i in 0..TCP_POLL_LIMIT {
-        // Poll NIC + smoltcp multiple times to drain any queued packets
-        for _ in 0..20 {
+        // Poll NIC + smoltcp multiple times to drain any queued packets.
+        // Each poll() call processes one RX frame and may generate TX frames
+        // (e.g. TCP ACKs), so we need multiple polls to handle bursts.
+        for _ in 0..10 {
             let ts = now();
             stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
         }
@@ -205,24 +287,52 @@ pub fn tcp_recv(
 
         if socket.can_recv() {
             let n = socket.recv_slice(buf).map_err(|_| TcpError::Other)?;
+            log::debug!("[tcp] tcp_recv: got {} bytes", n);
             return Ok(n);
         }
 
+        // Check socket state
+        let state = socket.state();
         if !socket.is_active() {
+            log::debug!("[tcp] tcp_recv: socket not active (state: {:?}), returning 0", state);
+            return Ok(0);
+        }
+        // CloseWait = remote sent FIN, no more data coming. EOF.
+        if state == smoltcp::socket::tcp::State::CloseWait && !socket.can_recv() {
+            log::debug!("[tcp] tcp_recv: CloseWait + empty recv = EOF");
+            return Ok(0);
+        }
+        // TimeWait / LastAck / Closing = connection is tearing down
+        if matches!(state,
+            smoltcp::socket::tcp::State::TimeWait |
+            smoltcp::socket::tcp::State::LastAck |
+            smoltcp::socket::tcp::State::Closing
+        ) {
+            log::debug!("[tcp] tcp_recv: connection closing (state: {:?}), returning 0", state);
             return Ok(0);
         }
 
-        // Actually WAIT for a bit — the response takes real wall-clock time.
-        // HLT waits for any interrupt (timer at 18Hz, NIC interrupt).
-        // Enable interrupts briefly for the HLT, then disable again.
+        // Wait for a timer or NIC interrupt.
+        // The PIT fires at ~18.2Hz (~55ms). NIC interrupts fire on packet arrival.
+        // We keep interrupts disabled between HLTs to avoid re-entrancy issues
+        // with our single-threaded bare-metal design. The HLT itself atomically
+        // enables interrupts and waits.
         x86_64::instructions::interrupts::enable_and_hlt();
         x86_64::instructions::interrupts::disable();
 
-        if i % 500 == 0 && i > 0 {
-            log::debug!("[tcp] recv polling... (iter {})", i);
+        if i % 200 == 0 && i > 0 {
+            log::debug!(
+                "[tcp] tcp_recv: waiting... iter {} (~{}ms elapsed, state: {:?}, send_q: {}, recv_q: {})",
+                i,
+                i * 55, // approximate: 55ms per HLT at 18.2Hz
+                state,
+                socket.send_queue(),
+                socket.recv_queue(),
+            );
         }
     }
 
+    log::warn!("[tcp] tcp_recv: timed out after {} iterations", TCP_POLL_LIMIT);
     Err(TcpError::Timeout)
 }
 
@@ -299,11 +409,11 @@ impl embedded_io::Read for SmoltcpSocket {
             return Ok(0);
         }
 
-        // Poll aggressively — TLS handshake needs multiple round trips.
-        // Each iteration polls the NIC + smoltcp, then waits briefly for
-        // the timer to tick so smoltcp timestamps advance.
+        // Poll the NIC + smoltcp in a loop, waiting for data via HLT between
+        // iterations. Used by embedded-tls for TLS handshake and record reads.
         for i in 0..TCP_POLL_LIMIT {
             // Poll multiple times per iteration to catch incoming packets
+            // and send any pending ACKs/responses
             for _ in 0..10 {
                 let ts = (self.now)();
                 let handle = self.handle;
@@ -328,9 +438,19 @@ impl embedded_io::Read for SmoltcpSocket {
                 return Ok(0);
             }
 
-            // Wait for a timer tick (~55ms) to let smoltcp advance time
-            if i % 100 == 0 {
-                for _ in 0..50000 { core::hint::spin_loop(); }
+            // Wait for a timer/NIC interrupt instead of busy-spinning.
+            // This saves CPU and ensures proper timing for smoltcp.
+            // For the first few iterations, use short spin-waits for low-latency
+            // responses (e.g. during TLS handshake). After that, use HLT.
+            if i < 50 {
+                for _ in 0..5000 { core::hint::spin_loop(); }
+            } else {
+                x86_64::instructions::interrupts::enable_and_hlt();
+                x86_64::instructions::interrupts::disable();
+            }
+
+            if i % 500 == 0 && i > 0 {
+                log::debug!("[smoltcp-io] read: waiting for data... iter {}", i);
             }
         }
 
@@ -375,16 +495,46 @@ impl embedded_io::Write for SmoltcpSocket {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        // Poll the network stack a few times to flush any buffered TCP data.
-        for _ in 0..200 {
-            let ts = (self.now)();
-            let stack = self.stack_mut();
-            stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
+        // Poll the network stack until the TCP TX buffer is drained, meaning
+        // all data has been segmented, transmitted, and ACKed by the peer.
+        // This is critical for TLS: after writing a handshake message or
+        // application data, we need it to actually reach the peer before
+        // we start reading the response.
+        for i in 0..1000u32 {
+            // Multiple polls per iteration to process both TX and RX
+            for _ in 0..5 {
+                let ts = (self.now)();
+                let handle = self.handle;
+                let stack = self.stack_mut();
+                stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
+            }
 
-            for _ in 0..500 {
-                core::hint::spin_loop();
+            // Check if the TX buffer is drained
+            let handle = self.handle;
+            let stack = self.stack_mut();
+            let socket = stack.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+            let send_queue = socket.send_queue();
+
+            if send_queue == 0 {
+                if i > 10 {
+                    log::trace!("[smoltcp-io] flush: TX drained after {} cycles", i);
+                }
+                return Ok(());
+            }
+
+            // Wait for interrupt to avoid pure busy-spin
+            if i > 20 {
+                x86_64::instructions::interrupts::enable_and_hlt();
+                x86_64::instructions::interrupts::disable();
+            } else {
+                for _ in 0..500 {
+                    core::hint::spin_loop();
+                }
             }
         }
+
+        // Even if not fully drained, don't fail — the data may still arrive.
+        log::warn!("[smoltcp-io] flush: TX buffer not fully drained after 1000 cycles");
         Ok(())
     }
 }

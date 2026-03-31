@@ -640,10 +640,14 @@ impl VirtioNet {
     }
 
     /// Reclaim completed TX descriptors so they can be reused.
-    fn reclaim_tx(&mut self) {
+    /// Returns the number of descriptors reclaimed.
+    fn reclaim_tx(&mut self) -> usize {
+        let mut count = 0;
         while let Some((desc_idx, _len)) = self.tx_queue.pop_used() {
             self.tx_queue.free_desc(desc_idx);
+            count += 1;
         }
+        count
     }
 
     /// Notify the device that new buffers are available on a queue.
@@ -655,9 +659,15 @@ impl VirtioNet {
 impl NicDriver for VirtioNet {
     fn transmit(&mut self, frame: &[u8]) -> Result<(), NicError> {
         // Reclaim any completed TX descriptors first.
-        self.reclaim_tx();
+        let reclaimed = self.reclaim_tx();
+        if reclaimed > 0 {
+            log::trace!("[virtio-net] TX: reclaimed {} descriptors", reclaimed);
+        }
 
-        let desc_idx = self.tx_queue.alloc_desc().ok_or(NicError::BufferFull)?;
+        let desc_idx = self.tx_queue.alloc_desc().ok_or_else(|| {
+            log::warn!("[virtio-net] TX: no free descriptors (all {} in use)", self.tx_queue.queue_size);
+            NicError::BufferFull
+        })?;
 
         // Build the buffer: VirtIO-net header (10 bytes) + Ethernet frame.
         let buf = &mut *self.tx_queue.buffers[desc_idx as usize];
@@ -693,6 +703,11 @@ impl NicDriver for VirtioNet {
         self.tx_queue.push_avail(desc_idx);
         self.notify_queue(1); // queue 1 = TX
 
+        log::trace!(
+            "[virtio-net] TX: queued {} byte frame (desc {}, phys {:#x}, free: {})",
+            frame.len(), desc_idx, buf_phys, self.tx_queue.num_free
+        );
+
         Ok(())
     }
 
@@ -708,6 +723,7 @@ impl NicDriver for VirtioNet {
         // The device wrote VirtIO-net header + Ethernet frame into the buffer.
         if total_len <= VIRTIO_NET_HDR_SIZE {
             // Runt or header-only -- recycle the buffer and ignore.
+            log::trace!("[virtio-net] RX: runt frame ({} bytes), recycling", total_len);
             self.recycle_rx_desc(desc_idx);
             return Ok(None);
         }
@@ -717,6 +733,7 @@ impl NicDriver for VirtioNet {
 
         if frame_len > out.len() {
             // Caller's buffer is too small -- drop the frame.
+            log::warn!("[virtio-net] RX: frame too large ({} > {}), dropping", frame_len, out.len());
             self.recycle_rx_desc(desc_idx);
             return Err(NicError::BufferFull);
         }
@@ -726,6 +743,11 @@ impl NicDriver for VirtioNet {
 
         // Recycle the descriptor back into the RX ring.
         self.recycle_rx_desc(desc_idx);
+
+        log::trace!(
+            "[virtio-net] RX: received {} byte frame (desc {})",
+            frame_len, desc_idx
+        );
 
         Ok(Some(frame_len))
     }

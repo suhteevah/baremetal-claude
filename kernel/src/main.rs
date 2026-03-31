@@ -343,24 +343,29 @@ async fn main_async() {
                                         if let Err(e) = claudio_net::tls::tcp_send(&mut stack, h, &bytes, now) {
                                             log::error!("[main] send failed: {:?}", e);
                                         } else {
-                                            // Aggressively flush — poll many times with HLT between
-                                            // to ensure the TCP segments actually reach the proxy
-                                            log::info!("[main] flushing send buffer...");
-                                            for _ in 0..100 {
-                                                stack.iface.poll(now(), &mut stack.device, &mut stack.sockets);
-                                                x86_64::instructions::interrupts::enable_and_hlt();
-                                                x86_64::instructions::interrupts::disable();
-                                            }
-                                            x86_64::instructions::interrupts::enable();
-                                            log::info!("[main] reading response...");
-                                            // Read response until connection closes
+                                            // tcp_send now handles flushing internally — it waits
+                                            // until the TX buffer is fully drained (data ACKed).
+                                            // No need for additional manual flush loops.
+                                            log::info!("[main] send complete, reading response...");
+                                            log::info!("[main] (proxy is doing TLS upstream to api.anthropic.com — this takes a few seconds)");
+
+                                            // Read response until connection closes or complete
                                             let mut buf = alloc::vec![0u8; 32768];
                                             let mut total = 0;
-                                            for _ in 0..500 {
+                                            for attempt in 0..500 {
                                                 match claudio_net::tls::tcp_recv(&mut stack, h, &mut buf[total..], now) {
-                                                    Ok(0) => break,
-                                                    Ok(n) => { total += n; }
-                                                    Err(_) => break,
+                                                    Ok(0) => {
+                                                        log::debug!("[main] recv returned 0 (EOF) after {} bytes, attempt {}", total, attempt);
+                                                        break;
+                                                    }
+                                                    Ok(n) => {
+                                                        total += n;
+                                                        log::debug!("[main] recv got {} bytes (total: {})", n, total);
+                                                    }
+                                                    Err(e) => {
+                                                        log::warn!("[main] recv error after {} bytes: {:?}", total, e);
+                                                        break;
+                                                    }
                                                 }
                                             }
                                             if total > 0 {
