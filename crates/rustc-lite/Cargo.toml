@@ -1,0 +1,12 @@
+[package]
+name = "claudio-rustc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cranelift-codegen = { version = "0.116", default-features = false, features = ["core", "x86"] }
+cranelift-frontend = { version = "0.116", default-features = false, features = ["core"] }
+rustc-hash = { version = "2.1", default-features = false }
+indexmap = { version = "2", default-features = false }
+log = { workspace = true }
+

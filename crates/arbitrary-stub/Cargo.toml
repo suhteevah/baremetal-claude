@@ -1,0 +1,4 @@
+[package]
+name = "arbitrary"
+version = "1.4.2"
+edition = "2021"

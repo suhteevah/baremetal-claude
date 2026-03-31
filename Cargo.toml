@@ -12,6 +12,8 @@ members = [
     "crates/wraith-dom",
     "crates/wraith-render",
     "crates/editor",
+    "crates/rustc-lite",
+    "crates/python-lite",
 ]
 exclude = [
     "tools/image-builder",  # Host-side tool, must NOT inherit x86_64-unknown-none target
@@ -74,3 +76,13 @@ lto = true
 codegen-units = 1
 opt-level = "z"
 strip = true
+
+
+
+
+[patch.crates-io]
+cranelift-codegen = { path = "crates/cranelift-codegen-nostd" }
+cranelift-codegen-shared = { path = "crates/cranelift-codegen-shared-nostd" }
+cranelift-control = { path = "crates/cranelift-control-nostd" }
+arbitrary = { path = "crates/arbitrary-stub" }
+rustc-hash = { path = "crates/rustc-hash-nostd" }

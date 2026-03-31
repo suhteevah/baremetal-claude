@@ -13,7 +13,7 @@ use crate::tokenizer::Token;
 // AST types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// Expression statement (including bare function calls).
     Expr(Expr),
@@ -60,13 +60,13 @@ pub enum Stmt {
     Continue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AssignTarget {
     Name(String),
     Index { obj: Expr, index: Expr },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(i64),
     Float(f64),
@@ -108,7 +108,7 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
     Add,
     Sub,
@@ -119,13 +119,13 @@ pub enum BinOp {
     Pow,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CmpOp {
     Eq,
     NotEq,
@@ -135,7 +135,7 @@ pub enum CmpOp {
     GtEq,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BoolOpKind {
     And,
     Or,

@@ -250,6 +250,26 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "execute_python".into(),
+            description: "Execute Python-lite code and return the output. Supports variables, \
+                math (+, -, *, /, //, %, **), strings, lists, if/elif/else, for/while loops, \
+                def functions, and builtins: print(), len(), range(), str(), int(), float(), \
+                type(), abs(), min(), max(), sum(), sorted(), reversed(), enumerate(). \
+                String methods: upper(), lower(), strip(), split(), join(), replace(), find(), \
+                startswith(), endswith(). List methods: append(), pop(), insert(), extend(), \
+                reverse(). Use print() to produce output.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python-lite source code to execute"
+                    }
+                },
+                "required": ["code"]
+            }),
+        },
+        ToolSpec {
             name: "compile_rust".into(),
             description: "Compile Rust source code via the remote build server. \
                 Sends the source to the host-side build server which runs rustc \
@@ -301,6 +321,7 @@ pub fn execute_tool(call: &ToolCall) -> ToolResult {
         "file_write" => execute_file_write(call),
         "list_directory" => execute_list_dir(call),
         "execute_command" => execute_command(call),
+        "execute_python" => execute_python(call),
         "compile_rust" => execute_compile_rust(call),
         _ => {
             log::warn!("[tools] unknown tool: {}", call.name);
@@ -438,6 +459,48 @@ fn execute_command(call: &ToolCall) -> ToolResult {
             command
         ),
         is_error: true,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// execute_python — python-lite interpreter
+// ---------------------------------------------------------------------------
+
+fn execute_python(call: &ToolCall) -> ToolResult {
+    let code = match get_string_field(&call.input, "code") {
+        Ok(c) => c,
+        Err(e) => {
+            return ToolResult {
+                tool_use_id: call.id.clone(),
+                content: e,
+                is_error: true,
+            };
+        }
+    };
+
+    log::info!("[tools] execute_python: {} bytes of code", code.len());
+
+    match python_lite::execute(code) {
+        Ok(output) => {
+            let content = if output.is_empty() {
+                String::from("(no output)")
+            } else {
+                output
+            };
+            ToolResult {
+                tool_use_id: call.id.clone(),
+                content,
+                is_error: false,
+            }
+        }
+        Err(e) => {
+            log::warn!("[tools] python execution error: {}", e);
+            ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("PythonError: {}", e),
+                is_error: true,
+            }
+        }
     }
 }
 

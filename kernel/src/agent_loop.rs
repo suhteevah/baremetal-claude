@@ -343,7 +343,7 @@ pub async fn run_agent(
 ) {
     log::info!("[agent_loop] starting interactive agent loop");
     log::info!("[agent_loop] type a message and press Enter to chat with Claude");
-    log::info!("[agent_loop] tools: file_read, file_write, list_directory, execute_command, compile_rust");
+    log::info!("[agent_loop] tools: file_read, file_write, list_directory, execute_command, compile_rust, execute_python");
     log::info!("[agent_loop] commands: /quit, /clear, /tokens");
 
     // Create a session with id=0, pane=0 (single-agent for now).

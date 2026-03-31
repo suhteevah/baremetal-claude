@@ -1,0 +1,9 @@
+[package]
+name = "rustc-hash"
+version = "2.1.2"
+edition = "2021"
+
+[features]
+default = []
+std = []
+nightly = []

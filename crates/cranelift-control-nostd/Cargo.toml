@@ -1,0 +1,11 @@
+[package]
+name = "cranelift-control"
+version = "0.116.1"
+edition = "2021"
+
+[dependencies]
+arbitrary = { version = "1", optional = true }
+
+[features]
+default = []
+chaos = ["arbitrary"]
