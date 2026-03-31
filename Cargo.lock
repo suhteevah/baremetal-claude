@@ -871,6 +871,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "wraith-dom"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "wraith-render"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "wraith-dom",
+]
+
+[[package]]
+name = "wraith-transport"
+version = "0.1.0"
+dependencies = [
+ "claudio-net",
+ "log",
+ "smoltcp",
+]
+
+[[package]]
 name = "x86_64"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

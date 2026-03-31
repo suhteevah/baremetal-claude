@@ -28,7 +28,7 @@ pub fn init() {
     *KEYBOARD_DECODER.lock() = Some(Keyboard::new(
         ScancodeSet1::new(),
         layouts::Us104Key,
-        HandleControl::Ignore,
+        HandleControl::MapLettersToUnicode,
     ));
     log::info!("[kbd] keyboard decoder initialized");
 }

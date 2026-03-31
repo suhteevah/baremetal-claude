@@ -182,8 +182,8 @@ pub async fn run_dashboard(
                         );
                     }
                     PrefixState::Normal => {
-                        // Ctrl+B detection: pc-keyboard with HandleControl::Ignore
-                        // delivers Ctrl+letter as the raw control code. Ctrl+B = 0x02.
+                        // Ctrl+B detection: pc-keyboard with HandleControl::MapLettersToUnicode
+                        // delivers Ctrl+letter as the Unicode control code. Ctrl+B = 0x02.
                         if c == '\x02' {
                             prefix_state = PrefixState::AwaitingCommand;
                             log::debug!("[dashboard] prefix key (Ctrl+B) pressed");
@@ -276,14 +276,14 @@ fn handle_prefix_command(
         'n' => {
             log::info!("[dashboard] focus next");
             layout.focus_next();
-            dashboard.focus_next();
+            sync_dashboard_focus(layout, dashboard);
         }
 
         // Focus previous pane: Ctrl+B then p
         'p' => {
             log::info!("[dashboard] focus prev");
             layout.focus_prev();
-            dashboard.focus_prev();
+            sync_dashboard_focus(layout, dashboard);
         }
 
         // New agent session: Ctrl+B then c

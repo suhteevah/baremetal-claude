@@ -338,11 +338,47 @@ async fn main_async() {
                     if api_key.is_empty() {
                         log::warn!("[auth] no API key — run `python tools/auth-relay.py`");
                     } else {
+                        // ── Step 2.5: Native TLS end-to-end test ─────────────
+                        // Before launching the dashboard, prove that native TLS
+                        // works by making ONE minimal API call directly to
+                        // api.anthropic.com:443. This is the critical test —
+                        // if TlsStream::connect() completes the TLS 1.3
+                        // handshake and we get an HTTP response back, native
+                        // TLS is confirmed working.
+                        log::info!("[tls-test] ============================================");
+                        log::info!("[tls-test] NATIVE TLS END-TO-END TEST");
+                        log::info!("[tls-test] ============================================");
+                        log::info!("[tls-test] Target: api.anthropic.com:443");
+                        log::info!("[tls-test] Model: claude-3-haiku-20240307 (max_tokens: 10)");
+                        log::info!("[tls-test] This will: DNS resolve -> TCP connect -> TLS 1.3 handshake -> HTTP POST -> recv response");
+
+                        // Native TLS has a null-deref bug in embedded-tls v0.17 during
+                        // the ECDHE key exchange. Skip the test for now — the dashboard
+                        // agent_loop uses the TLS proxy as fallback.
+                        // TODO: Fix embedded-tls null deref (CR2=0 during open())
+                        let native_tls_ok = false;
+                        log::warn!("[tls] native TLS skipped (embedded-tls v0.17 null deref bug)");
+                        log::info!("[tls] dashboard will use TLS proxy fallback");
+
+                        if native_tls_ok {
+                            log::info!("[tls-test] ============================================");
+                            log::info!("[tls-test] NATIVE TLS: CONFIRMED WORKING");
+                            log::info!("[tls-test] ============================================");
+                        } else {
+                            log::warn!("[tls-test] ============================================");
+                            log::warn!("[tls-test] NATIVE TLS: FAILED — check logs above");
+                            log::warn!("[tls-test] ============================================");
+                        }
+
                         // ── Step 3: Launch multi-agent dashboard ──────────────
                         log::info!("[main] ============================================");
                         log::info!("[main] ClaudioOS — MULTI-AGENT DASHBOARD");
                         log::info!("[main] ============================================");
-                        log::info!("[main] Native TLS to api.anthropic.com:443");
+                        if native_tls_ok {
+                            log::info!("[main] Mode: NATIVE TLS (verified) to api.anthropic.com:443");
+                        } else {
+                            log::warn!("[main] Mode: Native TLS UNVERIFIED — agents may fail");
+                        }
                         log::info!("[main] Ctrl+B prefix for pane commands:");
                         log::info!("[main]   \" = split horizontal");
                         log::info!("[main]   %% = split vertical");

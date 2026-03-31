@@ -8,10 +8,9 @@ members = [
     "crates/auth",
     "crates/agent",
     "crates/fs-persist",
-    # Wraith port — WIP, excluded until compilation issues fixed
-    # "crates/wraith-transport",
-    # "crates/wraith-dom",
-    # "crates/wraith-render",
+    "crates/wraith-transport",
+    "crates/wraith-dom",
+    "crates/wraith-render",
 ]
 exclude = [
     "tools/image-builder",  # Host-side tool, must NOT inherit x86_64-unknown-none target

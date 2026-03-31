@@ -838,8 +838,7 @@ impl<'a> Renderer<'a> {
 
     fn render_textarea(&mut self, idx: usize, attrs: &[(String, String)]) {
         let name = attr_get(attrs,"name").cloned().unwrap_or_default();
-        let rows_attr: usize = attrs
-            .get("rows")
+        let rows_attr: usize = attr_get(attrs, "rows")
             .and_then(|s| parse_usize(s))
             .unwrap_or(3);
         let field_width = 30usize.min(self.width.saturating_sub(2));

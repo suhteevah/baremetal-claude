@@ -383,17 +383,18 @@ fn session_to_api_messages(session: &AgentSession) -> Vec<Message> {
 // Network: send request via native TLS
 // ---------------------------------------------------------------------------
 
-/// Send an API request directly to api.anthropic.com via native TLS.
+/// Send an API request via TLS proxy on the host (10.0.2.2:8443).
 ///
-/// Uses `claudio_net::https_request()` which handles DNS + TCP + TLS
-/// handshake + send + recv + close all in one call.
+/// The proxy terminates TLS and forwards to api.anthropic.com.
+/// Run `python tools/tls-proxy.py 8443` on the host.
+///
+/// TODO: Switch to native TLS once embedded-tls null deref is fixed.
 pub fn send_via_https(
     stack: &mut NetworkStack,
     api_key: &str,
     body: &[u8],
     now: fn() -> claudio_net::Instant,
 ) -> Result<Vec<u8>, String> {
-    // Build HTTP request.
     let http_req = claudio_net::http::HttpRequest::post(
         "api.anthropic.com",
         "/v1/messages",
@@ -405,22 +406,33 @@ pub fn send_via_https(
     .header("Connection", "close");
 
     let req_bytes = http_req.to_bytes();
-    log::debug!(
-        "[agent_loop] sending {} byte request via native TLS",
-        req_bytes.len()
-    );
+    log::debug!("[agent] sending {} bytes via TLS proxy", req_bytes.len());
 
-    let seed = RNG_SEED.fetch_add(1, Ordering::Relaxed);
+    let proxy_ip = claudio_net::Ipv4Address::new(10, 0, 2, 2);
+    let local_port = RNG_SEED.fetch_add(1, Ordering::Relaxed) as u16 + 50000;
 
-    claudio_net::https_request(
-        stack,
-        "api.anthropic.com",
-        443,
-        &req_bytes,
-        now,
-        seed,
-    )
-    .map_err(|e| format!("HTTPS request failed: {:?}", e))
+    let h = claudio_net::tls::tcp_connect(stack, proxy_ip, 8443, local_port, now)
+        .map_err(|e| alloc::format!("proxy connect: {:?}. Run: python tools/tls-proxy.py 8443", e))?;
+
+    claudio_net::tls::tcp_send(stack, h, &req_bytes, now)
+        .map_err(|e| { claudio_net::tls::tcp_close(stack, h); alloc::format!("send: {:?}", e) })?;
+
+    // Read response until connection closes
+    let mut buf = alloc::vec![0u8; 32768];
+    let mut total = 0;
+    for _ in 0..500 {
+        match claudio_net::tls::tcp_recv(stack, h, &mut buf[total..], now) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(_) => break,
+        }
+    }
+    claudio_net::tls::tcp_close(stack, h);
+
+    if total == 0 {
+        return Err(alloc::string::String::from("no response from proxy"));
+    }
+    Ok(buf[..total].to_vec())
 }
 
 // ---------------------------------------------------------------------------

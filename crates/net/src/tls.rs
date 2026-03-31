@@ -409,6 +409,8 @@ impl embedded_io::Read for SmoltcpSocket {
             return Ok(0);
         }
 
+        log::trace!("[smoltcp-io] read: requested up to {} bytes", buf.len());
+
         // Poll the NIC + smoltcp in a loop, waiting for data via HLT between
         // iterations. Used by embedded-tls for TLS handshake and record reads.
         for i in 0..TCP_POLL_LIMIT {
@@ -431,10 +433,12 @@ impl embedded_io::Read for SmoltcpSocket {
                 let n = socket
                     .recv_slice(buf)
                     .map_err(|_| embedded_io::ErrorKind::Other)?;
+                log::debug!("[smoltcp-io] read: got {} bytes (requested up to {})", n, buf.len());
                 return Ok(n);
             }
 
             if !socket.is_active() {
+                log::debug!("[smoltcp-io] read: socket not active, returning EOF");
                 return Ok(0);
             }
 
@@ -450,10 +454,11 @@ impl embedded_io::Read for SmoltcpSocket {
             }
 
             if i % 500 == 0 && i > 0 {
-                log::debug!("[smoltcp-io] read: waiting for data... iter {}", i);
+                log::debug!("[smoltcp-io] read: waiting for data... iter {} (~{}ms)", i, i * 55);
             }
         }
 
+        log::error!("[smoltcp-io] read: TIMED OUT after {} iterations", TCP_POLL_LIMIT);
         Err(embedded_io::ErrorKind::TimedOut)
     }
 }
@@ -464,8 +469,10 @@ impl embedded_io::Write for SmoltcpSocket {
             return Ok(0);
         }
 
+        log::trace!("[smoltcp-io] write: {} bytes to send", buf.len());
+
         // Busy-poll until the socket can accept data.
-        for _ in 0..TCP_POLL_LIMIT {
+        for i in 0..TCP_POLL_LIMIT {
             let ts = (self.now)();
             let handle = self.handle;
             let stack = self.stack_mut();
@@ -476,6 +483,7 @@ impl embedded_io::Write for SmoltcpSocket {
                 .get_mut::<smoltcp::socket::tcp::Socket>(handle);
 
             if !socket.is_active() {
+                log::error!("[smoltcp-io] write: socket not active (connection reset)");
                 return Err(embedded_io::ErrorKind::ConnectionReset);
             }
 
@@ -483,7 +491,12 @@ impl embedded_io::Write for SmoltcpSocket {
                 let n = socket
                     .send_slice(buf)
                     .map_err(|_| embedded_io::ErrorKind::Other)?;
+                log::debug!("[smoltcp-io] write: sent {} of {} bytes", n, buf.len());
                 return Ok(n);
+            }
+
+            if i % 1000 == 0 && i > 0 {
+                log::debug!("[smoltcp-io] write: waiting for socket to accept data... iter {}", i);
             }
 
             for _ in 0..100 {
@@ -491,6 +504,7 @@ impl embedded_io::Write for SmoltcpSocket {
             }
         }
 
+        log::error!("[smoltcp-io] write: TIMED OUT after {} iterations", TCP_POLL_LIMIT);
         Err(embedded_io::ErrorKind::TimedOut)
     }
 
@@ -559,18 +573,34 @@ pub struct DevRng {
 
 impl DevRng {
     /// Create a new DevRng seeded from the given value.
-    ///
-    /// For best results, pass a value derived from a hardware timer
-    /// (e.g. PIT tick count or TSC).
     pub fn new(seed: u64) -> Self {
-        // Ensure we never start with zero state (xorshift needs non-zero).
-        let state = if seed == 0 { 0xDEAD_BEEF_CAFE_BABEu64 } else { seed };
+        // Try RDRAND for real hardware entropy, fall back to seed
+        let state = {
+            let mut val: u64 = 0;
+            let got_rdrand = unsafe {
+                core::arch::x86_64::_rdrand64_step(&mut val)
+            };
+            if got_rdrand == 1 && val != 0 {
+                log::debug!("[rng] using RDRAND hardware entropy");
+                val
+            } else {
+                log::debug!("[rng] RDRAND unavailable, using seed {}", seed);
+                if seed == 0 { 0xDEAD_BEEF_CAFE_BABEu64 } else { seed }
+            }
+        };
         Self { state }
     }
 
     /// Advance the internal state and return the next pseudo-random u64.
     fn next(&mut self) -> u64 {
-        // xorshift64* algorithm — fast and reasonable quality for a PRNG.
+        // Try RDRAND first for each call
+        let mut val: u64 = 0;
+        let ok = unsafe { core::arch::x86_64::_rdrand64_step(&mut val) };
+        if ok == 1 && val != 0 {
+            self.state = val;
+            return val;
+        }
+        // Fallback: xorshift64*
         let mut x = self.state;
         x ^= x >> 12;
         x ^= x << 25;
@@ -891,21 +921,29 @@ impl TlsStream {
         let context = TlsContext::new(&tls_config, &mut rng);
 
         log::info!("[tls] starting TLS 1.3 handshake with {}", hostname);
+        log::info!("[tls] handshake: conn.open() about to be called — this sends ClientHello and waits for ServerHello + Finished");
+        log::info!("[tls] handshake: TlsConfig SNI = {}, cipher = AES-128-GCM-SHA256, verify = NoVerify", hostname);
         // Perform the TLS handshake on the heap-allocated TlsConnection.
         // The conn is inside Box<TlsState>, so the handshake crypto
         // (AES-GCM key expansion, ECDHE, etc.) operates on heap memory
         // with proper alignment, not on the stack.
-        if let Err(e) = tls_state.conn.open::<_, NoVerify>(context) {
-            log::error!("[tls] handshake failed: {:?}", e);
-            // Drop tls_state before closing the TCP socket to ensure the
-            // TlsConnection (which holds a SmoltcpSocket with a raw pointer
-            // to the stack) is dropped while the stack is still valid.
-            drop(tls_state);
-            tcp_close(stack, tcp_handle);
-            return Err(TlsError::Tls(e));
-        }
-
-        log::info!("[tls] handshake complete with {}", hostname);
+        match tls_state.conn.open::<_, NoVerify>(context) {
+            Err(e) => {
+                log::error!("[tls] !! HANDSHAKE FAILED: {:?}", e);
+                log::error!("[tls] !! This means the TLS 1.3 negotiation did not complete.");
+                log::error!("[tls] !! Possible causes: timeout waiting for ServerHello, cipher mismatch, protocol error");
+                // Drop tls_state before closing the TCP socket to ensure the
+                // TlsConnection (which holds a SmoltcpSocket with a raw pointer
+                // to the stack) is dropped while the stack is still valid.
+                drop(tls_state);
+                tcp_close(stack, tcp_handle);
+                return Err(TlsError::Tls(e));
+            }
+            Ok(()) => {
+                log::info!("[tls] !! HANDSHAKE SUCCESS with {} — TLS 1.3 negotiated!", hostname);
+                log::info!("[tls] handshake complete — encrypted channel established");
+            }
+        };
 
         Ok(Self {
             tcp_handle,

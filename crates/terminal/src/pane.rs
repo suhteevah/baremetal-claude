@@ -60,6 +60,8 @@ pub struct Pane {
     vte_parser: vte::Parser,
     /// Whether the pane needs to be redrawn.
     dirty: bool,
+    /// Saved cursor position (row, col) for CSI s / CSI u.
+    saved_cursor: Option<(usize, usize)>,
 }
 
 impl Pane {
@@ -86,6 +88,7 @@ impl Pane {
             scroll_offset: 0,
             vte_parser: vte::Parser::new(),
             dirty: true,
+            saved_cursor: None,
         }
     }
 
@@ -156,6 +159,11 @@ impl Pane {
         self.cells = new_cells;
         self.cursor_row = self.cursor_row.min(new_rows - 1);
         self.cursor_col = self.cursor_col.min(new_cols - 1);
+        // Clamp saved cursor to new dimensions.
+        if let Some((ref mut r, ref mut c)) = self.saved_cursor {
+            *r = (*r).min(new_rows - 1);
+            *c = (*c).min(new_cols - 1);
+        }
         self.dirty = true;
     }
 
@@ -501,6 +509,20 @@ impl<'a> vte::Perform for PanePerformer<'a> {
                 }
             }
 
+            // -- Cursor save / restore (DECSC / DECRC via CSI) ---------------
+            's' => {
+                // SCP — Save Cursor Position
+                pane.saved_cursor = Some((pane.cursor_row, pane.cursor_col));
+            }
+            'u' => {
+                // RCP — Restore Cursor Position
+                if let Some((row, col)) = pane.saved_cursor {
+                    pane.cursor_row = row.min(pane.rows.saturating_sub(1));
+                    pane.cursor_col = col.min(pane.cols.saturating_sub(1));
+                    pane.dirty = true;
+                }
+            }
+
             // -- Insert/Delete Lines ----------------------------------------
             'L' => {
                 // IL — Insert Lines
@@ -543,7 +565,24 @@ impl<'a> vte::Perform for PanePerformer<'a> {
 
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        let pane = &mut *self.pane;
+        match byte {
+            // DECSC — Save Cursor (ESC 7)
+            b'7' => {
+                pane.saved_cursor = Some((pane.cursor_row, pane.cursor_col));
+            }
+            // DECRC — Restore Cursor (ESC 8)
+            b'8' => {
+                if let Some((row, col)) = pane.saved_cursor {
+                    pane.cursor_row = row.min(pane.rows.saturating_sub(1));
+                    pane.cursor_col = col.min(pane.cols.saturating_sub(1));
+                    pane.dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
