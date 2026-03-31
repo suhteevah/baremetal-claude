@@ -248,14 +248,119 @@ async fn main_async() {
                                 }
                                 Ok(handle) => {
                                     log::info!("[main] connected to TLS proxy!");
+                                    // We proved proxy TCP works. Close this test connection.
+                                    claudio_net::tls::tcp_close(&mut stack, handle);
 
-                                    // Make an actual API call to Anthropic!
-                                    let api_key = option_env!("CLAUDIO_API_KEY").unwrap_or("");
-                                    if api_key.is_empty() {
-                                        log::warn!("[main] no API key — skipping API call");
-                                        log::info!("[main] rebuild with CLAUDIO_API_KEY=sk-... cargo build");
-                                        claudio_net::tls::tcp_close(&mut stack, handle);
+                                    // ── Phase 3: OAuth Device Flow ──────────────────
+                                    log::info!("[main] ClaudioOS Phase 3 — OAuth Authentication");
+                                    log::info!("[auth] starting device authorization flow...");
+
+                                    // Helper: send HTTP through proxy and get response
+                                    let do_http = |stack: &mut claudio_net::NetworkStack, req: claudio_net::HttpRequest| -> Option<claudio_net::HttpResponse> {
+                                        let proxy_ip = claudio_net::Ipv4Address::new(10, 0, 2, 2);
+                                        let h = match claudio_net::tls::tcp_connect(stack, proxy_ip, 8443, 49200, now) {
+                                            Ok(h) => h,
+                                            Err(e) => { log::error!("[http] connect: {:?}", e); return None; }
+                                        };
+                                        let bytes = req.to_bytes();
+                                        if let Err(e) = claudio_net::tls::tcp_send(stack, h, &bytes, now) {
+                                            log::error!("[http] send: {:?}", e);
+                                            claudio_net::tls::tcp_close(stack, h);
+                                            return None;
+                                        }
+                                        let mut buf = alloc::vec![0u8; 16384];
+                                        let mut total = 0;
+                                        for _ in 0..50 {
+                                            match claudio_net::tls::tcp_recv(stack, h, &mut buf[total..], now) {
+                                                Ok(0) => break,
+                                                Ok(n) => {
+                                                    total += n;
+                                                    if claudio_net::http::HttpResponse::parse(&buf[..total]).is_ok() { break; }
+                                                }
+                                                Err(_) => break,
+                                            }
+                                        }
+                                        claudio_net::tls::tcp_close(stack, h);
+                                        claudio_net::http::HttpResponse::parse(&buf[..total]).ok()
+                                    };
+
+                                    // ── Phase 3: Authentication ──────────────────────
+                                    log::info!("[main] ClaudioOS Phase 3 — Authentication");
+
+                                    // Fetch API key from auth relay on host (10.0.2.2:8444).
+                                    // Run `python tools/auth-relay.py` on host first.
+                                    log::info!("[auth] fetching token from auth relay (10.0.2.2:8444)...");
+                                    log::info!("[auth] run `python tools/auth-relay.py` on host if not running");
+
+                                    let relay_ip = claudio_net::Ipv4Address::new(10, 0, 2, 2);
+                                    let mut api_key_buf = alloc::string::String::new();
+
+                                    // Poll relay until token is available (or timeout)
+                                    for attempt in 0..60 {
+                                        let relay_req = claudio_net::http::HttpRequest::get(
+                                            "10.0.2.2:8444",
+                                            "/token",
+                                        ).header("Connection", "close");
+
+                                        match claudio_net::tls::tcp_connect(&mut stack, relay_ip, 8444, 49300 + attempt as u16, now) {
+                                            Err(_) => {
+                                                if attempt % 10 == 0 {
+                                                    log::info!("[auth] waiting for auth relay... (attempt {})", attempt);
+                                                }
+                                                // Wait ~2 seconds between retries
+                                                for _ in 0..36 { core::hint::spin_loop(); for _ in 0..100000 { core::hint::spin_loop(); } }
+                                                continue;
+                                            }
+                                            Ok(h) => {
+                                                let bytes = relay_req.to_bytes();
+                                                if claudio_net::tls::tcp_send(&mut stack, h, &bytes, now).is_ok() {
+                                                    let mut buf = alloc::vec![0u8; 4096];
+                                                    let mut total = 0;
+                                                    for _ in 0..10 {
+                                                        match claudio_net::tls::tcp_recv(&mut stack, h, &mut buf[total..], now) {
+                                                            Ok(0) => break,
+                                                            Ok(n) => { total += n; if claudio_net::http::HttpResponse::parse(&buf[..total]).is_ok() { break; } }
+                                                            Err(_) => break,
+                                                        }
+                                                    }
+                                                    claudio_net::tls::tcp_close(&mut stack, h);
+
+                                                    if let Ok(resp) = claudio_net::http::HttpResponse::parse(&buf[..total]) {
+                                                        if resp.status == 200 {
+                                                            if let Ok(body) = core::str::from_utf8(&resp.body) {
+                                                                // Parse {"api_key": "sk-ant-..."}
+                                                                if let Some(start) = body.find("\"api_key\":\"") {
+                                                                    let rest = &body[start + 11..];
+                                                                    if let Some(end) = rest.find('"') {
+                                                                        api_key_buf = alloc::string::String::from(&rest[..end]);
+                                                                        log::info!("[auth] token received! ({}... {} chars)", &api_key_buf[..10.min(api_key_buf.len())], api_key_buf.len());
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else if resp.status == 202 {
+                                                            if attempt % 10 == 0 {
+                                                                log::info!("[auth] relay says: waiting for user to paste key...");
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    claudio_net::tls::tcp_close(&mut stack, h);
+                                                }
+                                                // Wait between polls
+                                                for _ in 0..36 { core::hint::spin_loop(); for _ in 0..100000 { core::hint::spin_loop(); } }
+                                            }
+                                        }
+                                    }
+
+                                    let api_key: &str = if !api_key_buf.is_empty() {
+                                        &api_key_buf
                                     } else {
+                                        log::warn!("[auth] no token received from relay");
+                                        option_env!("CLAUDIO_API_KEY").unwrap_or("")
+                                    };
+
+                                    if !api_key.is_empty() {
                                         log::info!("[main] sending Messages API request...");
                                         let body = alloc::format!(
                                             r#"{{"model":"claude-sonnet-4-20250514","max_tokens":100,"messages":[{{"role":"user","content":"Hello from ClaudioOS! I am a bare-metal Rust operating system with no Linux kernel, talking to you directly over VirtIO-net + smoltcp. What do you think about that?"}}]}}"#
@@ -316,45 +421,8 @@ async fn main_async() {
         }
     }
 
-    // ── Phase 3: Authentication ──────────────────────────────────────
-    // Check for baked-in API key first (dev mode), then try OAuth
-    log::info!("[main] ClaudioOS Phase 3 — Authentication");
-
-    let credentials = if let Some(key) = option_env!("CLAUDIO_API_KEY") {
-        log::info!("[auth] using baked-in API key (dev mode)");
-        Some(claudio_auth::Credentials::ApiKey(alloc::string::String::from(key)))
-    } else {
-        // Try to load saved credentials from FAT32
-        match claudio_fs::read_credentials() {
-            Some(creds) if !creds.is_expired(interrupts::millis_since_boot() as u64 / 1000) => {
-                log::info!("[auth] loaded saved credentials");
-                Some(creds)
-            }
-            _ => {
-                log::info!("[auth] no valid credentials found");
-                log::info!("[auth] OAuth device flow requires TLS (not yet implemented)");
-                log::info!("[auth] set CLAUDIO_API_KEY env var at build time for dev mode");
-                // TODO: When TLS is working, implement:
-                // 1. POST to auth.anthropic.com/oauth/device/code (needs HTTPS)
-                // 2. Display user_code on framebuffer
-                // 3. Poll token endpoint until user authenticates
-                // 4. Save credentials to FAT32
-                None
-            }
-        }
-    };
-
-    match &credentials {
-        Some(claudio_auth::Credentials::ApiKey(_)) => {
-            log::info!("[auth] authenticated via API key");
-        }
-        Some(claudio_auth::Credentials::OAuth { .. }) => {
-            log::info!("[auth] authenticated via OAuth");
-        }
-        None => {
-            log::warn!("[auth] running without authentication — API calls will fail");
-        }
-    }
+    // Auth is handled inside the networking block above (needs TCP).
+    // TODO: Move to separate function once networking refactored.
 
     // ── Keyboard input loop ──────────────────────────────────────────
     log::info!("[main] keyboard input active, type away!");
