@@ -4,8 +4,6 @@ A bare-metal Rust operating system purpose-built for running multiple AI coding 
 
 ClaudioOS boots your machine into a split-pane terminal dashboard where each pane is an independent Claude agent session. The entire stack -- from hardware interrupts to TLS handshakes to SSE streaming -- is a single-address-space async Rust application.
 
-**Owner:** Matt Gates (suhteevah) -- Ridge Cell Repair LLC
-**Target hardware:** x86_64 UEFI machines (QEMU for dev; i9-11900K, Supermicro SYS-4028GR-TRT, HP Victus for prod)
 
 ## Architecture
 
