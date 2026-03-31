@@ -114,9 +114,9 @@ impl Pics {
             self.pic2_data.write(0x01);
             wait_port.write(0);
 
-            // OCW1: IRQ masks — keyboard only for Phase 1.
-            // Timer (IRQ0) masked to avoid double-fault during executor HLT.
-            self.pic1_data.write(0b1111_1101); // Only IRQ1 (keyboard) unmasked
+            // OCW1: IRQ masks — timer + keyboard for Phase 1.
+            // Now that the Local APIC is disabled, IRQ0 (timer) is safe to unmask.
+            self.pic1_data.write(0b1111_1100); // IRQ0 (timer) + IRQ1 (keyboard) unmasked
             self.pic2_data.write(0b1111_1111); // PIC2: all masked
         }
     }
@@ -149,7 +149,33 @@ unsafe fn notify_end_of_interrupt(interrupt_id: u8) {
 }
 
 pub fn init() {
+    // Force the Lazy IDT to initialize, then log its address
+    let idt_ptr = &*IDT as *const InterruptDescriptorTable;
+    log::info!("[int] IDT at {:p}", idt_ptr);
+    log::info!("[int] breakpoint handler at {:p}", breakpoint_handler as *const ());
+    log::info!("[int] timer handler at {:p}", timer_handler as *const ());
+
     IDT.load();
+
+    // Disable the Local APIC before initializing the legacy 8259 PIC.
+    //
+    // UEFI firmware enables the Local APIC as part of its boot process.
+    // If we initialize the 8259 PIC without disabling the APIC first,
+    // BOTH can deliver timer interrupts on the same vector, causing a
+    // double fault when IRQ0 fires. The APIC's timer may be programmed
+    // by the firmware to fire periodically, and its interrupt delivery
+    // conflicts with the PIC's IRQ routing.
+    //
+    // We disable the APIC globally by clearing bit 11 (Global Enable)
+    // of the IA32_APIC_BASE MSR (0x1B). This causes all APIC interrupts
+    // to stop, letting the 8259 PIC handle hardware interrupts cleanly.
+    unsafe {
+        let mut apic_base_msr = x86_64::registers::model_specific::Msr::new(0x1B);
+        let val = apic_base_msr.read();
+        apic_base_msr.write(val & !(1 << 11));
+        log::trace!("[int] Local APIC disabled (was {:#x}, now {:#x})", val, val & !(1 << 11));
+    }
+
     unsafe {
         PICS.lock().init();
     }
@@ -165,8 +191,15 @@ pub fn enable() {
 
 // ── Exception handlers ──────────────────────────────────────────────
 
-extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    log::debug!("[int] breakpoint: {:#?}", stack_frame);
+extern "x86-interrupt" fn breakpoint_handler(_stack_frame: InterruptStackFrame) {
+    // Minimal handler — log formatting overflows the kernel stack.
+    // Use raw serial for ISR debugging instead.
+    unsafe {
+        let mut port = x86_64::instructions::port::Port::<u8>::new(0x3F8);
+        for &b in b"[int] breakpoint hit\r\n" {
+            port.write(b);
+        }
+    }
 }
 
 extern "x86-interrupt" fn page_fault_handler(
@@ -174,8 +207,15 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
+    // Use raw serial to avoid any stack-heavy formatting
+    unsafe {
+        let mut port = x86_64::instructions::port::Port::<u8>::new(0x3F8);
+        for &b in b"\r\n!!! PAGE FAULT !!!\r\n" {
+            port.write(b);
+        }
+    }
     log::error!(
-        "[int] PAGE FAULT accessing {:?} ({:?})\n{:#?}",
+        "[int] PAGE FAULT at {:?} ({:?})\n{:#?}",
         Cr2::read(),
         error_code,
         stack_frame,
@@ -194,10 +234,9 @@ extern "x86-interrupt" fn double_fault_handler(
 // ── Hardware interrupt handlers ─────────────────────────────────────
 
 extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
-    // Minimal EOI — just write 0x20 to PIC1 command port directly.
-    // Avoids locking PICS mutex in the hot path.
+    // ONLY EOI. No asm!, no serial, no nothing. Pure minimal.
     unsafe {
-        Port::<u8>::new(0x20).write(0x20);
+        x86_64::instructions::port::Port::<u8>::new(0x20).write(0x20);
     }
 }
 

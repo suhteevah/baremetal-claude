@@ -99,7 +99,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             info.pixel_format,
         );
         log::info!("[boot] clearing framebuffer...");
-        framebuffer::init(fb);
+        framebuffer::init(fb, phys_mem_offset);
         log::info!("[boot] framebuffer initialized");
     } else {
         log::warn!("[boot] no framebuffer available, serial-only mode");
@@ -111,13 +111,40 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     log::info!("[boot] PCI enumeration complete");
 
     // ── Phase 6: Enable interrupts + async executor ──────────────────
+    // The bootloader's kernel stack is nearly exhausted after all the init
+    // (log formatting is very stack-heavy). Allocate a fresh 256 KiB stack
+    // on the heap and switch to it before enabling interrupts.
+    log::info!("[boot] allocating new kernel stack on heap...");
+    const NEW_STACK_SIZE: usize = 256 * 1024;
+    let new_stack = alloc::vec![0u8; NEW_STACK_SIZE];
+    let new_stack_top = new_stack.as_ptr() as u64 + NEW_STACK_SIZE as u64;
+    // Leak the vec so it lives forever (kernel stack must never be freed)
+    core::mem::forget(new_stack);
+    log::info!("[boot] new stack top: {:#x}", new_stack_top);
+
+    // Switch to the new stack and continue execution there.
+    // We pass the entry function pointer and new stack pointer to asm.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {stack}",
+            "call {entry}",
+            stack = in(reg) new_stack_top,
+            entry = in(reg) post_stack_switch as *const (),
+            options(noreturn)
+        );
+    }
+}
+
+/// Continuation after switching to the heap-allocated stack.
+/// This function runs with a fresh 256 KiB stack — plenty of room for
+/// interrupt handlers + executor + log formatting.
+fn post_stack_switch() -> ! {
+    log::info!("[boot] running on new stack!");
     log::info!("[boot] enabling interrupts and starting async executor");
     interrupts::enable();
     executor::run(async {
         main_async().await;
     });
-
-    // If the executor ever returns (it shouldn't), halt forever
     log::error!("[boot] executor returned unexpectedly");
     halt_loop()
 }
