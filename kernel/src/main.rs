@@ -304,137 +304,128 @@ async fn main_async() {
 
                     // ── Step 2: Authentication ────────────────────────────────
 
-                    // Check baked-in key first, then try OAuth, then relay.
+                    // Check baked-in key first, then try SSO OAuth, then relay.
                     let mut api_key_buf = alloc::string::String::new();
                     if let Some(key) = option_env!("CLAUDIO_API_KEY") {
                         api_key_buf = alloc::string::String::from(key);
                         log::info!("[auth] using compile-time API key ({} chars)", api_key_buf.len());
                     } else {
-                        // ── Try OAuth: fetch Anthropic console via native HTTPS ──
+                        // ── SSO OAuth: send email → get SSO URL → user auths on phone ──
                         log::info!("[oauth] ============================================");
-                        log::info!("[oauth] ATTEMPTING BROWSER-BASED OAUTH");
-                        log::info!("[oauth] Following redirect chain from console.anthropic.com...");
+                        log::info!("[oauth]   ClaudioOS SSO Authentication");
                         log::info!("[oauth] ============================================");
+                        log::info!("[oauth] Enter your email to sign in via SSO.");
+                        log::info!("[oauth] Type your email and press Enter:");
 
-                        let mut current_host = alloc::string::String::from("console.anthropic.com");
-                        let mut current_path = alloc::string::String::from("/settings/keys");
-                        let mut cookies = alloc::string::String::new();
-
-                        for redirect_num in 0..10u8 {
-                            log::info!("[oauth] [{}/10] GET https://{}{}",
-                                redirect_num + 1, current_host, current_path);
-
-                            let seed = interrupts::tick_count() + redirect_num as u64;
-                            let mut req = claudio_net::http::HttpRequest::get(
-                                &current_host, &current_path,
-                            )
-                            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) ClaudioOS/0.1")
-                            .header("Accept", "text/html,application/xhtml+xml,*/*")
-                            .header("Connection", "close");
-
-                            if !cookies.is_empty() {
-                                req = req.header("Cookie", &cookies);
-                            }
-
-                            match claudio_net::https_request(
-                                &mut stack, &current_host, 443,
-                                &req.to_bytes(), now, seed,
-                            ) {
-                            Ok(resp_bytes) => {
-                                let resp_str = core::str::from_utf8(&resp_bytes).unwrap_or("<binary>");
-                                log::info!("[oauth] got {} bytes", resp_bytes.len());
-
-                                // Collect Set-Cookie headers
-                                for line in resp_str.split("\r\n") {
-                                    if let Some(rest) = line.strip_prefix("Set-Cookie:").or_else(|| line.strip_prefix("set-cookie:")) {
-                                        if let Some(nv) = rest.trim().split(';').next() {
-                                            if !cookies.is_empty() { cookies.push_str("; "); }
-                                            cookies.push_str(nv);
-                                            log::info!("[oauth] cookie: {}", nv);
-                                        }
+                        // Read email from keyboard
+                        let mut email = alloc::string::String::new();
+                        let kb = keyboard::ScancodeStream::new();
+                        loop {
+                            let key = kb.next_key().await;
+                            match key {
+                                pc_keyboard::DecodedKey::Unicode('\n') | pc_keyboard::DecodedKey::Unicode('\r') => {
+                                    if !email.is_empty() { break; }
+                                }
+                                pc_keyboard::DecodedKey::Unicode(c) if !c.is_control() => {
+                                    email.push(c);
+                                    // Echo to serial
+                                    unsafe { x86_64::instructions::port::Port::<u8>::new(0x3F8).write(c as u8); }
+                                }
+                                pc_keyboard::DecodedKey::Unicode('\u{8}') => { // backspace
+                                    email.pop();
+                                    unsafe {
+                                        let mut p = x86_64::instructions::port::Port::<u8>::new(0x3F8);
+                                        p.write(8); p.write(b' '); p.write(8);
                                     }
                                 }
-
-                                // Parse status code
-                                let status = resp_str.split(' ').nth(1)
-                                    .and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
-
-                                // Check for redirect
-                                if matches!(status, 301 | 302 | 303 | 307 | 308) {
-                                    if let Some(loc_line) = resp_str.split("\r\n").find(|l| l.starts_with("Location:") || l.starts_with("location:")) {
-                                        let location = loc_line.splitn(2, ':').nth(1).unwrap_or("").trim();
-                                        log::info!("[oauth] {} redirect -> {}", status, location);
-                                        if let Some(rest) = location.strip_prefix("https://") {
-                                            let (host, path) = if let Some(slash) = rest.find('/') {
-                                                (&rest[..slash], &rest[slash..])
-                                            } else {
-                                                (rest, "/")
-                                            };
-                                            current_host = alloc::string::String::from(host);
-                                            current_path = alloc::string::String::from(path);
-                                            continue;
-                                        }
-                                    }
-                                }
-
-                                // Final page — decode chunked body and parse with wraith-dom
-                                log::info!("[oauth] ============================================");
-                                log::info!("[oauth] FINAL PAGE: HTTP {} on {}{}", status, current_host, current_path);
-                                log::info!("[oauth] ============================================");
-                                if let Some(pos) = resp_str.find("\r\n\r\n") {
-                                    let raw_body = &resp_bytes[pos + 4..];
-                                    // Try chunked decode
-                                    let body_bytes = claudio_net::http::decode_chunked(raw_body)
-                                        .unwrap_or_else(|_| raw_body.to_vec());
-                                    let body = core::str::from_utf8(&body_bytes).unwrap_or("<binary>");
-                                    log::info!("[oauth] decoded body: {} bytes", body.len());
-
-                                    // Parse with wraith-dom
-                                    let doc = wraith_dom::parse(body);
-                                    let title = wraith_dom::extract_title(&doc);
-                                    log::info!("[oauth] page title: {}", title.unwrap_or_default());
-
-                                    // Find links
-                                    let links = wraith_dom::extract_links(&doc);
-                                    log::info!("[oauth] found {} links", links.len());
-                                    for (i, (text, href)) in links.iter().enumerate().take(10) {
-                                        log::info!("[oauth]   link {}: [{}] -> {}", i, text, href);
-                                    }
-
-                                    // Look for login/auth/sign-in patterns
-                                    let login_form = wraith_dom::find_login_form(&doc);
-                                    if let Some(form) = login_form {
-                                        log::info!("[oauth] !! LOGIN FORM FOUND !!");
-                                        log::info!("[oauth]   action: {}", form.action);
-                                        log::info!("[oauth]   method: {}", form.method);
-                                        for input in &form.inputs {
-                                            log::info!("[oauth]   input: {} ({})", input.name, input.input_type);
-                                        }
-                                    } else {
-                                        log::info!("[oauth] no login form found in HTML");
-                                        // Check for auth-related strings
-                                        if body.contains("sign") || body.contains("login") || body.contains("auth") {
-                                            log::info!("[oauth] page contains auth-related keywords");
-                                        }
-                                        // Show <title> and any meta redirects
-                                        if body.contains("__NEXT_DATA__") {
-                                            log::info!("[oauth] Next.js app detected (SSR)");
-                                        }
-                                        // Show first 2000 chars of text content
-                                        let text = wraith_dom::extract_text(&doc);
-                                        let preview = if text.len() > 2000 { &text[..2000] } else { &text };
-                                        log::info!("[oauth] page text: {}", preview);
-                                    }
-                                }
-                                log::info!("[oauth] cookies: {}", cookies);
-                                break;
-                            }
-                            Err(e) => {
-                                log::error!("[oauth] request failed: {:?}", e);
-                                break;
+                                _ => {}
                             }
                         }
-                        } // end redirect loop
+                        log::info!("[oauth] email: {}", email);
+
+                        // Step 1: POST /api/auth/send_magic_link
+                        log::info!("[oauth] sending magic link request...");
+                        let body = alloc::format!(
+                            r#"{{"email_address":"{}","source":"console"}}"#, email
+                        );
+                        let seed = interrupts::tick_count();
+                        let req = claudio_net::http::HttpRequest::post(
+                            "platform.claude.com",
+                            "/api/auth/send_magic_link",
+                            body.into_bytes(),
+                        )
+                        .header("Content-Type", "application/json")
+                        .header("Connection", "close");
+
+                        match claudio_net::https_request(
+                            &mut stack, "platform.claude.com", 443,
+                            &req.to_bytes(), now, seed,
+                        ) {
+                            Ok(resp_bytes) => {
+                                let resp = core::str::from_utf8(&resp_bytes).unwrap_or("");
+                                log::info!("[oauth] response: {} bytes", resp_bytes.len());
+
+                                // Decode chunked body
+                                if let Some(pos) = resp.find("\r\n\r\n") {
+                                    let raw_body = &resp_bytes[pos + 4..];
+                                    let body_bytes = claudio_net::http::decode_chunked(raw_body)
+                                        .unwrap_or_else(|_| raw_body.to_vec());
+                                    let body = core::str::from_utf8(&body_bytes).unwrap_or("{}");
+                                    log::info!("[oauth] body: {}", body);
+
+                                    // Check for sso_url (SSO redirect)
+                                    if let Some(sso_start) = body.find("\"sso_url\":\"") {
+                                        let rest = &body[sso_start + 11..];
+                                        if let Some(end) = rest.find('"') {
+                                            let sso_url = &rest[..end];
+                                            log::info!("[oauth] ============================================");
+                                            log::info!("[oauth]   SSO AUTHENTICATION REQUIRED");
+                                            log::info!("[oauth] ============================================");
+                                            log::info!("[oauth] Open this URL on your phone or browser:");
+                                            log::info!("[oauth]");
+                                            log::info!("[oauth]   {}", sso_url);
+                                            log::info!("[oauth]");
+                                            log::info!("[oauth] After authenticating, press Enter here.");
+                                            log::info!("[oauth] ============================================");
+
+                                            // Wait for user to press Enter after authenticating
+                                            loop {
+                                                let key = kb.next_key().await;
+                                                if let pc_keyboard::DecodedKey::Unicode('\n') = key { break; }
+                                                if let pc_keyboard::DecodedKey::Unicode('\r') = key { break; }
+                                            }
+
+                                            // TODO: Exchange the session cookies for an API key
+                                            // For now, the user would create a key manually after SSO
+                                            log::info!("[oauth] SSO auth flow completed");
+                                        }
+                                    } else if body.contains("\"success\"") || body.contains("magic_link") {
+                                        log::info!("[oauth] ============================================");
+                                        log::info!("[oauth]   MAGIC LINK SENT!");
+                                        log::info!("[oauth]   Check your email: {}", email);
+                                        log::info!("[oauth]   Click the link, then press Enter here.");
+                                        log::info!("[oauth] ============================================");
+
+                                        loop {
+                                            let key = kb.next_key().await;
+                                            if let pc_keyboard::DecodedKey::Unicode('\n') = key { break; }
+                                            if let pc_keyboard::DecodedKey::Unicode('\r') = key { break; }
+                                        }
+                                    } else {
+                                        log::warn!("[oauth] unexpected response: {}", body);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("[oauth] send_magic_link failed: {:?}", e);
+                            }
+                        }
+
+                        // After SSO/magic link, fall through to relay for API key
+                        log::info!("[oauth] falling back to auth relay for API key...");
+                        log::info!("[oauth] run: python tools/auth-relay.py");
+
+                        // Old redirect chain removed — SSO flow above handles auth
 
                         // Fallback: auth relay
                         // Fetch API key from auth relay (plain HTTP to gateway:8444).
