@@ -377,14 +377,54 @@ async fn main_async() {
                                     }
                                 }
 
-                                // Final page — show it
+                                // Final page — decode chunked body and parse with wraith-dom
                                 log::info!("[oauth] ============================================");
                                 log::info!("[oauth] FINAL PAGE: HTTP {} on {}{}", status, current_host, current_path);
                                 log::info!("[oauth] ============================================");
                                 if let Some(pos) = resp_str.find("\r\n\r\n") {
-                                    let body = &resp_str[pos + 4..];
-                                    let preview = if body.len() > 1500 { &body[..1500] } else { body };
-                                    log::info!("[oauth] {}", preview);
+                                    let raw_body = &resp_bytes[pos + 4..];
+                                    // Try chunked decode
+                                    let body_bytes = claudio_net::http::decode_chunked(raw_body)
+                                        .unwrap_or_else(|_| raw_body.to_vec());
+                                    let body = core::str::from_utf8(&body_bytes).unwrap_or("<binary>");
+                                    log::info!("[oauth] decoded body: {} bytes", body.len());
+
+                                    // Parse with wraith-dom
+                                    let doc = wraith_dom::parse(body);
+                                    let title = wraith_dom::extract_title(&doc);
+                                    log::info!("[oauth] page title: {}", title.unwrap_or_default());
+
+                                    // Find links
+                                    let links = wraith_dom::extract_links(&doc);
+                                    log::info!("[oauth] found {} links", links.len());
+                                    for (i, (text, href)) in links.iter().enumerate().take(10) {
+                                        log::info!("[oauth]   link {}: [{}] -> {}", i, text, href);
+                                    }
+
+                                    // Look for login/auth/sign-in patterns
+                                    let login_form = wraith_dom::find_login_form(&doc);
+                                    if let Some(form) = login_form {
+                                        log::info!("[oauth] !! LOGIN FORM FOUND !!");
+                                        log::info!("[oauth]   action: {}", form.action);
+                                        log::info!("[oauth]   method: {}", form.method);
+                                        for input in &form.inputs {
+                                            log::info!("[oauth]   input: {} ({})", input.name, input.input_type);
+                                        }
+                                    } else {
+                                        log::info!("[oauth] no login form found in HTML");
+                                        // Check for auth-related strings
+                                        if body.contains("sign") || body.contains("login") || body.contains("auth") {
+                                            log::info!("[oauth] page contains auth-related keywords");
+                                        }
+                                        // Show <title> and any meta redirects
+                                        if body.contains("__NEXT_DATA__") {
+                                            log::info!("[oauth] Next.js app detected (SSR)");
+                                        }
+                                        // Show first 2000 chars of text content
+                                        let text = wraith_dom::extract_text(&doc);
+                                        let preview = if text.len() > 2000 { &text[..2000] } else { &text };
+                                        log::info!("[oauth] page text: {}", preview);
+                                    }
                                 }
                                 log::info!("[oauth] cookies: {}", cookies);
                                 break;
