@@ -270,6 +270,25 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "execute_javascript".into(),
+            description: "Execute JavaScript code and return the output. Supports variables, \
+                functions, objects, arrays, if/else, for/while, try/catch, switch, arrow functions, \
+                template literals, regex, and builtins: console.log(), parseInt(), parseFloat(), \
+                encodeURIComponent(), btoa(), atob(), JSON.stringify/parse(), Math.*, String/Array \
+                methods, setTimeout (stub), document.cookie. Designed for evaluating Cloudflare \
+                challenge scripts. Use console.log() to produce output.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "JavaScript source code to execute"
+                    }
+                },
+                "required": ["code"]
+            }),
+        },
+        ToolSpec {
             name: "compile_rust".into(),
             description: "Compile Rust source code via the remote build server. \
                 Sends the source to the host-side build server which runs rustc \
@@ -322,6 +341,7 @@ pub fn execute_tool(call: &ToolCall) -> ToolResult {
         "list_directory" => execute_list_dir(call),
         "execute_command" => execute_command(call),
         "execute_python" => execute_python(call),
+        "execute_javascript" => execute_javascript(call),
         "compile_rust" => execute_compile_rust(call),
         _ => {
             log::warn!("[tools] unknown tool: {}", call.name);
@@ -498,6 +518,48 @@ fn execute_python(call: &ToolCall) -> ToolResult {
             ToolResult {
                 tool_use_id: call.id.clone(),
                 content: format!("PythonError: {}", e),
+                is_error: true,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// execute_javascript — js-lite interpreter
+// ---------------------------------------------------------------------------
+
+fn execute_javascript(call: &ToolCall) -> ToolResult {
+    let code = match get_string_field(&call.input, "code") {
+        Ok(c) => c,
+        Err(e) => {
+            return ToolResult {
+                tool_use_id: call.id.clone(),
+                content: e,
+                is_error: true,
+            };
+        }
+    };
+
+    log::info!("[tools] execute_javascript: {} bytes of code", code.len());
+
+    match js_lite::execute(code) {
+        Ok(output) => {
+            let content = if output.is_empty() {
+                String::from("(no output)")
+            } else {
+                output
+            };
+            ToolResult {
+                tool_use_id: call.id.clone(),
+                content,
+                is_error: false,
+            }
+        }
+        Err(e) => {
+            log::warn!("[tools] javascript execution error: {}", e);
+            ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("JavaScriptError: {}", e),
                 is_error: true,
             }
         }

@@ -154,6 +154,12 @@ impl Value {
     }
 }
 
+fn char_to_string(c: char) -> String {
+    let mut s = String::new();
+    s.push(c);
+    s
+}
+
 fn format_number(n: f64) -> String {
     if n.is_nan() { return String::from("NaN"); }
     if n.is_infinite() {
@@ -261,7 +267,7 @@ fn pow10(exp: i32) -> f64 {
 // Control flow signals
 // ---------------------------------------------------------------------------
 
-enum Signal {
+pub(crate) enum Signal {
     None,
     Return(Value),
     Break,
@@ -320,6 +326,22 @@ impl Interpreter {
 
     pub fn get_cookie(&self) -> &str {
         &self.cookie
+    }
+
+    /// Take a variable from the global scope (removing it). Used for context setup.
+    pub fn take_var(&mut self, name: &str) -> Option<Value> {
+        if let Some(scope) = self.scopes.first_mut() {
+            scope.vars.remove(name)
+        } else {
+            None
+        }
+    }
+
+    /// Set a variable in the global (bottom) scope.
+    pub fn set_global(&mut self, name: &str, val: Value) {
+        if let Some(scope) = self.scopes.first_mut() {
+            scope.vars.insert(String::from(name), val);
+        }
     }
 
     fn push_scope(&mut self) {
@@ -415,7 +437,7 @@ impl Interpreter {
     // Statement execution
     // -------------------------------------------------------------------
 
-    pub fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Signal, String> {
+    pub(crate) fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Signal, String> {
         for stmt in stmts {
             let signal = self.exec_stmt(stmt)?;
             match signal {
@@ -569,7 +591,7 @@ impl Interpreter {
                 let iter = self.eval_expr(iter_expr)?;
                 let items: Vec<Value> = match iter {
                     Value::Array(arr) => arr,
-                    Value::Str(s) => s.chars().map(|c| Value::Str(alloc::string::ToString::to_string(&c))).collect(),
+                    Value::Str(s) => s.chars().map(|c| Value::Str(char_to_string(c))).collect(),
                     _ => vec![],
                 };
                 for item in items {
@@ -650,34 +672,36 @@ impl Interpreter {
             Stmt::TryCatch(try_body, catch, finally) => {
                 let result = self.exec_block(try_body);
 
-                let signal = match &result {
-                    Ok(Signal::Throw(_)) | Err(_) if catch.is_some() => {
-                        let (param, catch_body) = catch.as_ref().unwrap();
-                        self.push_scope();
-                        let thrown = match result {
-                            Ok(Signal::Throw(v)) => v,
-                            Err(e) => Value::Str(e),
-                            _ => Value::Undefined,
-                        };
-                        if let Some(name) = param {
-                            self.set_var(name, thrown);
-                        }
-                        let sig = self.exec_block(catch_body);
-                        self.pop_scope();
-                        sig?
+                // Determine if we need to run the catch block
+                let needs_catch = match &result {
+                    Ok(Signal::Throw(_)) => true,
+                    Err(_) => true,
+                    _ => false,
+                };
+
+                let signal = if needs_catch && catch.is_some() {
+                    let (param, catch_body) = catch.as_ref().unwrap();
+                    self.push_scope();
+                    let thrown = match result {
+                        Ok(Signal::Throw(v)) => v,
+                        Err(e) => Value::Str(e),
+                        _ => Value::Undefined,
+                    };
+                    if let Some(name) = param {
+                        self.set_var(name, thrown);
                     }
-                    Ok(sig) => {
-                        // Move out of result
-                        match result {
-                            Ok(s) => s,
-                            Err(e) => return Err(e),
+                    let sig = self.exec_block(catch_body);
+                    self.pop_scope();
+                    sig?
+                } else {
+                    match result {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if let Some(finally_body) = finally {
+                                let _ = self.exec_block(finally_body);
+                            }
+                            return Err(e);
                         }
-                    }
-                    Err(_) => {
-                        if let Some(finally_body) = finally {
-                            let _ = self.exec_block(finally_body);
-                        }
-                        return result.map(|_| Signal::None);
                     }
                 };
 
@@ -1021,7 +1045,7 @@ impl Interpreter {
                 }
                 if let Ok(idx) = prop.parse::<usize>() {
                     return Ok(s.chars().nth(idx)
-                        .map(|c| Value::Str(alloc::string::ToString::to_string(&c)))
+                        .map(|c| Value::Str(char_to_string(c)))
                         .unwrap_or(Value::Undefined));
                 }
                 Ok(Value::Undefined)
@@ -1327,7 +1351,7 @@ impl Interpreter {
                             Some(Value::Array(arr)) => Ok(Value::Array(arr.clone())),
                             Some(Value::Str(s)) => {
                                 let chars: Vec<Value> = s.chars()
-                                    .map(|c| Value::Str(alloc::string::ToString::to_string(&c)))
+                                    .map(|c| Value::Str(char_to_string(c)))
                                     .collect();
                                 Ok(Value::Array(chars))
                             }
@@ -1471,7 +1495,7 @@ impl Interpreter {
         match method {
             "charAt" => {
                 let idx = args.first().map(|v| v.to_number() as usize).unwrap_or(0);
-                Ok(Value::Str(s.chars().nth(idx).map(|c| alloc::string::ToString::to_string(&c)).unwrap_or_default()))
+                Ok(Value::Str(s.chars().nth(idx).map(|c| char_to_string(c)).unwrap_or_default()))
             }
             "charCodeAt" => {
                 let idx = args.first().map(|v| v.to_number() as usize).unwrap_or(0);
@@ -1557,7 +1581,7 @@ impl Interpreter {
                 let sep = args.first().map(|v| v.to_string_val()).unwrap_or_default();
                 let limit = args.get(1).map(|v| v.to_number() as usize);
                 let parts: Vec<Value> = if sep.is_empty() {
-                    s.chars().map(|c| Value::Str(alloc::string::ToString::to_string(&c))).collect()
+                    s.chars().map(|c| Value::Str(char_to_string(c))).collect()
                 } else {
                     s.split(&*sep).map(|p| Value::Str(String::from(p))).collect()
                 };

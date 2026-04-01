@@ -22,11 +22,16 @@
 
 extern crate alloc;
 
+pub mod cloudflare;
 pub mod forms;
 pub mod parser;
 pub mod selector;
 pub mod text;
 
+pub use cloudflare::{
+    handle_cloudflare_response, is_cloudflare_challenge, solve_challenge,
+    ChallengeResult, CloudflareCookie,
+};
 pub use forms::{find_forms, find_login_form, Form, FormInput};
 pub use parser::{parse, Document, Node, NodeData};
 pub use selector::{select, Selector};
