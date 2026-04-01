@@ -225,6 +225,7 @@ dependencies = [
  "claudio-auth",
  "claudio-fs",
  "claudio-net",
+ "claudio-rustc",
  "claudio-terminal",
  "conquer-once",
  "linked_list_allocator",

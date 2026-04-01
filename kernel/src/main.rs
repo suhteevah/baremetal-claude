@@ -412,6 +412,15 @@ async fn main_async() {
                             log::warn!("[tls-test] ============================================");
                         }
 
+                        // ── Step 2.7: Cranelift JIT proof-of-concept ─────────
+                        log::info!("[jit-test] testing Cranelift JIT on bare metal...");
+                        let jit_ok = claudio_rustc::test_jit();
+                        if jit_ok {
+                            log::info!("[jit-test] !! CRANELIFT JIT: CONFIRMED WORKING !!");
+                        } else {
+                            log::warn!("[jit-test] CRANELIFT JIT: FAILED — check logs above");
+                        }
+
                         // ── Step 3: Launch multi-agent dashboard ──────────────
                         log::info!("[main] ============================================");
                         log::info!("[main] ClaudioOS — MULTI-AGENT DASHBOARD");

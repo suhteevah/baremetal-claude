@@ -24,3 +24,4 @@ claudio-api = { path = "../crates/api-client" }
 claudio-auth = { path = "../crates/auth" }
 claudio-agent = { path = "../crates/agent" }
 claudio-fs = { path = "../crates/fs-persist" }
+claudio-rustc = { path = "../crates/rustc-lite" }

@@ -1,0 +1,8 @@
+[package]
+name = "js-lite"
+version.workspace = true
+edition.workspace = true
+description = "Minimal JavaScript evaluator for Cloudflare challenge solving on ClaudioOS"
+
+[dependencies]
+log = { workspace = true }
