@@ -18,6 +18,14 @@ members = [
     "crates/ext4",
     "crates/btrfs",
     "crates/ntfs",
+    "crates/ahci",
+    "crates/nvme",
+    "crates/intel-nic",
+    "crates/acpi",
+    "crates/hda",
+    "crates/smp",
+    "crates/xhci",
+    "crates/gpu",
 ]
 exclude = [
     "tools/image-builder",  # Host-side tool, must NOT inherit x86_64-unknown-none target

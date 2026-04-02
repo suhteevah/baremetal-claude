@@ -1,0 +1,10 @@
+[package]
+name = "claudio-smp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SMP (Symmetric Multi-Processing) support for ClaudioOS"
+
+[dependencies]
+log = { workspace = true }

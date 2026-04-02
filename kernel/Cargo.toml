@@ -28,3 +28,11 @@ wraith-dom = { path = "../crates/wraith-dom" }
 claudio-ext4 = { path = "../crates/ext4" }
 claudio-btrfs = { path = "../crates/btrfs" }
 claudio-ntfs = { path = "../crates/ntfs" }
+claudio-ahci = { path = "../crates/ahci" }
+claudio-nvme = { path = "../crates/nvme" }
+claudio-intel-nic = { path = "../crates/intel-nic" }
+claudio-acpi = { path = "../crates/acpi" }
+claudio-hda = { path = "../crates/hda" }
+claudio-smp = { path = "../crates/smp" }
+claudio-xhci = { path = "../crates/xhci" }
+claudio-gpu = { path = "../crates/gpu" }

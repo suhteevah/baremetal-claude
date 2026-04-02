@@ -1,0 +1,10 @@
+[package]
+name = "claudio-xhci"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std xHCI (USB 3.0) host controller driver for ClaudioOS"
+
+[dependencies]
+log = { workspace = true }

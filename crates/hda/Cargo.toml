@@ -1,0 +1,10 @@
+[package]
+name = "claudio-hda"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Intel High Definition Audio driver for ClaudioOS (no_std, bare-metal)"
+
+[dependencies]
+log = { workspace = true }

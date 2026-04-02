@@ -1,0 +1,11 @@
+[package]
+name = "claudio-nvme"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Bare-metal NVMe driver for ClaudioOS — no_std, volatile MMIO, sector I/O"
+
+[dependencies]
+log = { workspace = true }
+spin = { workspace = true }

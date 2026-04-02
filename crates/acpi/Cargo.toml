@@ -1,0 +1,10 @@
+[package]
+name = "claudio-acpi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std ACPI table parser for ClaudioOS — RSDP, RSDT/XSDT, MADT, FADT, MCFG, HPET"
+
+[dependencies]
+log = { workspace = true }

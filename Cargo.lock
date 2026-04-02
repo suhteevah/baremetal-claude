@@ -166,6 +166,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-ahci"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "claudio-api"
 version = "0.1.0"
 dependencies = [
@@ -238,11 +245,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-nvme"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
 name = "claudio-os"
 version = "0.1.0"
 dependencies = [
  "bootloader_api",
  "claudio-agent",
+ "claudio-ahci",
  "claudio-api",
  "claudio-auth",
  "claudio-btrfs",
@@ -250,6 +266,7 @@ dependencies = [
  "claudio-fs",
  "claudio-net",
  "claudio-ntfs",
+ "claudio-nvme",
  "claudio-rustc",
  "claudio-terminal",
  "conquer-once",

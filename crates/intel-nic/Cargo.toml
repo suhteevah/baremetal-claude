@@ -1,0 +1,10 @@
+[package]
+name = "claudio-intel-nic"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std Intel e1000/e1000e/igc NIC driver for ClaudioOS"
+
+[dependencies]
+log = { workspace = true }
