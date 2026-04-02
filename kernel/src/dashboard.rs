@@ -42,6 +42,7 @@ use claudio_net::{Instant, NetworkStack};
 use claudio_shell::{Shell, Vfs, SystemInfo};
 use claudio_terminal::{Layout, SplitDirection, FONT_HEIGHT};
 
+use crate::ipc;
 use crate::keyboard::ScancodeStream;
 
 // ---------------------------------------------------------------------------
@@ -134,12 +135,15 @@ impl claudio_terminal::DrawTarget for FbDrawTarget {
 // Pane type — Agent or Shell
 // ---------------------------------------------------------------------------
 
-/// Each dashboard pane is either an agent chat session or a shell session.
+/// Each dashboard pane is either an agent chat session, a shell session,
+/// or the system monitor.
 enum PaneType {
     /// An agent chat session. The usize is the agent session id in the Dashboard.
     Agent(usize),
     /// A shell session with its own Shell state.
     Shell(ShellPaneState),
+    /// System monitor pane. The usize is the layout pane id.
+    SysMonitor(usize),
 }
 
 /// State for a shell pane. Wraps `claudio_shell::Shell` and adapts it to the
@@ -293,21 +297,13 @@ impl<'a> SystemInfo for DashboardSystemInfoMut<'a> {
     fn clear_screen(&mut self) {}
 
     fn reboot(&mut self) -> ! {
-        unsafe {
-            x86_64::instructions::port::Port::<u8>::new(0x64).write(0xFE);
-        }
-        loop {
-            x86_64::instructions::hlt();
-        }
+        // Use ACPI reboot (reset register) with keyboard controller fallback
+        crate::acpi_init::reboot();
     }
 
     fn shutdown(&mut self) -> ! {
-        unsafe {
-            x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000);
-        }
-        loop {
-            x86_64::instructions::hlt();
-        }
+        // Use ACPI S5 shutdown with QEMU fallback
+        crate::acpi_init::shutdown();
     }
 
     fn ifconfig(&self) -> Vec<(String, String, String, String)> {
@@ -319,11 +315,11 @@ impl<'a> SystemInfo for DashboardSystemInfoMut<'a> {
     }
 
     fn date(&self) -> String {
-        String::from("(no RTC driver)")
+        crate::rtc::wall_clock_formatted()
     }
 
     fn uptime_secs(&self) -> u64 {
-        crate::interrupts::tick_count() / 18
+        crate::rtc::uptime_seconds()
     }
 
     fn memory_info(&self) -> (u64, u64, u64) {
@@ -441,7 +437,8 @@ pub async fn run_dashboard(
         pane.write_str("  \x1b[32mPhase 3\x1b[0m: TLS + API .................... \x1b[92mOK\x1b[0m\r\n");
         pane.write_str("  \x1b[32mPhase 4\x1b[0m: Multi-agent dashboard ........ \x1b[92mOK\x1b[0m\r\n");
         pane.write_str("\r\n");
-        pane.write_str("\x1b[90mCtrl+B then \" = split | n/p = focus | c = new agent | s = new shell | x = close\x1b[0m\r\n");
+        pane.write_str("\x1b[90mCtrl+B then \" = split | n/p = focus | c = new agent | s = new shell | x = close | , = rename\x1b[0m\r\n");
+        pane.write_str("\x1b[90mIPC: /msg <agent> <text> | /broadcast <text> | /inbox | /agents | /channel create|read|write\x1b[0m\r\n");
         pane.write_str("\x1b[90mType commands or natural language. Type 'help' for builtins.\x1b[0m\r\n");
         pane.write_str("\r\n");
     }
@@ -454,6 +451,7 @@ pub async fn run_dashboard(
 
     let stream = ScancodeStream::new();
     let mut prefix_state = PrefixState::Normal;
+    let mut last_sysmon_tick: u64 = crate::interrupts::tick_count();
 
     loop {
         let key = stream.next_key().await;
@@ -529,6 +527,31 @@ pub async fn run_dashboard(
         let focused_pane_id = layout.focused_pane_id();
         render_prompt_for_pane(&mut layout, &pane_types, &input_buffers, focused_pane_id, &dashboard);
         render_dirty(&mut layout);
+
+        // Poll the SSH server for incoming connections and data.
+        crate::ssh_server::poll_ssh_server(stack);
+
+        // Auto-refresh system monitor pane (~every 1 second).
+        let current_tick = crate::interrupts::tick_count();
+        if current_tick.wrapping_sub(last_sysmon_tick) >= crate::sysmon::REFRESH_TICKS {
+            last_sysmon_tick = current_tick;
+            let focused_pane_id = layout.focused_pane_id();
+            let is_sysmon_focused = pane_types.iter().any(|pt| {
+                matches!(pt, PaneType::SysMonitor(pid) if *pid == focused_pane_id)
+            });
+            if is_sysmon_focused {
+                // Clear the pane and re-render.
+                if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                    pane.write_str("[2J[H");
+                }
+                let stats = crate::sysmon::collect_stats(&dashboard);
+                let rendered = crate::sysmon::render_to_string(&stats);
+                if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                    pane.write_str(&rendered);
+                }
+                render_dirty(&mut layout);
+            }
+        }
     }
 }
 
@@ -552,10 +575,12 @@ fn handle_prefix_command(
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
             let n = dashboard.sessions.len();
+            let name = format!("agent-{}", n);
             let agent_id = dashboard.create_session(
-                format!("agent-{}", n),
+                name.clone(),
                 new_pane_id,
             );
+            ipc::IPC.lock().bus.register_agent(agent_id, name);
             pane_types.push(PaneType::Agent(agent_id));
             input_buffers.push(InputBuffer::new(new_pane_id));
         }
@@ -566,10 +591,12 @@ fn handle_prefix_command(
             layout.split(SplitDirection::Vertical);
             let new_pane_id = layout.focused_pane_id();
             let n = dashboard.sessions.len();
+            let name = format!("agent-{}", n);
             let agent_id = dashboard.create_session(
-                format!("agent-{}", n),
+                name.clone(),
                 new_pane_id,
             );
+            ipc::IPC.lock().bus.register_agent(agent_id, name);
             pane_types.push(PaneType::Agent(agent_id));
             input_buffers.push(InputBuffer::new(new_pane_id));
         }
@@ -592,10 +619,12 @@ fn handle_prefix_command(
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
             let n = dashboard.sessions.len();
+            let name = format!("agent-{}", n);
             let agent_id = dashboard.create_session(
-                format!("agent-{}", n),
+                name.clone(),
                 new_pane_id,
             );
+            ipc::IPC.lock().bus.register_agent(agent_id, name);
             pane_types.push(PaneType::Agent(agent_id));
             input_buffers.push(InputBuffer::new(new_pane_id));
 
@@ -603,6 +632,7 @@ fn handle_prefix_command(
             if let Some(pane) = layout.pane_by_id_mut(new_pane_id) {
                 pane.write_str("\x1b[96mClaude Agent\x1b[0m — type a message and press Enter\r\n");
                 pane.write_str("\x1b[90m────────────────────────────────────────────────────\x1b[0m\r\n");
+                pane.write_str("\x1b[90mIPC: /msg <agent> <text> | /broadcast <text> | /inbox | /agents\x1b[0m\r\n");
             }
         }
 
@@ -640,8 +670,11 @@ fn handle_prefix_command(
                     dashboard.session_by_id(*aid).map(|s| s.pane_id) == Some(focused_pane_id)
                 }
                 PaneType::Shell(ss) => ss.pane_id == focused_pane_id,
+                PaneType::SysMonitor(pid) => *pid == focused_pane_id,
             }) {
-                if let PaneType::Agent(_) = &pane_types[idx] {
+                if let PaneType::Agent(aid) = &pane_types[idx] {
+                    let aid = *aid;
+                    ipc::IPC.lock().bus.unregister_agent(aid);
                     // Find and close the agent session matching this pane.
                     // We need to find the dashboard index for the session.
                     if let Some(si) = dashboard.sessions.iter().position(|s| s.pane_id == focused_pane_id) {
@@ -653,6 +686,64 @@ fn handle_prefix_command(
             }
             input_buffers.retain(|b| b.pane_id != focused_pane_id);
             layout.close_focused();
+        }
+
+        // System monitor: Ctrl+B then m
+        'm' => {
+            log::info!("[dashboard] new sysmon pane (split horizontal)");
+            layout.split(SplitDirection::Horizontal);
+            let new_pane_id = layout.focused_pane_id();
+            pane_types.push(PaneType::SysMonitor(new_pane_id));
+            input_buffers.push(InputBuffer::new(new_pane_id));
+
+            // Render initial monitor content.
+            let stats = crate::sysmon::collect_stats(dashboard);
+            let rendered = crate::sysmon::render_to_string(&stats);
+            if let Some(pane) = layout.pane_by_id_mut(new_pane_id) {
+                pane.write_str(&rendered);
+            }
+        }
+
+        // Rename focused agent: Ctrl+B then ,
+        // Consumes the current input buffer as the new name.
+        ',' => {
+            let focused_pane_id = layout.focused_pane_id();
+            if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
+                let new_name = buf.drain();
+                if !new_name.is_empty() {
+                    // Find agent for this pane.
+                    if let Some(pt) = pane_types.iter().find(|pt| match pt {
+                        PaneType::Agent(aid) => {
+                            dashboard.session_by_id(*aid).map(|s| s.pane_id) == Some(focused_pane_id)
+                        }
+                        _ => false,
+                    }) {
+                        if let PaneType::Agent(aid) = pt {
+                            let aid = *aid;
+                            if let Some(session) = dashboard.session_by_id_mut(aid) {
+                                let old_name = session.name.clone();
+                                session.name = new_name.clone();
+                                ipc::IPC.lock().bus.rename_agent(aid, new_name.clone());
+                                log::info!("[dashboard] renamed agent {} -> \"{}\"", old_name, new_name);
+                                if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                                    pane.write_str(&format!(
+                                        "\r\n\x1b[93mRenamed: {} -> {}\x1b[0m\r\n",
+                                        old_name, new_name
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                            pane.write_str("\r\n\x1b[31mRename only works on agent panes.\x1b[0m\r\n");
+                        }
+                    }
+                } else {
+                    if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                        pane.write_str("\r\n\x1b[90mRename: type a name first, then Ctrl+B ,\x1b[0m\r\n");
+                    }
+                }
+            }
         }
 
         other => {
@@ -695,6 +786,7 @@ async fn submit_input_for_focused(
             dashboard.session_by_id(*aid).map(|s| s.pane_id) == Some(focused_pane_id)
         }
         PaneType::Shell(ss) => ss.pane_id == focused_pane_id,
+        PaneType::SysMonitor(pid) => *pid == focused_pane_id,
     });
 
     let pane_type_idx = match pane_type_idx {
@@ -705,6 +797,11 @@ async fn submit_input_for_focused(
         }
     };
 
+    // SysMonitor panes don't accept text input — ignore Enter.
+    if matches!(&pane_types[pane_type_idx], PaneType::SysMonitor(_)) {
+        return;
+    }
+
     // Check if this is an agent or shell pane.
     let is_agent = matches!(&pane_types[pane_type_idx], PaneType::Agent(_));
 
@@ -713,6 +810,12 @@ async fn submit_input_for_focused(
             PaneType::Agent(aid) => *aid,
             _ => unreachable!(),
         };
+
+        // Intercept IPC slash-commands before sending to the API.
+        if handle_ipc_command(layout, agent_id, focused_pane_id, &input_text, now) {
+            return;
+        }
+
         submit_agent_input(
             layout, dashboard, agent_id, focused_pane_id, input_text, stack, api_key, now,
         ).await;
@@ -743,10 +846,13 @@ async fn submit_agent_input(
         pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", input_text));
     }
 
+    // Inject any pending IPC messages into the input context.
+    let enriched_input = inject_ipc_context(agent_id, &input_text);
+
     // Feed input to the agent conversation.
     let timestamp = now().total_millis() as u64;
     let ready = match dashboard.session_by_id_mut(agent_id) {
-        Some(session) => session.handle_input(input_text, timestamp),
+        Some(session) => session.handle_input(enriched_input, timestamp),
         None => false,
     };
 
@@ -910,6 +1016,211 @@ impl claudio_shell::LineReader for DummyLineReader {
 }
 
 // ---------------------------------------------------------------------------
+// IPC command handler — slash-commands for inter-agent messaging
+// ---------------------------------------------------------------------------
+
+/// Handle IPC slash-commands typed by the user in an agent pane.
+///
+/// Returns `true` if the input was an IPC command (consumed), `false` otherwise.
+fn handle_ipc_command(
+    layout: &mut Layout,
+    agent_id: usize,
+    pane_id: usize,
+    input: &str,
+    now: fn() -> Instant,
+) -> bool {
+    let trimmed = input.trim();
+
+    // /msg <target> <message> — send a message to another agent.
+    if let Some(rest) = trimmed.strip_prefix("/msg ") {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        let mut parts = rest.splitn(2, ' ');
+        let target = parts.next().unwrap_or("");
+        let message = parts.next().unwrap_or("");
+        if target.is_empty() || message.is_empty() {
+            if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                pane.write_str("\x1b[31mUsage: /msg <agent-name-or-id> <message>\x1b[0m\r\n");
+            }
+            return true;
+        }
+        let timestamp = now().total_millis() as u64;
+        let input_json = serde_json::json!({"to": target, "message": message});
+        match ipc::execute_send_to_agent(agent_id, &input_json, timestamp) {
+            Ok(result) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[36m{}\x1b[0m\r\n", result));
+                }
+            }
+            Err(e) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[31m{}\x1b[0m\r\n", e));
+                }
+            }
+        }
+        return true;
+    }
+
+    // /broadcast <message> — send to all agents.
+    if let Some(message) = trimmed.strip_prefix("/broadcast ") {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        if message.is_empty() {
+            if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                pane.write_str("\x1b[31mUsage: /broadcast <message>\x1b[0m\r\n");
+            }
+            return true;
+        }
+        let timestamp = now().total_millis() as u64;
+        ipc::IPC.lock().bus.broadcast(agent_id, String::from(message), timestamp);
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str("\x1b[36mMessage broadcast to all agents.\x1b[0m\r\n");
+        }
+        return true;
+    }
+
+    // /inbox — read pending messages.
+    if trimmed == "/inbox" {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        match ipc::execute_read_agent_messages(agent_id) {
+            Ok(result) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    let terminal_output = result.replace('\n', "\r\n");
+                    pane.write_str(&format!("\x1b[36m{}\x1b[0m\r\n", terminal_output));
+                }
+            }
+            Err(e) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[31m{}\x1b[0m\r\n", e));
+                }
+            }
+        }
+        return true;
+    }
+
+    // /agents — list all agents in the IPC bus.
+    if trimmed == "/agents" {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        match ipc::execute_list_agents_ipc() {
+            Ok(result) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    let terminal_output = result.replace('\n', "\r\n");
+                    pane.write_str(&format!("\x1b[36m{}\x1b[0m\r\n", terminal_output));
+                }
+            }
+            Err(e) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[31m{}\x1b[0m\r\n", e));
+                }
+            }
+        }
+        return true;
+    }
+
+    // /channel create <name> — create a named channel.
+    if let Some(name) = trimmed.strip_prefix("/channel create ") {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        let input_json = serde_json::json!({"name": name.trim()});
+        match ipc::execute_create_channel(&input_json) {
+            Ok(result) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[36m{}\x1b[0m\r\n", result));
+                }
+            }
+            Err(e) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[31m{}\x1b[0m\r\n", e));
+                }
+            }
+        }
+        return true;
+    }
+
+    // /channel write <name> <data> — write to a channel.
+    if let Some(rest) = trimmed.strip_prefix("/channel write ") {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        let mut parts = rest.splitn(2, ' ');
+        let name = parts.next().unwrap_or("");
+        let data = parts.next().unwrap_or("");
+        let input_json = serde_json::json!({"channel": name, "data": data});
+        match ipc::execute_channel_write(&input_json) {
+            Ok(result) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[36m{}\x1b[0m\r\n", result));
+                }
+            }
+            Err(e) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[31m{}\x1b[0m\r\n", e));
+                }
+            }
+        }
+        return true;
+    }
+
+    // /channel read <name> — read from a channel.
+    if let Some(name) = trimmed.strip_prefix("/channel read ") {
+        if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+            pane.write_str(&format!("\r\n\x1b[32m> {}\x1b[0m\r\n", trimmed));
+        }
+        let input_json = serde_json::json!({"channel": name.trim()});
+        match ipc::execute_channel_read(&input_json) {
+            Ok(result) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    let terminal_output = result.replace('\n', "\r\n");
+                    pane.write_str(&format!("\x1b[36m{}\x1b[0m\r\n", terminal_output));
+                }
+            }
+            Err(e) => {
+                if let Some(pane) = layout.pane_by_id_mut(pane_id) {
+                    pane.write_str(&format!("\x1b[31m{}\x1b[0m\r\n", e));
+                }
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
+/// Inject any pending IPC messages into an agent's conversation context.
+///
+/// Called before submitting to the API so the agent sees messages from other agents.
+/// Prepends a system-style notification to the user's input.
+fn inject_ipc_context(agent_id: usize, user_input: &str) -> String {
+    let messages = ipc::IPC.lock().bus.recv_messages(agent_id);
+    if messages.is_empty() {
+        return String::from(user_input);
+    }
+
+    let mut prefix = String::from("[IPC: You have new messages from other agents]\n");
+    for msg in &messages {
+        let kind = if msg.to_agent_id.is_none() {
+            " (broadcast)"
+        } else {
+            ""
+        };
+        prefix.push_str(&format!(
+            "From {}{}: {}\n",
+            msg.from_agent_name, kind, msg.content
+        ));
+    }
+    prefix.push_str("[End of IPC messages]\n\n");
+    prefix.push_str(user_input);
+    prefix
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -933,7 +1244,13 @@ fn render_prompt_for_pane(
             dashboard.session_by_id(*aid).map(|s| s.pane_id) == Some(pane_id)
         }
         PaneType::Shell(ss) => ss.pane_id == pane_id,
+        PaneType::SysMonitor(pid) => *pid == pane_id,
     });
+
+    // SysMonitor panes don't show a prompt -- skip.
+    if matches!(pane_type, Some(PaneType::SysMonitor(_))) {
+        return;
+    }
 
     let (name, state_indicator, prompt_char) = match pane_type {
         Some(PaneType::Agent(aid)) => {
@@ -954,6 +1271,7 @@ fn render_prompt_for_pane(
         Some(PaneType::Shell(_ss)) => {
             ("shell", "", "$")
         }
+        Some(PaneType::SysMonitor(_)) => unreachable!(),
         None => ("???", "", ">"),
     };
 

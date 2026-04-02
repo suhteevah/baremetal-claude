@@ -191,6 +191,16 @@ pub fn run(main: impl Future<Output = ()> + Send + 'static) -> ! {
             }
         }
 
+        // 2b. Poll USB keyboard for new events. This is a non-blocking
+        //     call that drains any pending HID reports from the xHCI
+        //     controller and pushes scancodes into the keyboard queue.
+        //     Since we don't have MSI-X routing, polling here at
+        //     executor frequency (~18 Hz or faster) is sufficient.
+        crate::usb::poll_usb_keyboard();
+
+        // 2c. Poll USB mouse for new HID reports (stub until xHCI mouse support).
+        crate::usb::poll_usb_mouse();
+
         // 3. Check whether new work arrived while we were polling.
         //    We must disable interrupts between checking the queue and
         //    calling `hlt` to avoid this race condition:

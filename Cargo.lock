@@ -358,6 +358,7 @@ dependencies = [
  "log",
  "pc-keyboard",
  "serde_json",
+ "smoltcp",
  "spin",
  "vte",
  "wraith-dom",

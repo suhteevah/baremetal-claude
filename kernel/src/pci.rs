@@ -27,6 +27,8 @@ pub struct PciDevice {
     pub device_id: u16,
     pub class: u8,
     pub subclass: u8,
+    /// Programming interface byte from the PCI class register.
+    pub prog_if: u8,
     /// BAR0 value (I/O port base for legacy VirtIO, MMIO base for others).
     /// For I/O space BARs, bit 0 is set; the actual port base is `bar0 & !0x3`.
     pub bar0: u32,
@@ -88,6 +90,38 @@ pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
     PCI_DEVICES.lock().find(vendor_id, device_id)
 }
 
+/// Find a PCI device by class, subclass, and programming interface.
+pub fn find_by_class(class: u8, subclass: u8, prog_if: u8) -> Option<PciDevice> {
+    let devices = PCI_DEVICES.lock();
+    for i in 0..devices.count {
+        if let Some(dev) = &devices.devices[i] {
+            if dev.class == class && dev.subclass == subclass && dev.prog_if == prog_if {
+                return Some(*dev);
+            }
+        }
+    }
+    None
+}
+
+/// Find a PCI device using a custom predicate.
+///
+/// The predicate receives each `PciDevice` and can return `Some(T)` for a
+/// match or `None` to skip.  Returns the first match.
+pub fn find_by_predicate<T, F>(predicate: F) -> Option<T>
+where
+    F: Fn(PciDevice) -> Option<T>,
+{
+    let devices = PCI_DEVICES.lock();
+    for i in 0..devices.count {
+        if let Some(dev) = &devices.devices[i] {
+            if let Some(result) = predicate(*dev) {
+                return Some(result);
+            }
+        }
+    }
+    None
+}
+
 pub fn enumerate() {
     log::info!("[pci] scanning bus 0...");
 
@@ -103,6 +137,7 @@ pub fn enumerate() {
         let class_reg = read_config(0, device, 0, 0x08);
         let class = (class_reg >> 24) as u8;
         let subclass = (class_reg >> 16) as u8;
+        let prog_if = (class_reg >> 8) as u8;
         let bar0 = read_config(0, device, 0, 0x10);
         let irq_line = read_config(0, device, 0, 0x3C) as u8;
 
@@ -119,6 +154,7 @@ pub fn enumerate() {
             device_id,
             class,
             subclass,
+            prog_if,
             bar0,
             irq_line,
         };
@@ -130,13 +166,15 @@ pub fn enumerate() {
                 enable_bus_master(0, device, 0);
             }
             (0x1AF4, 0x1001) => log::info!("[pci]   -> VirtIO block device"),
-            (0x8086, 0x100E) => {
-                log::info!("[pci]   -> Intel 82540EM (e1000)");
-                enable_bus_master(0, device, 0);
-            }
-            (0x8086, 0x10D3) => {
-                log::info!("[pci]   -> Intel 82574L");
-                enable_bus_master(0, device, 0);
+            (0x8086, did) => {
+                // Check if this is a supported Intel NIC.
+                if let Some(variant) = claudio_intel_nic::NicVariant::from_pci_ids(0x8086, did) {
+                    log::info!("[pci]   -> Intel NIC: {}", variant.name());
+                    enable_bus_master(0, device, 0);
+                } else if did == 0x10D3 {
+                    log::info!("[pci]   -> Intel 82574L (unsupported by driver)");
+                    enable_bus_master(0, device, 0);
+                }
             }
             _ => {}
         }
@@ -144,6 +182,22 @@ pub fn enumerate() {
         devices.push(pci_dev);
     }
     log::info!("[pci] scan complete, {} devices found", devices.count);
+}
+
+/// Enable PCI bus mastering for a specific device (public interface).
+///
+/// Called by subsystem init code (e.g. USB) that discovers devices by class
+/// rather than the fixed match table in `enumerate()`.
+pub fn enable_bus_master_for(bus: u8, device: u8, func: u8) {
+    enable_bus_master(bus, device, func);
+}
+
+/// Read a PCI config register (public interface).
+///
+/// Used by subsystems that need to read additional BARs or capabilities
+/// beyond what `PciDevice` stores.
+pub fn read_config_pub(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
+    read_config(bus, device, func, offset)
 }
 
 /// Enable PCI bus mastering for a device.

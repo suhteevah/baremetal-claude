@@ -12,18 +12,31 @@
 
 extern crate alloc;
 
+mod acpi_init;
 mod agent_loop;
 mod dashboard;
 mod executor;
 mod framebuffer;
 mod gdt;
+mod init;
 mod interrupts;
+mod intel_nic;
+mod ipc;
 mod keyboard;
 mod logger;
 mod memory;
 mod pci;
+mod rtc;
 mod serial;
+mod smp_init;
+mod ssh_server;
+mod sysmon;
 mod terminal;
+mod boot_sound;
+mod mouse;
+mod splash;
+mod usb;
+mod users;
 
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use core::panic::PanicInfo;
@@ -148,6 +161,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // ── Phase 3b: Keyboard decoder ────────────────────────────────────
     keyboard::init();
 
+    // ── Phase 3c: Real-Time Clock ────────────────────────────────────
+    rtc::init();
+
+    // ── Phase 3d: ACPI table discovery ───────────────────────────────
+    // Parse ACPI tables for hardware discovery: CPU cores (MADT), power
+    // management (FADT), precision timer (HPET), PCIe ECAM (MCFG).
+    // Must run after heap init (allocates) but before networking.
+    {
+        let rsdp_addr = boot_info.rsdp_addr.into_option();
+        acpi_init::init(rsdp_addr);
+    }
+
     // ── Phase 4: Framebuffer ─────────────────────────────────────────
     if let Some(fb) = boot_info.framebuffer.as_mut() {
         let info = fb.info();
@@ -165,31 +190,26 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         log::warn!("[boot] no framebuffer available, serial-only mode");
     }
 
-    // ── Phase 4b: Early framebuffer test render ──────────────────────
-    // Render a simple banner to prove the framebuffer + font pipeline works.
+    // ── Phase 4b: Boot splash screen + chime ────────────────────────
+    // Show the ClaudioOS splash with progress bar and play the boot chime.
     // This runs BEFORE networking, so it's visible even if DHCP/TLS stalls.
-    {
-        let fb_w = framebuffer::width();
-        let fb_h = framebuffer::height();
-        if fb_w > 0 && fb_h > 0 {
-            let mut draw_target = terminal::FramebufferDrawTarget;
-            let mut layout = claudio_terminal::Layout::new(fb_w, fb_h);
-            {
-                let pane = layout.focused_pane_mut();
-                pane.write_str("\x1b[96mClaudioOS v0.1.0\x1b[0m\r\n");
-                pane.write_str("\x1b[93mBare Metal AI Agent Terminal\x1b[0m\r\n");
-                pane.write_str("\r\n");
-                pane.write_str("\x1b[90mBooting... initialising network stack.\x1b[0m\r\n");
-            }
-            layout.render_all(&mut draw_target);
-            log::info!("[boot] early banner rendered to framebuffer");
-        }
-    }
+    splash::show_splash(splash::BootStage::Hardware);
+    boot_sound::boot_chime();
 
     // ── Phase 5: PCI enumeration + device discovery ──────────────────
     log::info!("[boot] starting PCI enumeration...");
     pci::enumerate();
     log::info!("[boot] PCI enumeration complete");
+
+    // ── Phase 5b: USB (xHCI) host controller + keyboard + mouse ───────
+    usb::init();
+    mouse::init();
+
+    // ── Phase 5c: SMP — boot application processors ─────────────────
+    // Uses MADT data from acpi_init to discover CPU cores, configure the
+    // Local APIC on the BSP, install AP trampoline at 0x8000, and boot
+    // all APs via INIT-SIPI-SIPI. After this, all cores are running.
+    smp_init::init();
 
     // ── Phase 6: Enable interrupts + async executor ──────────────────
     // The bootloader's kernel stack is nearly exhausted after all the init
@@ -249,22 +269,60 @@ async fn main_async() {
     log::info!("[main] async runtime started");
     log::info!("[main] ClaudioOS — Boot to Dashboard");
 
+    splash::show_splash(splash::BootStage::Network);
+
     // ── Step 1: Network stack initialization ──────────────────────────
 
-    // Find the VirtIO-net PCI device (or fall back to e1000).
-    let nic_dev = pci::find_device(0x1AF4, 0x1000)
-        .or_else(|| {
-            log::info!("[main] no VirtIO-net found, trying e1000...");
-            pci::find_device(0x8086, 0x100E)
-        });
+    // Detect NIC: try VirtIO-net first (QEMU), then Intel NIC (real hardware).
+    let virtio_dev = pci::find_device(0x1AF4, 0x1000);
+
+    // Try Intel NIC if no VirtIO-net found.
+    let intel_stack = if virtio_dev.is_none() {
+        log::info!("[main] no VirtIO-net found, probing for Intel NIC...");
+        match intel_nic::init_intel_network(now) {
+            Some(Ok(istack)) => {
+                log::info!("[main] Intel NIC active — DHCP complete");
+                if let Some(addr) = istack.ipv4_addr() {
+                    log::info!("[main] Intel NIC IP: {}", addr);
+                }
+                if let Some(gw) = istack.gateway {
+                    log::info!("[main] Intel NIC gateway: {}", gw);
+                }
+                for dns in &istack.dns_servers {
+                    log::info!("[main] Intel NIC DNS: {}", dns);
+                }
+                Some(istack)
+            }
+            Some(Err(e)) => {
+                log::error!("[main] Intel NIC init failed: {}", e);
+                None
+            }
+            None => {
+                log::info!("[main] no Intel NIC found either");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let nic_dev = virtio_dev;
 
     match nic_dev {
-        None => {
+        None if intel_stack.is_none() => {
             log::warn!("[main] no supported NIC found — skipping networking");
+        }
+        None => {
+            // Intel NIC path — network is up via IntelNetworkStack.
+            // Full API client integration (DNS, TLS, HTTPS) requires making
+            // claudio_net::NetworkStack generic over the smoltcp Device type.
+            // For now, the Intel NIC has DHCP and IP connectivity.
+            log::info!("[main] Intel NIC networking active");
+            log::info!("[main] NOTE: Full API client requires generic NetworkStack");
         }
         Some(dev) => {
             log::info!(
-                "[main] NIC found: vendor={:#06x} device={:#06x} io_base={:#x} irq={}",
+                "[main] VirtIO-net found: vendor={:#06x} device={:#06x} io_base={:#x} irq={}",
                 dev.vendor_id,
                 dev.device_id,
                 dev.io_base(),
@@ -309,6 +367,8 @@ async fn main_async() {
                             log::info!("[main] api.anthropic.com = {}", ip);
                         }
                     }
+
+                    splash::show_splash(splash::BootStage::Authenticating);
 
                     // ── Step 2: Authentication ────────────────────────────────
 
@@ -970,6 +1030,9 @@ async fn main_async() {
                                 );
                             }
 
+                            splash::show_splash(splash::BootStage::Ready);
+                            splash::hide_splash();
+
                             // Launch multi-agent dashboard on claude.ai Max
                             let fb_w = framebuffer::width();
                             let fb_h = framebuffer::height();
@@ -1067,6 +1130,12 @@ async fn main_async() {
                                 now,
                             );
                         }
+
+                        // Start the SSH server on port 22 (polled from dashboard loop).
+                        ssh_server::start_ssh_server(&mut stack, now);
+
+                        splash::show_splash(splash::BootStage::Ready);
+                        splash::hide_splash();
 
                         let fb_w = framebuffer::width();
                         let fb_h = framebuffer::height();

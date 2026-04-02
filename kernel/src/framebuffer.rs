@@ -245,3 +245,19 @@ where
         None
     }
 }
+
+/// XOR a single pixel in the back buffer with white (0xFFFFFF).
+///
+/// Used by the mouse cursor renderer for visibility on any background.
+/// The caller must ensure (x, y) are within bounds.
+#[inline]
+pub fn xor_pixel_backbuf(x: usize, y: usize, stride: usize, bpp: usize) {
+    if let Some(ref mut fb) = *FB.lock() {
+        let offset = (y * stride + x) * bpp;
+        if offset + 2 < fb.back.len() {
+            fb.back[offset] ^= 0xFF;     // B
+            fb.back[offset + 1] ^= 0xFF; // G
+            fb.back[offset + 2] ^= 0xFF; // R
+        }
+    }
+}

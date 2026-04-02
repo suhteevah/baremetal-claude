@@ -19,6 +19,14 @@ pub const HEAP_SIZE: usize = 48 * 1024 * 1024; // 48 MiB (double-buffered 2560x1
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
+/// Return (used, total) heap bytes from the allocator.
+pub fn heap_stats() -> (usize, usize) {
+    let allocator = ALLOCATOR.lock();
+    let free = allocator.free();
+    let used = HEAP_SIZE - free;
+    (used, HEAP_SIZE)
+}
+
 /// Initialize the heap: map virtual pages at HEAP_START and init the allocator.
 pub fn init(phys_mem_offset: u64, memory_regions: &'static MemoryRegions) {
     let phys_mem_offset = VirtAddr::new(phys_mem_offset);

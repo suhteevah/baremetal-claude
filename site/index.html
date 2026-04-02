@@ -3,246 +3,393 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClaudioOS -- Bare Metal AI Agent OS</title>
-  <meta name="description" content="A bare-metal Rust operating system for running AI coding agents. No Linux, no POSIX, no JavaScript. Just Rust, UEFI, and Claude.">
+  <title>ClaudioOS — Bare Metal AI Agent OS</title>
+  <meta name="description" content="A bare-metal Rust operating system with 33 crates: UEFI boot, SMP multi-core, NVMe/AHCI storage, TLS 1.3, post-quantum SSH, multi-agent Claude dashboard, 3 language interpreters, and 19 published open-source crates. No Linux. No POSIX. Just Rust and Claude.">
+  <meta property="og:title" content="ClaudioOS — Bare Metal AI Agent OS">
+  <meta property="og:description" content="33-crate bare-metal Rust OS for running AI coding agents. Post-quantum SSH, NVMe, ext4, btrfs, GPU compute, 3 language runtimes. 19 open-source crates published.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://claudioos.vercel.app">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <nav>
-  <a href="index.html" class="active">Home</a>
-  <a href="docs.html">Docs</a>
-  <a href="https://github.com/suhteevah/claudio-os">GitHub</a>
+  <div class="nav-inner">
+    <span class="nav-logo">ClaudioOS</span>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#crates">Open Source</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#story">Story</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="nav-github">GitHub</a>
+    </div>
+  </div>
 </nav>
 
+<!-- ======== HERO ======== -->
 <header class="hero">
   <div class="container">
+    <div class="hero-eyebrow">33 crates &middot; 19 published &middot; 0 lines of C</div>
     <h1>ClaudioOS</h1>
     <p class="tagline">
-      No Linux. No POSIX. No JavaScript.<br>
-      <strong>Just Rust, UEFI, and Claude.</strong><span class="cursor"></span>
+      A bare-metal operating system for AI coding agents.<br>
+      <strong>No Linux. No POSIX. No JavaScript.</strong><span class="cursor"></span>
+    </p>
+    <p class="hero-sub">
+      Boots via UEFI on real hardware. Drives NVMe, AHCI, Intel NICs, USB 3.0, and NVIDIA GPUs
+      from Ring 0. Authenticates to claude.ai via OAuth, runs multi-agent sessions with split-pane
+      terminals on a 2560x1600 framebuffer. Ships a post-quantum SSH daemon, three language
+      interpreters, and a text-mode web browser. Everything is <code>#![no_std]</code> Rust.
     </p>
     <div class="badge-row">
-      <span class="badge green">Phase 1: Boot to Terminal</span>
+      <span class="badge green">Production Hardware</span>
       <span class="badge">Rust nightly</span>
-      <span class="badge">x86_64</span>
+      <span class="badge">x86_64 UEFI</span>
+      <span class="badge">SMP Multi-Core</span>
       <span class="badge">AGPL-3.0-or-later</span>
     </div>
-    <p style="font-size: 0.85rem; color: var(--text-dim);">
-      A bare-metal operating system purpose-built for running multiple
-      <a href="https://www.anthropic.com/">Anthropic Claude</a> coding agents simultaneously.
-      Boots via UEFI, speaks HTTP/1.1 + TLS directly from Ring 0, renders a split-pane
-      terminal on the GOP framebuffer.
-    </p>
+    <div class="hero-actions">
+      <a href="https://github.com/suhteevah/baremetal-claude" class="btn btn-primary">View Source</a>
+      <a href="#crates" class="btn btn-secondary">19 Open-Source Crates</a>
+    </div>
   </div>
 </header>
 
+<!-- ======== STATS BAR ======== -->
+<section class="stats-bar">
+  <div class="container">
+    <div class="stats-grid">
+      <div class="stat">
+        <div class="stat-number">33</div>
+        <div class="stat-label">Workspace Crates</div>
+      </div>
+      <div class="stat">
+        <div class="stat-number">19</div>
+        <div class="stat-label">Published OSS Crates</div>
+      </div>
+      <div class="stat">
+        <div class="stat-number">48 MB</div>
+        <div class="stat-label">Kernel Heap</div>
+      </div>
+      <div class="stat">
+        <div class="stat-number">0</div>
+        <div class="stat-label">Lines of C</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======== FEATURES ======== -->
 <main class="container">
 
-  <!-- Architecture -->
+  <section id="features">
+    <h2>// Capabilities</h2>
+    <p class="section-intro">Every driver, protocol, and runtime is written from scratch in <code>#![no_std]</code> Rust. No Linux kernel modules. No libc. No userspace.</p>
+
+    <div class="feature-grid">
+
+      <div class="feature-card">
+        <div class="label">Boot &amp; Core</div>
+        <h3>UEFI + SMP Multi-Core</h3>
+        <p>UEFI boot with GDT/IDT, 48 MB heap, ACPI table parsing, and symmetric multiprocessing. AP cores started via SIPI. 2560x1600 GOP framebuffer with Terminus bitmap font.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Storage</div>
+        <h3>NVMe + AHCI + SATA</h3>
+        <p>Native NVMe driver with admin/IO queue pairs. AHCI/SATA for legacy disks. VFS layer with auto-detection across ext4, btrfs, NTFS, and FAT32 filesystems.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Networking</div>
+        <h3>Intel NIC + TCP/IP + TLS 1.3</h3>
+        <p>Drivers for e1000, I219-V, and I225-V Intel NICs plus VirtIO-net. smoltcp TCP/IP stack with DHCP and DNS. TLS 1.3 with AES-128-GCM from Ring 0.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Security</div>
+        <h3>Post-Quantum SSH Daemon</h3>
+        <p>ML-KEM-768 + X25519 hybrid key exchange. ML-DSA-65 host keys. ChaCha20-Poly1305 transport. A fully post-quantum SSH server running on bare metal.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">AI</div>
+        <h3>Claude Multi-Agent Dashboard</h3>
+        <p>OAuth device flow to claude.ai from bare metal. Max subscription integration. SSE streaming of Messages API. Split-pane terminal with per-agent viewports and tool loops (20 rounds).</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Shell</div>
+        <h3>AI-Native Shell</h3>
+        <p>28 builtin commands plus natural language passthrough to Claude. Type English, get results. Full pipeline support with the interpreters and editor below.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">USB</div>
+        <h3>xHCI USB 3.0</h3>
+        <p>Full xHCI host controller driver. Device enumeration, endpoint configuration, interrupt and bulk transfers. USB keyboard and storage support.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">GPU</div>
+        <h3>NVIDIA GPU Compute</h3>
+        <p>BAR mapping, command submission, and compute dispatch on NVIDIA GPUs. MMIO register access from bare metal for GPU-accelerated workloads.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Audio</div>
+        <h3>Intel HDA Audio</h3>
+        <p>High Definition Audio controller driver with codec discovery, widget parsing, and PCM stream output. Sound from bare metal.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Languages</div>
+        <h3>Python + JavaScript + Rust</h3>
+        <p>Three interpreters/compilers running on bare metal. Python-lite (vars, loops, functions). JS-lite (ES5 core). Rust compiler via Cranelift JIT codegen. All <code>no_std</code>.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Browser</div>
+        <h3>Wraith Text Browser</h3>
+        <p>HTML parser with CSS selectors and form detection. HTTP/HTTPS transport over smoltcp. Character-grid renderer. Cloudflare challenge solver built in.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Editor</div>
+        <h3>Nano-Like Text Editor</h3>
+        <p>Buffer-gap text editor with syntax awareness. Integrated as the <code>edit_file</code> tool for Claude agents. ~400 lines, 11 tests.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ======== ARCHITECTURE ======== -->
   <section id="architecture">
     <h2>// Architecture</h2>
     <div class="diagram-block">
 <pre>
-+-----------------------------------------------------+
-|                  Agent Dashboard                     |
-|  +----------+ +----------+ +----------+             |
-|  | Agent 1  | | Agent 2  | | Agent 3  |  ...       |
-|  | (pane)   | | (pane)   | | (pane)   |             |
-|  +----------+ +----------+ +----------+             |
-+-----------------------------------------------------+
-|              Agent Session Manager                   |
-|         (async tasks, one per agent)                 |
-+--------------+--------------+-----------------------+
-|  API Client  |     Auth     |   Terminal Renderer   |
-|  (Messages   |  (OAuth      |   (framebuffer +      |
-|   API + SSE) |   device     |    ANSI + split       |
-|              |   flow)      |    panes)             |
-+--------------+--------------+-----------------------+
-|              Async Executor (interrupt-driven)       |
-+-----------------------------------------------------+
-|     Net (smoltcp + TLS)    |    FS (FAT32 persist)  |
-+----------------------------+------------------------+
-|   NIC Driver (virtio-net / e1000)  |  PS/2 Keyboard |
-+------------------------------------+----------------+
-|              x86_64 Kernel Core                      |
-|   (paging, heap, GDT/IDT, interrupts, PCI)          |
-+-----------------------------------------------------+
-|              UEFI Boot (bootloader crate v0.11)      |
-+-----------------------------------------------------+
++------------------------------------------------------------------+
+|                     AI-Native Shell (28 builtins + NL)            |
++------------------------------------------------------------------+
+|                     Agent Dashboard (split panes)                 |
+|  +-----------+ +-----------+ +-----------+ +-----------+         |
+|  | Agent 1   | | Agent 2   | | Agent 3   | | Agent N   |  ...   |
+|  | (Claude)  | | (Claude)  | | (Claude)  | | (Claude)  |        |
+|  +-----------+ +-----------+ +-----------+ +-----------+         |
++------------------------------------------------------------------+
+|  API Client  |     OAuth    |  Terminal   | SSH Daemon            |
+|  (Messages   |  (claude.ai  |  (VTE +     | (ML-KEM-768          |
+|   API + SSE) |   device     |   2560x1600 |  + ML-DSA-65)        |
+|              |   flow)      |   Terminus) |                      |
++--------------+--------------+-------------+----------------------+
+|              Async Executor (interrupt-driven, SMP)               |
++--------------+--------------+-------------+----------------------+
+| Interpreters | Editor       | Wraith      | Cloudflare           |
+| python-lite  | nano-like    | DOM/render  | challenge            |
+| js-lite      |              | transport   | solver               |
+| rustc-lite   |              |             |                      |
++--------------+--------------+-------------+----------------------+
+|     Networking              |    Filesystems                     |
+|  smoltcp TCP/IP + TLS 1.3  |  ext4 + btrfs + NTFS + FAT32      |
+|  DHCP + DNS                 |  VFS auto-detection                |
++-----------------------------+------------------------------------+
+|  Intel NIC    | VirtIO-net  | NVMe  | AHCI/SATA | xHCI USB 3.0 |
+|  e1000/I219   |             |       |           |               |
+|  I225-V       |             |       |           |               |
++---------------+-------------+-------+-----------+---------------+
+|  HDA Audio    | GPU Compute | ACPI  | PS/2 Keyboard             |
++---------------+-------------+-------+---------------------------+
+|              x86_64 Kernel Core (SMP)                            |
+|   paging, 48MB heap, GDT/IDT, APIC, PCI, interrupts             |
++------------------------------------------------------------------+
+|              UEFI Boot (bootloader crate v0.11)                  |
++------------------------------------------------------------------+
 </pre>
     </div>
   </section>
 
-  <!-- Features -->
-  <section id="features">
-    <h2>// Features</h2>
-    <div class="feature-grid">
-      <div class="feature-card">
-        <div class="label">Networking</div>
-        <h3>Native VirtIO + smoltcp</h3>
-        <p>Custom VirtIO-net driver with DMA virtqueues. smoltcp provides TCP/IP, DHCP, and DNS. No Linux networking stack.</p>
-      </div>
-      <div class="feature-card">
-        <div class="label">Security</div>
-        <h3>Bare-Metal TLS</h3>
-        <p>TLS handshake and encrypted streams from Ring 0. HTTPS POST directly to api.anthropic.com with no OS intermediary.</p>
-      </div>
-      <div class="feature-card">
-        <div class="label">Display</div>
-        <h3>Split-Pane Terminal</h3>
-        <p>Binary split tree layout over the GOP framebuffer. VTE parser for full ANSI escape sequences. Truecolor support.</p>
-      </div>
-      <div class="feature-card">
-        <div class="label">AI</div>
-        <h3>Anthropic Tool Use</h3>
-        <p>SSE streaming parser for Claude's Messages API. Tool use protocol with file I/O on FAT32. Multi-agent sessions.</p>
-      </div>
-      <div class="feature-card">
-        <div class="label">Auth</div>
-        <h3>OAuth Device Flow</h3>
-        <p>RFC 8628 device authorization at boot. Display code on framebuffer, authorize from your phone. Token refresh in background.</p>
-      </div>
-      <div class="feature-card">
-        <div class="label">Runtime</div>
-        <h3>Async Executor</h3>
-        <p>Interrupt-driven cooperative scheduler. Hardware IRQs wake futures. HLT when idle. No polling, no wasted cycles.</p>
+  <!-- ======== OPEN SOURCE CRATES ======== -->
+  <section id="crates">
+    <h2>// 19 Open-Source Crates</h2>
+    <p class="section-intro">Every crate is <code>#![no_std]</code>, published individually, and usable in any bare-metal or embedded Rust project.</p>
+
+    <h3 class="crate-category">Filesystems</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/ext4-rw" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">ext4-rw</div>
+        <div class="crate-desc">Read/write ext4 filesystem for no_std</div>
+      </a>
+      <a href="https://github.com/suhteevah/btrfs-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">btrfs-nostd</div>
+        <div class="crate-desc">Btrfs reader for bare metal</div>
+      </a>
+      <a href="https://github.com/suhteevah/ntfs-rw" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">ntfs-rw</div>
+        <div class="crate-desc">NTFS read/write for no_std</div>
+      </a>
+    </div>
+
+    <h3 class="crate-category">Hardware Drivers</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/ahci-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">ahci-nostd</div>
+        <div class="crate-desc">AHCI/SATA controller driver</div>
+      </a>
+      <a href="https://github.com/suhteevah/nvme-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">nvme-nostd</div>
+        <div class="crate-desc">NVMe SSD driver for bare metal</div>
+      </a>
+      <a href="https://github.com/suhteevah/intel-nic-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">intel-nic-nostd</div>
+        <div class="crate-desc">e1000/I219/I225 Intel NIC driver</div>
+      </a>
+      <a href="https://github.com/suhteevah/xhci-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">xhci-nostd</div>
+        <div class="crate-desc">xHCI USB 3.0 host controller</div>
+      </a>
+      <a href="https://github.com/suhteevah/acpi-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">acpi-nostd</div>
+        <div class="crate-desc">ACPI table parsing for no_std</div>
+      </a>
+      <a href="https://github.com/suhteevah/hda-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">hda-nostd</div>
+        <div class="crate-desc">Intel HDA audio controller driver</div>
+      </a>
+      <a href="https://github.com/suhteevah/smp-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">smp-nostd</div>
+        <div class="crate-desc">Symmetric multiprocessing (AP core startup)</div>
+      </a>
+      <a href="https://github.com/suhteevah/gpu-compute-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">gpu-compute-nostd</div>
+        <div class="crate-desc">NVIDIA GPU compute from bare metal</div>
+      </a>
+    </div>
+
+    <h3 class="crate-category">Language Interpreters</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/python-lite" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">python-lite</div>
+        <div class="crate-desc">Minimal Python interpreter (28 tests)</div>
+      </a>
+      <a href="https://github.com/suhteevah/js-lite" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">js-lite</div>
+        <div class="crate-desc">JavaScript interpreter for no_std</div>
+      </a>
+      <a href="https://github.com/suhteevah/rustc-lite" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">rustc-lite</div>
+        <div class="crate-desc">Rust compiler via Cranelift JIT backend</div>
+      </a>
+    </div>
+
+    <h3 class="crate-category">Web &amp; Browser</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/wraith-dom" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">wraith-dom</div>
+        <div class="crate-desc">HTML parser + CSS selectors (1,610 lines, 32 tests)</div>
+      </a>
+      <a href="https://github.com/suhteevah/wraith-render" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">wraith-render</div>
+        <div class="crate-desc">HTML to text-mode character grid (1,221 lines)</div>
+      </a>
+      <a href="https://github.com/suhteevah/wraith-transport" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">wraith-transport</div>
+        <div class="crate-desc">HTTP/HTTPS over smoltcp (572 lines)</div>
+      </a>
+    </div>
+
+    <h3 class="crate-category">Security &amp; Tools</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/sshd-pqc" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">sshd-pqc</div>
+        <div class="crate-desc">Post-quantum SSH daemon (ML-KEM-768 + ML-DSA-65)</div>
+      </a>
+      <a href="https://github.com/suhteevah/editor-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">editor-nostd</div>
+        <div class="crate-desc">Nano-like text editor (11 tests)</div>
+      </a>
+    </div>
+  </section>
+
+  <!-- ======== BUILT WITH CLAUDE ======== -->
+  <section id="story">
+    <h2>// Built with Claude</h2>
+    <div class="story-block">
+      <p>
+        ClaudioOS started with a question: <em>What if an AI coding agent didn't need an operating
+        system underneath it? What if it <strong>was</strong> the operating system?</em>
+      </p>
+      <p>
+        Every line of this project was written in collaboration with
+        <a href="https://www.anthropic.com/">Anthropic's Claude</a>. The kernel boots, initializes
+        hardware, authenticates to claude.ai, and spawns agent sessions that can write code, compile
+        it (via Cranelift), execute Python and JavaScript, edit files, browse the web, and SSH into
+        remote machines -- all from bare metal with zero OS dependencies.
+      </p>
+      <p>
+        The development itself is recursive: Claude helps build the OS that runs Claude. The project
+        has grown from a simple UEFI bootloader to a 33-crate workspace with hardware drivers for
+        NVMe, AHCI, Intel NICs, USB 3.0, HDA audio, and NVIDIA GPUs. It reads ext4, btrfs, and NTFS
+        filesystems. It runs a post-quantum SSH daemon. It has its own shell with natural language
+        understanding.
+      </p>
+      <p>
+        19 crates have been extracted and published as standalone open-source libraries, each usable
+        in any <code>#![no_std]</code> Rust project. The goal isn't just an OS -- it's proving that
+        AI-native systems programming is possible, practical, and productive.
+      </p>
+      <div class="story-signature">
+        <strong>Matt Gates</strong> &middot; Ridge Cell Repair LLC &middot;
+        <a href="https://github.com/suhteevah">@suhteevah</a>
       </div>
     </div>
   </section>
 
-  <!-- Boot Sequence -->
-  <section id="boot-sequence">
-    <h2>// Boot Sequence</h2>
-    <div class="timeline">
-      <div class="timeline-item">
-        <div class="phase">Phase -1</div>
-        <h3>Proof of Life</h3>
-        <p>Raw serial write to port 0x3F8. Bytes hit the wire before anything else initializes.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 0</div>
-        <h3>Serial + Logger</h3>
-        <p>16550 UART initialization (115200 8N1). Log crate wired to serial output.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 1</div>
-        <h3>GDT + TSS</h3>
-        <p>Global Descriptor Table with kernel code, data, and TSS segments. IST stacks for double-fault and timer handlers.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 2</div>
-        <h3>Memory</h3>
-        <p>OffsetPageTable from CR3. 1 MiB heap mapped at 0x4444_4444_0000. linked_list_allocator as global allocator.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 3</div>
-        <h3>Interrupts</h3>
-        <p>APIC disabled. 8259 PIC initialized (ICW1-4). IDT loaded. IRQ0 (timer) + IRQ1 (keyboard) unmasked. STI deferred.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 4</div>
-        <h3>Framebuffer</h3>
-        <p>GOP framebuffer physical address resolved via page table walk. Writable access through phys_mem_offset mapping.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 5</div>
-        <h3>PCI Enumeration</h3>
-        <p>Bus 0 scan. VirtIO-net, e1000 detected. Bus mastering enabled for DMA devices.</p>
-      </div>
-      <div class="timeline-item">
-        <div class="phase">Phase 6</div>
-        <h3>Stack Switch + Executor</h3>
-        <p>256 KiB heap stack allocated and leaked. RSP switched via inline ASM. Interrupts enabled. Executor runs forever.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- Tech Stack -->
-  <section id="tech">
-    <h2>// Crate Dependencies</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Crate</th>
-          <th>Version</th>
-          <th>Purpose</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td>bootloader / bootloader_api</td><td>0.11</td><td>UEFI + BIOS boot, framebuffer, memory map</td></tr>
-        <tr><td>x86_64</td><td>0.15</td><td>Page tables, GDT, IDT, MSRs, port I/O</td></tr>
-        <tr><td>smoltcp</td><td>0.12</td><td>TCP/IP, DHCP, DNS (no_std)</td></tr>
-        <tr><td>vte</td><td>0.15</td><td>VT100/VT220 escape sequence parser</td></tr>
-        <tr><td>noto-sans-mono-bitmap</td><td>0.3</td><td>Compile-time bitmap font glyphs</td></tr>
-        <tr><td>pc-keyboard</td><td>0.8</td><td>PS/2 scancode decoder</td></tr>
-        <tr><td>linked_list_allocator</td><td>0.10</td><td>Kernel heap allocator</td></tr>
-        <tr><td>spin</td><td>0.9</td><td>Spinlock Mutex + Lazy (no_std sync)</td></tr>
-        <tr><td>embedded-tls</td><td>0.17</td><td>TLS 1.2/1.3 for bare-metal</td></tr>
-        <tr><td>serde_json</td><td>1.x</td><td>JSON (no_std, alloc feature)</td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  <!-- Design Decisions -->
-  <section id="design">
-    <h2>// Design Decisions</h2>
-    <div class="feature-grid">
-      <div class="feature-card">
-        <h3>No JavaScript Runtime</h3>
-        <p>Call the Anthropic API directly via raw HTTP/1.1 + SSE over TLS. Eliminates 50+ syscalls worth of compatibility shims.</p>
-      </div>
-      <div class="feature-card">
-        <h3>Single Address Space</h3>
-        <p>No kernel/user boundary. No syscalls. No process isolation. Every agent session is an async task. We trust our own code.</p>
-      </div>
-      <div class="feature-card">
-        <h3>Interrupt-Driven Async</h3>
-        <p>Hardware interrupts (NIC RX, keyboard, timer) wake futures. HLT when idle for power savings. No busy-loop polling.</p>
-      </div>
-      <div class="feature-card">
-        <h3>FAT32 Persistence</h3>
-        <p>No ext4, no journaling. Tokens, config, conversation logs, and agent state persisted to a simple FAT32 partition.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- Getting Started -->
+  <!-- ======== BUILD & RUN ======== -->
   <section id="build">
     <h2>// Build &amp; Run</h2>
 <pre>
-<span style="color: var(--text-dim);"># Build the kernel</span>
+<span class="code-comment"># Prerequisites</span>
+rustup target add x86_64-unknown-none
+cargo install bootimage
+
+<span class="code-comment"># Build the kernel (33 crates)</span>
 cargo build
 
-<span style="color: var(--text-dim);"># Create bootable disk images (UEFI + BIOS)</span>
+<span class="code-comment"># Create bootable disk images</span>
 cargo run --manifest-path tools/image-builder/Cargo.toml -- \
     target/x86_64-unknown-none/debug/claudio-os
 
-<span style="color: var(--text-dim);"># Run in QEMU (BIOS mode, simplest)</span>
-qemu-system-x86_64 \
-    -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-bios.img \
-    -serial stdio -m 512M
-
-<span style="color: var(--text-dim);"># With VirtIO networking (Phase 2+)</span>
+<span class="code-comment"># Run in QEMU with full networking + TLS</span>
 qemu-system-x86_64 \
     -bios /usr/share/OVMF/OVMF_CODE.fd \
     -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-uefi.img \
     -device virtio-net-pci,netdev=net0 \
-    -netdev user,id=net0 \
-    -serial stdio -m 512M -smp 4
+    -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
+    -serial stdio -m 512M -smp 4 -cpu Haswell
 </pre>
+    <p style="font-size: 0.82rem; color: var(--text-dim); margin-top: 8px;">
+      <code>-cpu Haswell</code> is required for AES-NI instructions used by TLS 1.3.
+      For real hardware, the OS has been tested on i9-11900K, Supermicro SYS-4028GR-TRT,
+      HP Victus laptop, and Arch Linux boxes.
+    </p>
   </section>
 
 </main>
 
 <footer>
   <div class="container">
-    <p>
-      ClaudioOS &middot;
-      <a href="https://github.com/suhteevah/claudio-os">Source on GitHub</a> &middot;
-      AGPL-3.0-or-later &middot;
-      Ridge Cell Repair LLC
-    </p>
+    <div class="footer-inner">
+      <p>
+        ClaudioOS &middot;
+        <a href="https://github.com/suhteevah/baremetal-claude">Source on GitHub</a> &middot;
+        AGPL-3.0-or-later &middot;
+        Ridge Cell Repair LLC
+      </p>
+      <p class="footer-sub">
+        Built with Rust and Claude. No Linux was harmed in the making of this operating system.
+      </p>
+    </div>
   </div>
 </footer>
 
