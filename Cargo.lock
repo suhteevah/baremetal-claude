@@ -418,7 +418,13 @@ dependencies = [
 name = "claudio-vfs"
 version = "0.1.0"
 dependencies = [
+ "claudio-ahci",
+ "claudio-btrfs",
+ "claudio-ext4",
+ "claudio-ntfs",
+ "claudio-nvme",
  "log",
+ "spin",
 ]
 
 [[package]]

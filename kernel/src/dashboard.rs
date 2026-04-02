@@ -169,6 +169,39 @@ impl ShellPaneState {
 
 /// Minimal VFS that returns "no filesystem mounted" for all operations.
 /// This is sufficient for builtins like echo, help, clear, ps, history, env.
+///
+/// # Wiring the real VFS
+///
+/// Once storage drivers are initialized (AHCI/NVMe), replace `StubVfs` with
+/// a real `claudio_vfs::Vfs` instance. Example:
+///
+/// ```rust,no_run
+/// // TODO: Wire real VFS once storage drivers are initialized.
+/// //
+/// // use claudio_vfs::adapters::*;
+/// // use claudio_vfs::{Vfs, MountOptions};
+/// //
+/// // // 1. Wrap the AHCI disk as a VFS BlockDevice:
+/// // let ahci_dev = unsafe {
+/// //     AhciBlockDeviceAdapter::new(ahci_disk_ptr, hba_ptr)
+/// // };
+/// //
+/// // // 2. Auto-detect the filesystem on each partition:
+/// // let fs_type = detect_filesystem(&ahci_dev);
+/// //
+/// // // 3. Create a partition view and mount the filesystem:
+/// // let partition_dev = VfsToExt4BlockDevice {
+/// //     device: &ahci_dev,
+/// //     partition_offset: part.start_offset(sector_size),
+/// //     partition_size: part.size_bytes(sector_size),
+/// // };
+/// // let ext4_fs = claudio_ext4::Ext4Fs::mount(partition_dev).unwrap();
+/// // let adapter = Box::leak(Box::new(Ext4FilesystemAdapter::new(ext4_fs)));
+/// //
+/// // // 4. Mount into the VFS:
+/// // let mut vfs = Vfs::new();
+/// // vfs.mount("/", adapter, MountOptions::default()).unwrap();
+/// ```
 struct StubVfs;
 
 impl Vfs for StubVfs {

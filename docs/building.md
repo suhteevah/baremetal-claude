@@ -10,6 +10,8 @@ Linux, and macOS.
 - [Prerequisites](#prerequisites)
 - [Two-Step Build Process](#two-step-build-process)
 - [Running in QEMU](#running-in-qemu)
+- [run.ps1 Explained](#runps1-explained)
+- [Session Persistence](#session-persistence)
 - [Troubleshooting](#troubleshooting)
 - [The Stack Overflow Fix](#the-stack-overflow-fix)
 - [Environment Variables](#environment-variables)
@@ -67,6 +69,11 @@ build-std-features = ["compiler-builtins-mem"]
 - **MSVC Build Tools**: The image builder (`tools/image-builder/`) is a host-side
   binary that links with the MSVC linker. Install "Desktop development with C++"
   from Visual Studio, or the MSVC Build Tools standalone installer.
+- **LIB environment variable**: If the linker finds `link.exe` but not `kernel32.lib`,
+  set the `LIB` variable to MSVC + Windows SDK lib directories:
+  ```powershell
+  $env:LIB = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.39.33519\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\um\x64"
+  ```
 - **QEMU for Windows**: Download from https://www.qemu.org/download/#windows.
   Add the QEMU install directory to your PATH.
 - **OVMF** (for UEFI boot): QEMU for Windows may not include OVMF firmware.
@@ -108,8 +115,8 @@ builder is a separate host-side tool.
 cargo build
 ```
 
-This compiles the `claudio-os` kernel crate (and its dependencies including
-`claudio-terminal`) for the `x86_64-unknown-none` target. Output:
+This compiles the `claudio-os` kernel crate (and all 31 workspace dependency crates)
+for the `x86_64-unknown-none` target. Output:
 
 ```
 target/x86_64-unknown-none/debug/claudio-os
@@ -149,11 +156,6 @@ The image builder (`tools/image-builder/src/main.rs`) uses the `bootloader` crat
 | UEFI | `target/.../claudio-os-uefi.img` | UEFI firmware (OVMF) |
 | BIOS | `target/.../claudio-os-bios.img` | Legacy BIOS (simpler) |
 
-The image builder:
-1. Uses `bootloader::UefiBoot::new(kernel_path).create_disk_image(&uefi_path)`
-2. Uses `bootloader::BiosBoot::new(kernel_path).create_disk_image(&bios_path)`
-3. Prints file sizes and QEMU invocation hints
-
 **Why a separate tool?** The image builder runs on the host (`x86_64-pc-windows-msvc`
 or `x86_64-unknown-linux-gnu`), not the bare-metal target. It is excluded from the
 workspace (`exclude = ["tools/image-builder"]`) to prevent it from inheriting the
@@ -177,7 +179,7 @@ qemu-system-x86_64 \
 
 ## Running in QEMU
 
-### BIOS Boot (Simplest, Recommended for Quick Testing)
+### BIOS Boot (Simplest)
 
 No OVMF firmware needed. Works out of the box:
 
@@ -200,17 +202,10 @@ qemu-system-x86_64 \
     -serial stdio \
     -m 512M
 
-# Linux (Arch)
+# Windows
 qemu-system-x86_64 \
-    -bios /usr/share/edk2-ovmf/x64/OVMF_CODE.fd \
-    -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-uefi.img \
-    -serial stdio \
-    -m 512M
-
-# macOS (Homebrew)
-qemu-system-x86_64 \
-    -bios $(brew --prefix)/share/qemu/edk2-x86_64-code.fd \
-    -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-uefi.img \
+    -drive if=pflash,format=raw,readonly=on,file="C:\Program Files\qemu\share\edk2-x86_64-code.fd" \
+    -drive format=raw,file=target\x86_64-claudio\debug\claudio-os-uefi.img \
     -serial stdio \
     -m 512M
 ```
@@ -227,7 +222,7 @@ qemu-system-x86_64 \
     -device virtio-net-pci,netdev=net0 \
     -netdev user,id=net0 \
     -serial stdio \
-    -m 512M \
+    -m 1G \
     -smp 4 \
     -cpu Haswell
 ```
@@ -238,41 +233,88 @@ SLIRP networking provides:
 - **NAT**: Outbound TCP/UDP works (HTTPS to api.anthropic.com)
 - **No host configuration**: No bridges, no tap devices, no root required
 
-With port forwarding (host port 5555 -> guest port 5555):
-
-```bash
--netdev user,id=net0,hostfwd=tcp::5555-:5555
-```
-
 ### Useful QEMU Flags
 
 | Flag | Purpose |
 |------|---------|
 | `-serial stdio` | Route serial port to terminal (see log output) |
-| `-m 512M` | 512 MiB RAM |
+| `-m 1G` | 1 GiB RAM (recommended for full stack) |
 | `-smp 4` | 4 CPU cores |
-| `-d int` | Log all interrupts to stderr (very verbose) |
+| `-cpu Haswell` | Enable AES-NI for TLS 1.3 (required) |
+| `-display gtk,grab-on-hover=on` | Graphical window with keyboard capture |
 | `-no-reboot` | Stop on triple fault instead of rebooting |
 | `-no-shutdown` | Keep VM alive after power off |
 | `-s -S` | Start GDB server on port 1234, wait for debugger |
-| `-monitor stdio` | QEMU monitor (use `-serial file:serial.log` for serial) |
-| `-display none` | No graphical window (serial only) |
+| `-d int` | Log all interrupts to stderr (very verbose) |
 | `-enable-kvm` | Use KVM acceleration (Linux, much faster) |
 
-### GDB Debugging
+---
 
-```bash
-# Terminal 1: Start QEMU with GDB server
-qemu-system-x86_64 \
-    -drive format=raw,file=target/x86_64-unknown-none/debug/claudio-os-bios.img \
-    -serial stdio -m 512M \
-    -s -S
+## run.ps1 Explained
 
-# Terminal 2: Connect GDB
-gdb target/x86_64-unknown-none/debug/claudio-os \
-    -ex "target remote :1234" \
-    -ex "break kernel_main" \
-    -ex "continue"
+The `run.ps1` PowerShell script is the primary launcher on Windows. It handles
+session persistence automatically:
+
+```powershell
+$credFile = "target\session.txt"
+
+$fwCfgArgs = @()
+if ((Test-Path $credFile) -and ((Get-Content $credFile -Raw).Trim().Length -gt 0)) {
+    Write-Host "[run] Loaded saved session from $credFile"
+    $fwCfgArgs = @("-fw_cfg", "name=opt/claudio/session,file=$credFile")
+}
+
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" `
+    -cpu Haswell `
+    -drive "if=pflash,format=raw,readonly=on,file=C:\Program Files\qemu\share\edk2-x86_64-code.fd" `
+    -drive "format=raw,file=target\x86_64-claudio\debug\claudio-os-uefi.img" `
+    -device virtio-net-pci,netdev=net0 `
+    -netdev user,id=net0 `
+    -serial stdio `
+    -display gtk,grab-on-hover=on `
+    -m 1G `
+    -no-reboot `
+    @fwCfgArgs
+```
+
+**Key features:**
+- Checks for saved session in `target/session.txt`
+- Passes session via QEMU `fw_cfg` for the kernel to read at boot
+- Uses GTK display with keyboard grab for PS/2 input
+- 1 GiB RAM, Haswell CPU, no-reboot for debugging
+
+---
+
+## Session Persistence
+
+ClaudioOS persists authentication sessions across reboots using QEMU's `fw_cfg`
+device.
+
+### How It Works
+
+1. **Authentication**: On first boot, ClaudioOS authenticates via claude.ai OAuth
+   (email code) or API key
+2. **Save**: The kernel writes the `sessionKey` cookie to serial output with a
+   special marker
+3. **Capture**: The host-side script captures the session data and writes it to
+   `target/session.txt`
+4. **Restore**: On next boot, `run.ps1` passes `-fw_cfg name=opt/claudio/session,file=target/session.txt`
+5. **Read**: The kernel reads the `fw_cfg` item at boot and restores the session
+   without re-authentication
+
+### Session File Format
+
+`target/session.txt` contains the raw `sessionKey` cookie value. The session is
+valid for approximately 28 days.
+
+### Manual Session Management
+
+```powershell
+# Clear saved session (force re-authentication on next boot)
+Remove-Item target\session.txt
+
+# Check if a session exists
+if (Test-Path target\session.txt) { Get-Content target\session.txt }
 ```
 
 ---
@@ -287,145 +329,56 @@ The image builder is a host-side binary requiring the MSVC linker. If you see:
 error: linker `link.exe` not found
 ```
 
-or:
+**Fix**: Install "Desktop development with C++" in Visual Studio.
 
-```
-LINK : fatal error LNK1104: cannot open file 'kernel32.lib'
-```
+### TLS Crashes (Illegal Instruction)
 
-**Fix**: Install "Desktop development with C++" in Visual Studio. For partial
-installs where the linker is found but libraries are not, set the `LIB` variable:
+If the kernel crashes during TLS handshake with an `#UD` (Invalid Opcode):
 
-```powershell
-$env:LIB = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.39.33519\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\um\x64"
-```
-
-Adjust version numbers to match your installation. Use `vswhere` or check the
-Visual Studio install directories to find the correct paths.
-
-### Windows: sccache Issues
-
-If `sccache` is configured as a Rust compiler wrapper and kernel compilation fails:
-
-```powershell
-$env:RUSTC_WRAPPER = ""
-cargo build
-```
-
-The `x86_64-unknown-none` target with `#![feature(abi_x86_interrupt)]` can confuse
-some sccache versions.
-
-### `fatfs` v0.3 Compilation Failure
-
-The `fatfs` crate at v0.3 has known compilation issues in `no_std` environments:
-
-```
-error[E0433]: failed to resolve: use of undeclared type `std`
-```
-
-**Fix**: The workspace pins `fatfs` with `default-features = false`:
-
-```toml
-fatfs = { version = "0.3", default-features = false, features = ["alloc"] }
-```
-
-If compilation still fails, the `fs-persist` crate (Phase 3) may need to use a
-fork or wait for v0.4.
-
-### `embedded-tls` Issues
-
-The `embedded-tls` crate requires specific build configuration for bare-metal:
-
-1. **Custom target required**: The default `x86_64-unknown-none` target uses
-   soft-float which conflicts with AES-NI crypto. The project uses a custom target
-   `x86_64-claudio.json` with `+sse,+sse2,+aes,+pclmulqdq` features enabled.
-
-2. **QEMU CPU**: TLS will crash with an illegal instruction fault if QEMU uses its
-   default CPU model. Always use `-cpu Haswell` or later for AES-NI support.
-
-3. **Aligned buffers**: AES-NI instructions require 16-byte aligned memory. TLS
-   buffers must be explicitly aligned in allocations.
+1. Ensure `-cpu Haswell` (or later) is in the QEMU command
+2. Check TLS buffer alignment (must be 16-byte aligned for AES-NI)
+3. Verify the custom target `x86_64-claudio.json` is being used
 
 ### Boot Hangs (No Serial Output)
 
-If QEMU starts but no serial output appears:
-
 1. Verify `-serial stdio` is in the QEMU command
 2. Check the disk image path is correct and the file exists
-3. Try BIOS boot instead of UEFI (fewer things can go wrong)
-4. Add `-d int` to see if the CPU is receiving interrupts
-5. Add `-no-reboot` to catch triple faults (VM stops instead of reboot loop)
-6. Check that the kernel was built recently (`cargo build` succeeded)
-
-### Page Fault During Boot
-
-If `[int] PAGE FAULT` appears in serial output:
-
-- **During Phase 2**: Heap pages not mapping correctly. Check `memory::init()`.
-  Verify `phys_mem_offset` is correct (print it to serial).
-- **During Phase 4**: Framebuffer address translation failed. The kernel walks the
-  page table to find the framebuffer's physical address. If the bootloader's mapping
-  is unusual, this walk can fail.
-- **After Phase 6**: Likely the heap stack switch failed. Check that the new stack
-  is properly aligned and large enough.
+3. Try BIOS boot instead of UEFI
+4. Add `-no-reboot` to catch triple faults
 
 ### Double Fault After Enabling Interrupts
 
-This was the most common Phase 1 failure mode. Possible causes:
-
-1. **Missing data segment in GDT**: See the [GDT data segment bug](kernel-internals.md#the-data-segment-bug-critical-phase-1-fix)
-   in kernel-internals.md. SS must be loaded with a valid data segment selector.
-   This was the hardest Phase 1 bug.
-2. **APIC not disabled**: UEFI enables the Local APIC. Both APIC and PIC delivering
-   timer interrupts simultaneously causes a double fault. Fix: clear bit 11 of
-   `IA32_APIC_BASE` MSR (0x1B) before PIC init.
-3. **Stack overflow**: The bootloader's 128 KiB stack is exhausted after init.
-   See the next section.
+Common causes:
+1. **Missing data segment in GDT**: SS must be loaded with a valid data segment
+2. **APIC not disabled**: UEFI enables Local APIC, conflicts with PIC
+3. **Stack overflow**: Bootloader's 128 KiB stack exhausted (see below)
 
 ---
 
 ## The Stack Overflow Fix
 
-This is documented here because it is a critical build/run issue that manifests as
-seemingly random double faults after enabling interrupts.
-
 ### Symptom
 
 After all init phases complete and interrupts are enabled, the first timer or
-keyboard interrupt causes a double fault. The fault appears to be a stack overflow
-(page fault at a guard page address).
+keyboard interrupt causes a double fault.
 
 ### Root Cause
 
 The bootloader provides a 128 KiB kernel stack. During boot, every `log::info!()`
-call performs `format_args!()` which pushes large stack frames (the `fmt::Arguments`
-type and its formatting machinery). After 6 phases of init with dozens of log calls
-plus PCI enumeration logging 30+ devices, the stack is nearly full.
+call performs `format_args!()` which pushes large stack frames. After 6 phases of
+init with dozens of log calls plus PCI enumeration, the stack is nearly full.
 
-When interrupts are enabled, the ISR pushes an interrupt frame plus any handler
-logic onto this nearly-full stack -> overflow -> page fault -> double fault.
+### Solution
 
-### Solution (Two Parts)
-
-**Part 1**: Increase the bootloader stack to 128 KiB (from default ~16 KiB):
+1. Request 128 KiB from the bootloader (up from default ~16 KiB)
+2. Allocate a fresh 4 MiB stack on the heap after heap init
+3. Switch RSP to the new stack before enabling interrupts
 
 ```rust
-// kernel/src/main.rs
-static BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.kernel_stack_size = 128 * 1024;
-    config
-};
-```
-
-**Part 2**: Allocate a fresh 4 MiB stack on the heap and switch to it before
-enabling interrupts:
-
-```rust
-const NEW_STACK_SIZE: usize = 4 * 1024 * 1024;  // 4 MiB
-let new_stack = alloc::vec![0u8; NEW_STACK_SIZE];
-let new_stack_top = new_stack.as_ptr() as u64 + NEW_STACK_SIZE as u64;
-core::mem::forget(new_stack);  // Leak -- stack must never be freed
+const NEW_STACK_SIZE: usize = 4 * 1024 * 1024;
+let layout = alloc::alloc::Layout::from_size_align(NEW_STACK_SIZE, 16).unwrap();
+let new_stack_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+let new_stack_top = (new_stack_ptr as u64 + NEW_STACK_SIZE as u64) & !0xF;
 
 unsafe {
     core::arch::asm!(
@@ -438,23 +391,17 @@ unsafe {
 }
 ```
 
-The `mem::forget()` is essential -- if the Vec were dropped, the stack memory would
-be freed while still in active use.
-
 ---
 
 ## Environment Variables
 
-Build-time environment variables read by `env!()` or `option_env!()` during
-compilation:
+Build-time environment variables read by `env!()` or `option_env!()`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDIO_API_KEY` | (none) | Baked-in Anthropic API key. Skips OAuth device flow at boot. **Dev only** -- do not bake production keys. |
-| `CLAUDIO_LOG_LEVEL` | `info` | Log level filter: `trace`, `debug`, `info`, `warn`, `error`. (Not yet wired up -- all levels currently enabled.) |
-| `CLAUDIO_QEMU` | `0` | Set to `1` for QEMU-friendly defaults (VirtIO assumptions, SLIRP network defaults). |
-
-Example:
+| `CLAUDIO_API_KEY` | (none) | Baked-in Anthropic API key for dev (skips OAuth) |
+| `CLAUDIO_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `CLAUDIO_QEMU` | `0` | Set to `1` for QEMU-friendly defaults |
 
 ```bash
 # Build with a dev API key
@@ -470,65 +417,60 @@ cargo build
 ## Project File Layout
 
 ```
-J:\baremetal claude\
-|-- CLAUDE.md                  Project design document and architecture spec
-|-- README.md                  User-facing README with status and build guide
-|-- HANDOFF.md                 Complete session summary and handoff notes
-|-- Cargo.toml                 Workspace root (shared deps + [patch.crates-io])
-|-- x86_64-claudio.json        Custom target with SSE+AES-NI for TLS crypto
-|-- rust-toolchain.toml        Nightly Rust + components + targets
-|-- .cargo/
-|   +-- config.toml            Default target, build-std, QEMU runner
+baremetal-claude/
+|-- CLAUDE.md                  Project design document
+|-- README.md                  User-facing README
+|-- Cargo.toml                 Workspace root (33 crates)
+|-- x86_64-claudio.json        Custom target with SSE+AES-NI
+|-- rust-toolchain.toml        Nightly Rust + components
+|-- run.ps1                    Windows QEMU launcher with session persistence
+|-- .cargo/config.toml         Default target, build-std
 |
-|-- kernel/
-|   |-- Cargo.toml             Binary crate: claudio-os
-|   +-- src/
-|       |-- main.rs            Entry point, boot phases, stack switch, panic
-|       |-- gdt.rs             GDT + TSS (data segment fix, IST stacks)
-|       |-- memory.rs          Frame allocator + 16 MiB heap mapping
-|       |-- interrupts.rs      IDT + APIC disable + PIC ICW + ISR handlers
-|       |-- keyboard.rs        Async PS/2 keyboard (ScancodeStream)
-|       |-- serial.rs          16550 UART + serial_print! macros
-|       |-- logger.rs          log crate backend -> serial
-|       |-- framebuffer.rs     GOP framebuffer (page table walk + put_pixel)
-|       |-- pci.rs             PCI config space enumeration
-|       +-- executor.rs        Cooperative async task executor
-|
-|-- crates/
-|   |-- terminal/              Split-pane framebuffer terminal renderer
-|   |-- net/                   VirtIO-net + smoltcp + TLS 1.3 + HTTP/SSE
-|   |-- api-client/            Anthropic Messages API + SSE streaming
-|   |-- auth/                  OAuth device flow + credential types
-|   |-- agent/                 Agent session lifecycle + tool loop
-|   |-- editor/                Nano-like text editor (~400 LOC, 11 tests)
-|   |-- python-lite/           Minimal Python interpreter (28 tests)
-|   |-- rustc-lite/            Bare-metal Rust compiler via Cranelift
-|   |-- cranelift-codegen-nostd/       Forked cranelift-codegen for no_std
-|   |-- cranelift-frontend-nostd/      Forked cranelift-frontend for no_std
-|   |-- cranelift-codegen-shared-nostd/ Forked shared crate for no_std
-|   |-- cranelift-control-nostd/       Forked cranelift-control for no_std
-|   |-- rustc-hash-nostd/              Forked rustc-hash for no_std
-|   |-- arbitrary-stub/                no_std stub for arbitrary crate
-|   |-- wraith-dom/            no_std HTML parser + CSS selectors (WIP)
-|   |-- wraith-transport/      HTTP/HTTPS over smoltcp (WIP)
-|   |-- wraith-render/         HTML -> text-mode character grid (WIP)
-|   +-- fs-persist/            FAT32 persistence (stubbed)
+|-- kernel/                    Kernel binary (4,537 lines)
+|-- crates/                    31 library crates
+|   |-- terminal/              Split-pane framebuffer terminal
+|   |-- net/                   VirtIO-net + smoltcp + TLS + HTTP
+|   |-- api-client/            Anthropic Messages API + SSE
+|   |-- auth/                  OAuth device flow + API key
+|   |-- agent/                 Agent session lifecycle
+|   |-- shell/                 AI-native shell (28 builtins)
+|   |-- vfs/                   Virtual filesystem layer
+|   |-- ext4/                  ext4 filesystem
+|   |-- btrfs/                 btrfs filesystem
+|   |-- ntfs/                  NTFS filesystem
+|   |-- ahci/                  AHCI/SATA driver
+|   |-- nvme/                  NVMe driver
+|   |-- intel-nic/             Intel NIC driver
+|   |-- xhci/                  xHCI USB 3.0 + HID
+|   |-- acpi/                  ACPI table parser
+|   |-- hda/                   Intel HD Audio
+|   |-- smp/                   SMP multi-core
+|   |-- gpu/                   NVIDIA GPU compute
+|   |-- sshd/                  Post-quantum SSH daemon
+|   |-- editor/                Nano-like text editor
+|   |-- python-lite/           Python interpreter
+|   |-- js-lite/               JavaScript evaluator
+|   |-- rustc-lite/            Rust compiler (Cranelift)
+|   |-- wraith-dom/            HTML parser
+|   |-- wraith-render/         HTML -> text renderer
+|   |-- wraith-transport/      HTTP/HTTPS client
+|   |-- fs-persist/            FAT32 persistence (stubbed)
+|   +-- cranelift-*-nostd/     6 forked Cranelift crates
 |
 |-- tools/
-|   |-- image-builder/         Host-side UEFI/BIOS disk image builder
-|   |-- auth-relay.py          HTTP proxy for API key management
-|   |-- build-server.py        Host-side Rust compilation service
-|   |-- tls-proxy.py           TLS termination proxy (dev/debug)
-|   +-- tls-bridge.py          TLS bridge utility
+|   |-- image-builder/         UEFI/BIOS disk image builder
+|   |-- auth-relay.py          API key management proxy
+|   |-- build-server.py        Host-side Rust compilation
+|   +-- tls-proxy.py           TLS termination (debug)
 |
 +-- docs/                      Documentation
-    |-- architecture.md        System overview, boot sequence, memory map
-    |-- kernel-internals.md    GDT, memory, PIC, serial, PCI
-    |-- terminal.md            Font rendering, VTE, split panes, colors
-    |-- networking.md          VirtIO-net, smoltcp, DNS, TLS 1.3, HTTP
-    |-- api-protocol.md        Messages API, SSE, OAuth, tokens, tools
-    |-- building.md            This file
-    |-- contributing.md        Dev workflow, conventions, testing
-    |-- WRAITH-BAREMETAL-PORT.md    Wraith browser port specification
-    +-- WRAITH-CRATES-HANDOFF.md    Wraith crates handoff notes
+    |-- ARCHITECTURE.md        Full system architecture
+    |-- HARDWARE.md            Hardware driver docs
+    |-- NETWORKING.md          Network stack docs
+    |-- FILESYSTEMS.md         Filesystem docs
+    |-- SHELL.md               Shell docs
+    |-- AGENTS.md              Multi-agent system docs
+    |-- BUILDING.md            This file
+    |-- OPEN-SOURCE-CRATES.md  Published crates catalog
+    +-- ROADMAP.md             Feature roadmap
 ```

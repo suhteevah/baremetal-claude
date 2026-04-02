@@ -44,6 +44,7 @@ pub mod dir;
 pub mod fs_trait;
 pub mod device;
 pub mod vfs;
+pub mod adapters;
 
 pub use path::Path;
 pub use mount::{MountPoint, MountTable, MountOptions};

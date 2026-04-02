@@ -1,664 +1,278 @@
 # ClaudioOS Architecture
 
-Deep technical overview of ClaudioOS's design, from the virtual address space to
-the async executor's task lifecycle.
-
-**Source entry point:** `kernel/src/main.rs`
-
----
-
-## Table of Contents
-
-- [System Overview](#system-overview)
-- [Virtual Address Space Map](#virtual-address-space-map)
-- [Boot Sequence](#boot-sequence)
-- [The Heap Stack Switch](#the-heap-stack-switch)
-- [Interrupt Handling Flow](#interrupt-handling-flow)
-- [Async Executor Architecture](#async-executor-architecture)
-- [Crate Dependency Graph](#crate-dependency-graph)
-- [Source File Map](#source-file-map)
-
----
-
 ## System Overview
 
-ClaudioOS is a single-address-space, bare-metal Rust application that boots via UEFI
-and runs entirely in Ring 0. There is no kernel/user boundary, no syscalls, and no
-process isolation. Every agent session is a cooperatively-scheduled async task driven
-by hardware interrupts.
+ClaudioOS is a bare-metal Rust OS that boots via UEFI and runs AI coding agents
+(Anthropic Claude) directly on hardware. No Linux kernel, no POSIX, no libc. A
+single-address-space async Rust application manages all hardware.
+
+**Target**: x86_64 UEFI machines (QEMU for dev, i9-11900K/RTX 3070 Ti for prod)
+
+## Full Stack Diagram
 
 ```
-+-----------------------------------------------------+
-|                  Agent Dashboard                     |
-|  +----------+ +----------+ +----------+             |
-|  | Agent 1  | | Agent 2  | | Agent 3  |  ...       |
-|  | (pane)   | | (pane)   | | (pane)   |             |
-|  +----------+ +----------+ +----------+             |
-+-----------------------------------------------------+
-|              Agent Session Manager                   |
-|         (async tasks, one per agent)                 |
-+--------------+--------------+-----------------------+
-|  API Client  |     Auth     |   Terminal Renderer   |
-|  (Messages   |  (OAuth      |   (framebuffer +      |
-|   API + SSE) |   device     |    ANSI + split       |
-|              |   flow)      |    panes)             |
-+--------------+--------------+-----------------------+
-|              Async Executor (interrupt-driven)       |
-+-----------------------------------------------------+
-|     Net (smoltcp + TLS)    |    FS (FAT32 persist)  |
-+----------------------------+------------------------+
-|   NIC Driver (virtio-net / e1000)  |  PS/2 Keyboard |
-+------------------------------------+----------------+
-|              x86_64 Kernel Core                      |
-|   (paging, heap, GDT/IDT, interrupts, PCI)          |
-+-----------------------------------------------------+
-|              UEFI Boot (bootloader crate v0.11)      |
-+-----------------------------------------------------+
++=====================================================================+
+|                        USER-FACING LAYER                            |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  | Agent 1 (pane)    | | Agent 2 (pane)    | | Agent 3 (pane)    |  |
+|  | claude session    | | claude session    | | claude session    |  |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  +-----------------------------------------------------------+     |
+|  | AI-Native Shell  (28 builtins + natural language -> Claude)|     |
+|  +-----------------------------------------------------------+     |
++=====================================================================+
+|                      SESSION MANAGEMENT                             |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  | Agent Manager     | | Dashboard/Layout  | | SSH Daemon (PQ)   |  |
+|  | tool loop, state  | | tmux-style panes  | | ML-KEM + X25519   |  |
+|  +-------------------+ +-------------------+ +-------------------+  |
++=====================================================================+
+|                       APPLICATION SERVICES                          |
+|  +-----------+ +----------+ +----------+ +---------+ +-----------+ |
+|  | API Client| | Auth     | | Editor   | | Python  | | JS Lite   | |
+|  | Messages  | | OAuth +  | | nano-    | | Interp  | | Cloudflare| |
+|  | SSE + TLS | | API key  | | like     | | 28 tests| | solver    | |
+|  +-----------+ +----------+ +----------+ +---------+ +-----------+ |
+|  +-----------+ +---------------------------------------------------+|
+|  | Rust Comp | | Wraith Browser (DOM + Transport + Render)         | |
+|  | Cranelift | +---------------------------------------------------+|
+|  +-----------+                                                      |
++=====================================================================+
+|                       FILESYSTEM LAYER                              |
+|  +---------------------------------------------------------------+ |
+|  |                  VFS (mount table, POSIX API)                  | |
+|  +-------+--------+--------+--------+----------------------------+ |
+|  | ext4  | btrfs  | NTFS   | FAT32  | GPT/MBR partition detect   | |
+|  +-------+--------+--------+--------+----------------------------+ |
++=====================================================================+
+|                       NETWORK STACK                                 |
+|  +---------------------------------------------------------------+ |
+|  | HTTP/HTTPS Client | claude.ai API | SSH Daemon                | |
+|  +-------------------+---------------+---------------------------+ |
+|  | TLS 1.3 (embedded-tls, AES-128-GCM-SHA256)                   | |
+|  +---------------------------------------------------------------+ |
+|  | smoltcp TCP/IP (DHCP, DNS, TCP, UDP)                          | |
+|  +---------------------------------------------------------------+ |
++=====================================================================+
+|                       HARDWARE DRIVERS                              |
+|  +----------+ +---------+ +-----------+ +--------+ +------------+ |
+|  | VirtIO-  | | Intel   | | AHCI/SATA | | NVMe   | | xHCI USB   | |
+|  | net      | | NIC     | | driver    | | driver | | 3.0 + HID  | |
+|  +----------+ +---------+ +-----------+ +--------+ +------------+ |
+|  +----------+ +---------+ +-----------+ +--------+ +------------+ |
+|  | PS/2 Kbd | | HDA     | | GPU       | | ACPI   | | SMP/APIC   | |
+|  | IRQ1     | | Audio   | | NVIDIA    | | tables | | multi-core | |
+|  +----------+ +---------+ +-----------+ +--------+ +------------+ |
++=====================================================================+
+|                       KERNEL CORE                                   |
+|  +---------------------------------------------------------------+ |
+|  | Async Executor (interrupt-driven, hlt when idle)              | |
+|  +---------------------------------------------------------------+ |
+|  | Memory: 48 MiB heap (linked_list_allocator), page tables      | |
+|  | CPU: GDT + TSS, IDT, 8259 PIC, PIT timer (18.2 Hz)           | |
+|  | PCI: bus enumeration, BAR mapping, bus mastering               | |
+|  +---------------------------------------------------------------+ |
++=====================================================================+
+|                       BOOT                                          |
+|  +---------------------------------------------------------------+ |
+|  | UEFI -> bootloader v0.11 -> kernel_main -> post_stack_switch  | |
+|  |   -> main_async -> network init -> auth -> dashboard          | |
+|  +---------------------------------------------------------------+ |
++=====================================================================+
 ```
-
----
-
-## Virtual Address Space Map
-
-The bootloader (v0.11) sets up the initial page tables before handing control to
-`kernel_main`. The virtual address space is arranged as follows:
-
-```
-Virtual Address Space (x86_64, 48-bit canonical addresses)
-==========================================================
-
-0x0000_0000_0000_0000 +----------------------------------+
-                       |  (unmapped / guard)              |
-                       +----------------------------------+
-                       |                                  |
-                       |  Kernel code + data + rodata     |
-                       |  (identity-mapped by bootloader) |
-                       |                                  |
-                       +----------------------------------+
-                       |                                  |
-                       |  Physical memory offset mapping  |
-                       |  (ALL physical RAM accessible    |
-                       |   at phys + phys_mem_offset)     |
-                       |                                  |
-                       |  The bootloader provides the     |
-                       |  offset as a dynamic value in    |
-                       |  BootInfo. Configured via:       |
-                       |  Mapping::Dynamic in             |
-                       |  BOOTLOADER_CONFIG.              |
-                       |                                  |
-                       +----------------------------------+
-                       |                                  |
-0x0000_4444_4444_0000  |  Kernel Heap (16 MiB)            |
-                       |  HEAP_START = 0x4444_4444_0000   |
-                       |  HEAP_SIZE  = 16 MiB             |
-                       |  Managed by linked_list_allocator|
-                       |  (kernel/src/memory.rs)          |
-                       |                                  |
-0x0000_4444_5444_0000  +----------------------------------+
-                       |  (unmapped, available for heap   |
-                       |   growth in future phases)       |
-                       +----------------------------------+
-                       |                                  |
-                       |  Bootloader kernel stack         |
-                       |  (128 KiB, set via               |
-                       |   BootloaderConfig::              |
-                       |   kernel_stack_size)             |
-                       |                                  |
-                       +----------------------------------+
-                       |                                  |
-                       |  Heap-allocated kernel stack     |
-                       |  (4 MiB, allocated at boot,      |
-                       |   leaked via mem::forget)        |
-                       |  Actual runtime stack after      |
-                       |  post_stack_switch().            |
-                       |                                  |
-                       +----------------------------------+
-                       |                                  |
-                       |  GOP Framebuffer                 |
-                       |  (mapped by UEFI at a high virt  |
-                       |   address, e.g. 0x20000000000;   |
-                       |   kernel accesses it through the |
-                       |   phys_mem_offset mapping after  |
-                       |   page table walk to find the    |
-                       |   physical address)              |
-                       |                                  |
-                       +----------------------------------+
-                       |                                  |
-                       |  IST stacks (static .bss)        |
-                       |  IST[0]: 20 KiB double-fault     |
-                       |  IST[1]: 16 KiB timer interrupt  |
-                       |                                  |
-                       +----------------------------------+
-```
-
-### Key Address Details
-
-- **Physical memory offset mapping**: Configured via `BootloaderConfig` with
-  `physical_memory = Some(Mapping::Dynamic)`. The bootloader picks a base address
-  and maps all physical memory contiguously starting there. This is how
-  `OffsetPageTable` translates physical addresses to virtual ones.
-
-- **Heap at 0x4444_4444_0000**: Chosen to be far from the kernel's identity-mapped
-  region and the bootloader's physical memory mapping. The heap virtual pages are
-  backed by physical frames allocated from the UEFI memory map. See
-  `kernel/src/memory.rs` constants `HEAP_START` and `HEAP_SIZE`.
-
-- **Two kernel stacks**: The bootloader provides a 128 KiB stack, but this is nearly
-  exhausted after init (log formatting is extremely stack-heavy). The kernel allocates
-  a fresh 4 MiB stack on the heap and switches to it. See
-  [The Heap Stack Switch](#the-heap-stack-switch).
-
-- **Framebuffer address indirection**: The bootloader maps the GOP framebuffer at its
-  own chosen virtual address, but this mapping may have restrictive flags (lacking
-  WRITABLE). The kernel translates to the physical address via page table walk, then
-  accesses it through the physical memory offset mapping which is known to be
-  PRESENT + WRITABLE. See `kernel/src/framebuffer.rs`.
-
----
 
 ## Boot Sequence
 
-The boot sequence proceeds through numbered phases, each depending on the previous.
-All phases execute in `kernel_main()` at `kernel/src/main.rs:48`.
-
 ```
-UEFI Firmware
-    |
-    v
-bootloader crate (v0.11)
-    - Reads kernel ELF from disk image
-    - Sets up page tables (identity map + physical memory offset)
-    - Initializes GOP framebuffer
-    - Reads UEFI memory map
-    - Disables interrupts
-    - Jumps to kernel entry point
-    |
-    v
-kernel_main(boot_info: &'static mut BootInfo)       [kernel/src/main.rs:48]
-    |
-    |-- Phase -1: Proof of life
-    |     Raw serial write to port 0x3F8 (no UART init).
-    |     Pushes bytes directly: "[claudio] kernel_main entered\r\n"
-    |     Proves we reached kernel_main in QEMU even if UART init fails.
-    |
-    |-- Phase 0a: serial::init()                     [kernel/src/serial.rs]
-    |     Full 16550 UART init: disable IRQs, DLAB, baud divisor=1
-    |     (115200 baud), 8N1, FIFO enable, normal operation.
-    |
-    |-- Phase 0b: logger::init()                     [kernel/src/logger.rs]
-    |     Sets log crate global logger -> all log::* macros route
-    |     to serial output. Max level = Trace.
-    |
-    |-- Phase 1: gdt::init()                         [kernel/src/gdt.rs]
-    |     Loads GDT with:
-    |       - Kernel code segment (64-bit, DPL=0)
-    |       - Kernel DATA segment (64-bit, DPL=0)    *** CRITICAL ***
-    |       - TSS segment (with IST[0] and IST[1])
-    |     Sets CS, DS, ES, SS segment registers.
-    |     (See kernel-internals.md for the data segment bug)
-    |
-    |-- Phase 2: memory::init(phys_mem_offset, memory_regions)
-    |     1. Reads CR3 -> active L4 page table       [kernel/src/memory.rs]
-    |     2. Creates OffsetPageTable mapper
-    |     3. Creates BootInfoFrameAllocator from UEFI memory map
-    |     4. Maps HEAP_SIZE (16 MiB) pages at HEAP_START (0x4444_4444_0000)
-    |     5. Initializes linked_list_allocator as #[global_allocator]
-    |
-    |-- Phase 3: interrupts::init()                  [kernel/src/interrupts.rs]
-    |     1. Disables Local APIC (clears bit 11 of IA32_APIC_BASE MSR 0x1B)
-    |        UEFI firmware enables the APIC; if left on, BOTH APIC and PIC
-    |        deliver timer interrupts on the same vector -> double fault.
-    |     2. Loads IDT with exception + IRQ handlers:
-    |        - breakpoint (vec 3), page_fault (vec 14),
-    |          double_fault (vec 8, IST[0])
-    |        - timer (vec 32), keyboard (vec 33)
-    |     3. Initializes 8259 PIC pair (ICW1-ICW4 sequence):
-    |        - PIC1: offset 32, PIC2: offset 40
-    |        - Unmasks IRQ0 (timer) + IRQ1 (keyboard)
-    |     NOTE: Interrupts NOT enabled yet (STI not called).
-    |
-    |-- Phase 3b: keyboard::init()                   [kernel/src/keyboard.rs]
-    |     Creates pc-keyboard decoder (US 104-key, ScancodeSet1).
-    |
-    |-- Phase 4: framebuffer::init(fb, phys_mem_offset)
-    |     Translates bootloader's FB virt addr -> physical  [kernel/src/framebuffer.rs]
-    |     via page table walk. Accesses through phys_mem_offset
-    |     mapping. Clears to black.
-    |
-    |-- Phase 5: pci::enumerate()                    [kernel/src/pci.rs]
-    |     Brute-force scan of bus 0, devices 0-31, function 0.
-    |     Identifies VirtIO-net (1AF4:1000), e1000 (8086:100E), etc.
-    |     Enables bus mastering for DMA-capable devices.
-    |
-    |-- Phase 6: Heap stack switch + executor start
-    |     (See detailed section below)
-    |
-    v
-  executor::run() never returns (infinite poll/hlt loop)
+UEFI firmware
+  |
+  v
+bootloader crate v0.11
+  - Sets up identity-mapped page tables
+  - Maps physical memory at offset
+  - Initializes GOP framebuffer
+  - Reads UEFI memory map
+  - Jumps to kernel_main
+  |
+  v
+kernel_main(boot_info)
+  |-- Phase 0: Enable SSE/SSE2/AVX (CR0/CR4/XCR0 + CPUID)
+  |-- Phase 0a: Serial UART init (0x3F8, 115200 baud)
+  |-- Phase 0b: Logger init (serial + framebuffer sinks)
+  |-- Phase 1: GDT + TSS
+  |-- Phase 2: Heap allocator (48 MiB via linked_list_allocator)
+  |-- Phase 3: IDT + 8259 PIC (APIC disabled for UEFI compat)
+  |-- Phase 3b: PS/2 keyboard decoder
+  |-- Phase 4: Framebuffer init + early banner render
+  |-- Phase 5: PCI bus enumeration + device discovery
+  |-- Phase 6: Allocate 4 MiB heap stack, switch RSP
+  |
+  v
+post_stack_switch()
+  |-- Enable interrupts (sti)
+  |-- Start async executor
+  |
+  v
+main_async()
+  |-- Find NIC (VirtIO-net or e1000)
+  |-- Init VirtIO driver + smoltcp + DHCP
+  |-- Resolve DNS
+  |-- Authenticate (API key or claude.ai OAuth)
+  |-- Load session (fw_cfg for persistence across reboots)
+  |-- Launch agent dashboard
+  |
+  v
+Dashboard loop (forever)
+  |-- Render split-pane terminal
+  |-- Handle keyboard input
+  |-- Dispatch to agent sessions
+  |-- Agent tool loop (send -> tool_use -> execute -> resend)
 ```
 
-**Critical ordering constraints**:
-- Heap (Phase 2) MUST be before interrupts (Phase 3) because the IDT is lazily
-  initialized via `spin::Lazy` and interrupt handlers may allocate.
-- Interrupts MUST NOT be enabled until the executor is ready (Phase 6).
-- The APIC MUST be disabled before PIC init to prevent conflicting timer delivery.
-
----
-
-## The Heap Stack Switch
-
-This is one of the most important implementation details in ClaudioOS and was the
-solution to a critical Phase 1 bug: the bootloader's kernel stack getting exhausted
-by `log` crate formatting during init.
-
-### The Problem
-
-The bootloader provides a 128 KiB kernel stack (configured via
-`BootloaderConfig::kernel_stack_size`). During boot, every `log::info!()` call
-performs `format_args!()` which pushes significant stack frames. By Phase 5 (PCI
-enumeration), the stack is deeply nested:
+## Memory Layout
 
 ```
-kernel_main
-  -> gdt::init -> log::info! -> serial_println! -> format_args! -> Write::write_fmt
-  -> memory::init -> log::info! -> ...
-  -> interrupts::init -> log::info! -> ...
-  -> pci::enumerate -> log::info! -> ... (30+ devices * log formatting)
++---------------------+ 0xFFFF_FFFF_FFFF_FFFF
+|                     |
+| Physical memory     |   Bootloader maps all physical RAM at an offset
+| offset mapping      |   (PHYS_MEM_OFFSET stored in AtomicU64)
+|                     |
++---------------------+
+|                     |
+| Kernel heap         |   48 MiB, managed by linked_list_allocator
+| (linked list alloc) |   Allocated from UEFI USABLE memory regions
+|                     |
++---------------------+
+|                     |
+| Heap-allocated      |   4 MiB, 16-byte aligned
+| kernel stack        |   RSP switched in kernel_main Phase 6
+|                     |
++---------------------+
+|                     |
+| Framebuffer         |   Direct GOP framebuffer (e.g., 2560x1600x4 bytes)
+| (write-combined)    |   Double-buffered with dirty region tracking
+|                     |
++---------------------+
+|                     |
+| MMIO regions        |   PCI BARs for VirtIO-net, AHCI, NVMe, GPU, etc.
+| (device memory)     |   Identity-mapped via physical memory offset
+|                     |
++---------------------+
+|                     |
+| Kernel code + data  |   Loaded by bootloader from UEFI disk image
+| (identity-mapped)   |
+|                     |
++---------------------+ 0x0000_0000_0000_0000
 ```
-
-After all init phases complete, the remaining stack space is too small for the
-executor's BTreeMap operations and interrupt handler log formatting. Enabling
-interrupts at this point causes a stack overflow -> page fault -> double fault.
-
-### The Solution
-
-The kernel allocates a fresh 4 MiB stack on the heap and switches to it via inline
-assembly before enabling interrupts:
-
-```rust
-// kernel/src/main.rs, Phase 6
-const NEW_STACK_SIZE: usize = 4 * 1024 * 1024;  // 4 MiB
-let new_stack = alloc::vec![0u8; NEW_STACK_SIZE];
-let new_stack_top = new_stack.as_ptr() as u64 + NEW_STACK_SIZE as u64;
-core::mem::forget(new_stack);  // Leak -- kernel stack must never be freed
-
-unsafe {
-    core::arch::asm!(
-        "mov rsp, {stack}",
-        "call {entry}",
-        stack = in(reg) new_stack_top,
-        entry = in(reg) post_stack_switch as *const (),
-        options(noreturn)
-    );
-}
-```
-
-The `post_stack_switch()` function runs on the fresh stack, enables interrupts,
-and starts the executor:
-
-```
-post_stack_switch()                     [kernel/src/main.rs:141]
-    |
-    |-- interrupts::enable()  -> x86 STI instruction
-    |-- executor::run(main_async)
-    |     |
-    |     v
-    |   main_async() [runs inside executor]
-    |     - Creates keyboard::ScancodeStream (async)
-    |     - Loops: await next_key(), echo to serial
-    v
-  (never returns)
-```
-
-### Why `mem::forget`?
-
-The Vec backing the new stack is leaked intentionally. If it were dropped, the
-stack memory would be returned to the allocator while still in active use --
-instant corruption. The kernel stack must live for the entire lifetime of the
-system.
-
----
-
-## Interrupt Handling Flow
-
-ClaudioOS uses the dual 8259 PIC (Programmable Interrupt Controller) for hardware
-interrupt routing. The Local APIC is explicitly disabled because UEFI firmware
-enables it and it would conflict with PIC timer delivery.
-
-### PIC Configuration
-
-```
-PIC1 (Master)                    PIC2 (Slave)
-Port 0x20 (cmd) / 0x21 (data)   Port 0xA0 (cmd) / 0xA1 (data)
-
-ICW1: 0x11  (init, cascade, ICW4 needed)
-ICW2: 0x20  (offset = 32)       ICW2: 0x28  (offset = 40)
-ICW3: 0x04  (slave on IRQ2)     ICW3: 0x02  (cascade identity = 2)
-ICW4: 0x01  (8086 mode)         ICW4: 0x01  (8086 mode)
-
-OCW1 (mask):
-  PIC1: 0b1111_1100  -> IRQ0 (timer) + IRQ1 (keyboard) unmasked
-  PIC2: 0b1111_1111  -> all masked
-
-Vector mapping:
-  IRQ0  (timer)    -> Vector 32    [unmasked]
-  IRQ1  (keyboard) -> Vector 33    [unmasked]
-  IRQ2  (cascade)  -> (internal)
-  IRQ3-7           -> Vectors 35-39 [masked]
-  IRQ8-15          -> Vectors 40-47 [masked]
-```
-
-### APIC Disable
-
-UEFI firmware enables the Local APIC as part of its boot process. If we initialize
-the 8259 PIC without disabling the APIC first, BOTH can deliver timer interrupts on
-the same vector, causing a double fault when IRQ0 fires. The fix:
-
-```rust
-// kernel/src/interrupts.rs
-let mut apic_base_msr = Msr::new(0x1B);
-let val = apic_base_msr.read();
-apic_base_msr.write(val & !(1 << 11));  // Clear Global Enable bit
-```
-
-### Interrupt Flow Diagram
-
-```
-Hardware Event (e.g., key press)
-    |
-    v
-PS/2 Controller raises IRQ1
-    |
-    v
-PIC1 delivers Vector 33 to CPU
-    |
-    v
-CPU saves state, looks up IDT[33]
-    |
-    v
-keyboard_handler() [extern "x86-interrupt"]
-    |
-    |-- 1. Read scancode from port 0x60
-    |      (MUST read BEFORE sending EOI to avoid losing data)
-    |
-    |-- 2. keyboard::push_scancode(scancode)
-    |      |-- Lock SCANCODE_QUEUE, push_back
-    |      |-- Lock KEYBOARD_WAKER, take + wake
-    |      |      |-- waker.wake() -> wake_task(id)
-    |      |      |      |-- Lock READY_QUEUE, push task_id
-    |
-    |-- 3. Send EOI (0x20) to PIC1 via notify_end_of_interrupt()
-    |
-    v
-CPU restores state, returns to interrupted code
-    |
-    v
-Executor sees task_id in READY_QUEUE on next loop iteration
-    |
-    v
-Polls the keyboard consumer future (NextKey)
-    |
-    v
-NextKey drains SCANCODE_QUEUE through pc-keyboard decoder
-```
-
-### Timer Handler
-
-The timer handler is intentionally minimal -- just sends EOI. No tick counting,
-no log output (log formatting in an ISR would overflow the stack). It writes
-directly to port 0x20 without locking the PICS mutex:
-
-```rust
-extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
-    unsafe {
-        Port::<u8>::new(0x20).write(0x20);
-    }
-}
-```
-
-### Exception Handlers
-
-| Exception | Vector | Handler | Stack | Notes |
-|-----------|--------|---------|-------|-------|
-| Breakpoint | 3 | `breakpoint_handler` | Normal | Raw serial write (no log) |
-| Page Fault | 14 | `page_fault_handler` | Normal | Reads CR2, logs, halts |
-| Double Fault | 8 | `double_fault_handler` | IST[0] (20 KiB) | Logs stack frame, halts |
-
-The double-fault handler runs on IST[0] specifically to handle stack overflow
-cases where the page fault handler itself would triple-fault.
-
----
-
-## Async Executor Architecture
-
-The executor (`kernel/src/executor.rs`) is a cooperative, single-threaded scheduler
-where hardware interrupts serve as the sole source of wake-ups.
-
-### Architecture Diagram
-
-```
-+------------------+     +-----------------+     +------------------+
-|   ISR Handlers   |     |   READY_QUEUE   |     |    Executor      |
-|                  |     |   (Mutex<Vec>)  |     |    run() loop    |
-|  keyboard_handler| --> | [TaskId(0),     | --> |                  |
-|  timer_handler   |     |  TaskId(2), ...]|     | 1. drain queue   |
-|  nic_handler     |     +-----------------+     | 2. poll tasks    |
-+------------------+           ^                 | 3. hlt if empty  |
-                               |                 +------------------+
-                               |                        |
-                      +--------+--------+               |
-                      |   TaskWaker     |               v
-                      |   (Arc<Wake>)   |     +------------------+
-                      |                 | <-- |    EXECUTOR      |
-                      | wake() pushes   |     | (Mutex<Option>)  |
-                      | to READY_QUEUE  |     |                  |
-                      +-----------------+     | tasks: BTreeMap  |
-                                              | waker_cache      |
-                                              | next_id: u64     |
-                                              +------------------+
-```
-
-### Key Design: Two Separate Locks
-
-The executor uses two separate `Mutex`-protected structures to prevent deadlocks
-between ISR handlers and the scheduling loop:
-
-1. **`READY_QUEUE`** (`Mutex<Vec<TaskId>>`): Only holds task IDs that need polling.
-   Locked briefly by ISR wakers and by the executor's drain step.
-
-2. **`EXECUTOR`** (`Mutex<Option<Executor>>`): Holds the full task map (`BTreeMap`)
-   and waker cache. **Never locked by ISR handlers.** Locked by `run()` to
-   extract/insert tasks and by `spawn()` to add new tasks.
-
-### Task Lifecycle
-
-```
-spawn(future)
-    |
-    v
-[1] Lock EXECUTOR -> assign TaskId(N) -> insert Task into BTreeMap
-    |
-    v
-[2] Lock READY_QUEUE -> push TaskId(N)
-    |  (EXECUTOR lock released first to avoid nested lock ordering issues)
-    v
-[3] Executor drain loop picks up TaskId(N)
-    |
-    v
-[4] Lock EXECUTOR -> REMOVE Task from map (so lock is NOT held during poll)
-    |                 (this prevents deadlock when poll() calls spawn())
-    v
-[5] Create Context from cached Waker -> poll future
-    |
-    +-- Poll::Pending  -> Lock EXECUTOR -> re-insert Task -> wait for wake
-    |
-    +-- Poll::Ready(()) -> Lock EXECUTOR -> remove waker cache entry -> done
-```
-
-### The HLT Race Condition Fix
-
-When no tasks are ready, the executor must atomically check the queue and halt to
-avoid missing work that arrives between the check and the halt:
-
-```rust
-// Disable interrupts to prevent this race:
-//   check empty -> [interrupt fires, pushes to queue] -> hlt (misses work)
-x86_64::instructions::interrupts::disable();
-if READY_QUEUE.lock().is_empty() {
-    // enable_and_hlt is a single x86 instruction pair (STI; HLT)
-    // that atomically enables interrupts and halts. The CPU will
-    // service one pending interrupt before halting.
-    x86_64::instructions::interrupts::enable_and_hlt();
-} else {
-    x86_64::instructions::interrupts::enable();
-}
-```
-
-### YieldNow
-
-The `YieldNow` future (`executor::yield_now()`) provides cooperative multitasking:
-- On first poll: wakes itself (re-enqueuing), returns `Pending`
-- On second poll: returns `Ready(())`
-
-This allows long-running tasks to voluntarily yield so other ready tasks get CPU time.
-
-### Spawning
-
-`executor::spawn()` can be called after `executor::run()` has initialized the global
-state. It allocates a `TaskId`, inserts the future, and pushes the ID to the ready
-queue. The EXECUTOR lock is released before touching READY_QUEUE to maintain a
-consistent lock ordering.
-
----
 
 ## Crate Dependency Graph
 
 ```
-                    kernel (binary, #![no_std] #![no_main])
-                   /   |    |    \    \     \     \      \
-                  v    v    v     v    v     v     v      v
-           terminal  net  auth  agent  fs  editor python  rustc-lite
-           (active) (act) (act) (act) (stub)(act) -lite   (Cranelift)
-              |       |    |     |     |     |     |        |
-              |       v    |     v     |     |     |        v
-              |   api-client     |     |     |     |   cranelift-*-nostd
-              |       |    |     |     |     |     |   (6 forked crates)
-              +-------+----+-----+-----+-----+----+
-              |                                    |
-              v                                    v
-         alloc + core                        alloc + core
-         (#![no_std])                        (#![no_std])
-
-    Wraith browser crates (WIP):
-    wraith-dom  wraith-transport  wraith-render
-         |            |                |
-         v            v                v
-     alloc+core   claudio-net      wraith-dom
+kernel
+  +-- claudio-agent
+  |     +-- claudio-api (Messages API + SSE)
+  |     |     +-- python-lite
+  |     |     +-- js-lite
+  |     +-- claudio-auth (OAuth + API key)
+  |     +-- claudio-terminal (split-pane renderer)
+  |     +-- claudio-net (VirtIO + smoltcp + TLS)
+  +-- claudio-shell
+  +-- claudio-vfs
+  |     +-- (trait implemented by ext4, btrfs, ntfs)
+  +-- claudio-ext4
+  +-- claudio-btrfs
+  +-- claudio-ntfs
+  +-- claudio-ahci
+  +-- claudio-nvme
+  +-- claudio-intel-nic
+  +-- claudio-xhci
+  +-- claudio-acpi
+  +-- claudio-hda
+  +-- claudio-smp
+  +-- claudio-gpu
+  +-- claudio-sshd
+  +-- claudio-editor
+  +-- claudio-fs (FAT32 persistence, stubbed)
+  +-- wraith-dom
+  +-- wraith-render
+  +-- wraith-transport
+  +-- rustc-lite
+        +-- cranelift-codegen-nostd
+        +-- cranelift-frontend-nostd
+        +-- cranelift-codegen-shared-nostd
+        +-- cranelift-control-nostd
+        +-- rustc-hash-nostd
+        +-- arbitrary-stub
 ```
 
-### External Crate Dependencies by Module
+## All 33 Crates
 
-| Module | Key Dependencies |
-|--------|-----------------|
-| `kernel` | `bootloader_api` 0.11, `x86_64` 0.15, `pc-keyboard` 0.8, `spin` 0.9, `linked_list_allocator` 0.10, `log` 0.4, `noto-sans-mono-bitmap` 0.3, `vte` 0.15 |
-| `terminal` | `vte` 0.15, `noto-sans-mono-bitmap` 0.3 |
-| `net` | `smoltcp` 0.12, `embedded-tls` 0.17, `embedded-io` 0.6, `rand_core` 0.6 |
-| `api-client` | `serde` 1.x (no_std, derive, alloc), `serde_json` 1.x (no_std, alloc) |
-| `auth` | (minimal, credential types + device flow prompt) |
-| `editor` | (pure no_std + alloc, no external deps) |
-| `python-lite` | (pure no_std + alloc, no external deps) |
-| `rustc-lite` | `cranelift-codegen`, `cranelift-frontend` (forked no_std) |
-| `cranelift-*-nostd` | `hashbrown`, `ahash`, `libm`, `target-lexicon` |
-| `wraith-dom` | (pure no_std + alloc, no external deps) |
-| `wraith-transport` | `claudio-net` (smoltcp, TLS) |
-| `wraith-render` | `wraith-dom` |
-| `fs-persist` | `fatfs` 0.3 (no_std, alloc) -- stubbed |
+| # | Crate | Path | Lines | Description |
+|---|-------|------|-------|-------------|
+| 1 | `claudio-os` | `kernel/` | 4,537 | Kernel binary: boot, hardware init, async executor, dashboard |
+| 2 | `claudio-terminal` | `crates/terminal/` | 1,794 | Framebuffer terminal, split panes, ANSI/VTE, font rendering |
+| 3 | `claudio-net` | `crates/net/` | 3,172 | VirtIO-net driver, smoltcp TCP/IP, TLS 1.3, HTTP/SSE |
+| 4 | `claudio-api` | `crates/api-client/` | 1,849 | Anthropic Messages API client, SSE streaming, tool use protocol |
+| 5 | `claudio-auth` | `crates/auth/` | 395 | OAuth 2.0 device flow (RFC 8628), API key fallback, token refresh |
+| 6 | `claudio-agent` | `crates/agent/` | 501 | Agent session lifecycle, tool loop (20 rounds), conversation state |
+| 7 | `claudio-fs` | `crates/fs-persist/` | 40 | FAT32 persistence layer (stubbed) |
+| 8 | `claudio-editor` | `crates/editor/` | 534 | Nano-like text editor, 11 tests |
+| 9 | `python-lite` | `crates/python-lite/` | 2,388 | Minimal Python interpreter (vars, loops, functions), 28 tests |
+| 10 | `js-lite` | `crates/js-lite/` | 5,229 | JavaScript evaluator for Cloudflare challenge solving |
+| 11 | `rustc-lite` | `crates/rustc-lite/` | 142 | Bare-metal Rust compiler via Cranelift backend |
+| 12 | `claudio-shell` | `crates/shell/` | 2,884 | AI-native shell: 28 builtins + natural language mode |
+| 13 | `claudio-vfs` | `crates/vfs/` | 1,930 | Virtual filesystem: mount table, GPT/MBR, POSIX file API |
+| 14 | `claudio-ext4` | `crates/ext4/` | 3,013 | ext4 filesystem: superblock, inodes, extent trees, directories |
+| 15 | `claudio-btrfs` | `crates/btrfs/` | 4,006 | btrfs filesystem: B-trees, chunks, subvolumes, CRC32C, COW |
+| 16 | `claudio-ntfs` | `crates/ntfs/` | 3,561 | NTFS filesystem: MFT, data runs, B+ tree indexes |
+| 17 | `claudio-ahci` | `crates/ahci/` | 2,139 | AHCI/SATA driver: HBA registers, port commands, sector I/O |
+| 18 | `claudio-nvme` | `crates/nvme/` | 2,563 | NVMe driver: admin/IO queue pairs, doorbell registers |
+| 19 | `claudio-intel-nic` | `crates/intel-nic/` | 1,986 | Intel NIC driver: e1000/e1000e/igc, DMA rings, PHY config |
+| 20 | `claudio-xhci` | `crates/xhci/` | 4,204 | xHCI USB 3.0 host controller + HID keyboard driver |
+| 21 | `claudio-acpi` | `crates/acpi/` | 2,433 | ACPI table parser: RSDP, MADT, FADT, MCFG, HPET, shutdown |
+| 22 | `claudio-hda` | `crates/hda/` | 2,631 | Intel HD Audio: CORB/RIRB, codec discovery, PCM playback |
+| 23 | `claudio-smp` | `crates/smp/` | 3,391 | SMP: APIC, AP trampoline, per-CPU data, work-stealing scheduler |
+| 24 | `claudio-gpu` | `crates/gpu/` | 3,392 | NVIDIA GPU: MMIO, Falcon, FIFO, compute dispatch, tensor ops |
+| 25 | `claudio-sshd` | `crates/sshd/` | 4,191 | Post-quantum SSH daemon: ML-KEM-768 + X25519, ML-DSA-65 |
+| 26 | `wraith-dom` | `crates/wraith-dom/` | 2,070 | no_std HTML parser, CSS selectors, form detection |
+| 27 | `wraith-render` | `crates/wraith-render/` | 1,225 | HTML to text-mode character grid renderer |
+| 28 | `wraith-transport` | `crates/wraith-transport/` | 572 | HTTP/HTTPS client over smoltcp |
+| 29 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
+| 30 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
+| 31 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
+| 32 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
+| 33 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
+| -- | `arbitrary-stub` | `crates/arbitrary-stub/` | -- | no_std stub for arbitrary crate (Cranelift dep) |
 
-All crates are `#![no_std]` with `extern crate alloc` where heap allocation is needed.
-No crate in the dependency tree pulls in `std`. The `tools/image-builder/` is a
-host-side binary excluded from the workspace to avoid inheriting the
-`x86_64-unknown-none` target. Six Cranelift crates are forked under `crates/` and
-patched in via `[patch.crates-io]` in the workspace `Cargo.toml`.
-
----
-
-## Source File Map
+## Network Stack
 
 ```
-J:\baremetal claude\
-  kernel/
-    src/
-      main.rs           Entry point, boot phases, stack switch, panic handler
-      gdt.rs            GDT + TSS with IST[0] (double fault) and IST[1] (timer)
-      interrupts.rs     IDT, APIC disable, 8259 PIC ICW sequence, ISR handlers
-      memory.rs         BootInfoFrameAllocator, heap page mapping, OffsetPageTable
-      executor.rs       Cooperative async executor (READY_QUEUE + EXECUTOR split)
-      keyboard.rs       Async ScancodeStream, VecDeque queue, Waker integration
-      serial.rs         16550 UART driver, serial_print!/force_println! macros
-      framebuffer.rs    GOP framebuffer init (page table walk), put_pixel
-      pci.rs            PCI config space scan, bus mastering, device recognition
-      logger.rs         log crate backend -> serial output
-    Cargo.toml
-  crates/
-    terminal/src/
-      lib.rs            DrawTarget trait, LayoutNode enum, Viewport, SplitDirection
-      render.rs         noto-sans-mono-bitmap glyph rendering, Color palette
-      pane.rs           Pane (cell grid, VTE parser, cursor, SGR, scroll)
-      layout.rs         Binary split tree, focus navigation, viewport recomputation
-    net/src/
-      lib.rs            NicDriver trait, PciDeviceInfo, high-level init + DHCP loop
-      nic.rs            VirtIO-net legacy PCI driver (virtqueues, DMA, page walk)
-      stack.rs          smoltcp Device adapter, NetworkStack, DHCP event handling
-      dns.rs            DNS resolver via smoltcp socket (poll-loop style)
-      tls.rs            TLS 1.3 stream (embedded-tls, AES-128-GCM-SHA256)
-      http.rs           HTTP/1.1 request builder, response parser, chunked, SSE
-    api-client/src/
-      lib.rs            AnthropicClient struct, auth header selection
-      messages.rs       Messages API types + SSE streaming
-      streaming.rs      SSE stream consumer
-      tools.rs          Tool use protocol
-    auth/src/
-      lib.rs            Credentials enum, DeviceFlowPrompt
-    agent/src/
-      lib.rs            Agent session lifecycle, tool loop (max 20 rounds)
-    editor/src/
-      lib.rs            Nano-like text editor (~400 lines, 11 tests)
-    python-lite/src/
-      lib.rs            Module root + execute_python API
-      tokenizer.rs      Python tokenizer
-      parser.rs         Python AST parser
-      eval.rs           Python evaluator (vars, loops, functions)
-    rustc-lite/src/     Bare-metal Rust compiler via Cranelift
-    cranelift-codegen-nostd/     Forked cranelift-codegen for no_std
-    cranelift-frontend-nostd/    Forked cranelift-frontend for no_std
-    cranelift-codegen-shared-nostd/  Forked cranelift-codegen-shared for no_std
-    cranelift-control-nostd/     Forked cranelift-control for no_std
-    rustc-hash-nostd/            Forked rustc-hash for no_std
-    arbitrary-stub/              no_std stub for arbitrary crate
-    wraith-dom/src/
-      lib.rs            Module root + re-exports
-      parser.rs         HTML tokenizer + tree builder (619 lines)
-      selector.rs       CSS selector matching (354 lines)
-      forms.rs          Form detection + login heuristics (367 lines)
-      text.rs           Text extraction utilities (237 lines)
-    wraith-transport/src/
-      lib.rs            HTTP/HTTPS over smoltcp (572 lines)
-    wraith-render/src/
-      lib.rs            HTML -> text-mode character grid (1,221 lines)
-    fs-persist/         FAT32 persistence (stubbed)
-  tools/
-    image-builder/src/
-      main.rs           Host-side UEFI + BIOS disk image builder
-    auth-relay.py       HTTP proxy for API key management
-    build-server.py     Host-side Rust compilation service for agents
-    tls-proxy.py        TLS termination proxy (dev/debug)
-    tls-bridge.py       TLS bridge utility
-  x86_64-claudio.json  Custom target with SSE+AES-NI (no soft-float)
-  Cargo.toml            Workspace root with shared deps + [patch.crates-io]
-  .cargo/config.toml    Default target x86_64-unknown-none, build-std, QEMU runner
-  rust-toolchain.toml   Nightly Rust + components (rust-src, llvm-tools-preview)
-  CLAUDE.md             Project design document and build instructions
-  README.md             User-facing README with status and build guide
-  HANDOFF.md            Complete session summary and status
-  docs/                 This documentation directory
+claude.ai API / api.anthropic.com
+        |
+        v
+  HTTP/1.1 Client (raw request building, chunked encoding, SSE parsing)
+        |
+        v
+  TLS 1.3 (embedded-tls, AES-128-GCM-SHA256, requires AES-NI)
+        |    - 16-byte aligned buffers for AES-NI
+        |    - Certificate verification via embedded CA roots
+        v
+  smoltcp TCP/IP Stack
+        |    - DHCP client (10.0.2.x on QEMU SLIRP)
+        |    - DNS resolver (10.0.2.3 on QEMU SLIRP)
+        |    - TCP sockets with Nagle disabled
+        v
+  NIC Driver
+        |-- VirtIO-net (legacy 0.9.5) for QEMU
+        |-- Intel e1000/e1000e/igc for real hardware
+        v
+  PCI Bus (BAR mapping, bus mastering, IRQ routing)
 ```
+
+## Design Principles
+
+1. **Single address space** -- No kernel/user boundary, no syscalls, no process isolation. Every agent is an async task.
+2. **Interrupt-driven async** -- Hardware interrupts wake futures. `hlt` when idle. No busy-polling.
+3. **Everything is no_std** -- All crates use `#![no_std]` with `extern crate alloc`. No libc, no POSIX.
+4. **Direct hardware access** -- Volatile MMIO for all device drivers. No HAL abstraction layers.
+5. **Minimal dependencies** -- Only well-audited no_std crates from crates.io. Forked when necessary.
