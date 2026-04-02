@@ -1,0 +1,30 @@
+[package]
+name = "claudio-sshd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Post-quantum SSH daemon for ClaudioOS — no_std, ML-KEM-768 + X25519 hybrid KEX, ML-DSA-65 + Ed25519 host keys"
+
+[dependencies]
+log = { workspace = true }
+spin = { workspace = true }
+
+# Post-quantum KEM
+ml-kem = { version = "0.2", default-features = false }
+# Post-quantum signatures
+ml-dsa = { version = "0.1", default-features = false, features = ["ml-dsa-65"] }
+
+# Classical crypto
+x25519-dalek = { version = "2", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+
+# AEAD cipher
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+
+# Hashing / MAC
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+
+# RNG
+rand_core = { workspace = true }

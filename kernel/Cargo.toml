@@ -36,3 +36,6 @@ claudio-hda = { path = "../crates/hda" }
 claudio-smp = { path = "../crates/smp" }
 claudio-xhci = { path = "../crates/xhci" }
 claudio-gpu = { path = "../crates/gpu" }
+claudio-sshd = { path = "../crates/sshd" }
+claudio-vfs = { path = "../crates/vfs" }
+claudio-shell = { path = "../crates/shell" }

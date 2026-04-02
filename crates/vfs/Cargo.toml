@@ -1,0 +1,10 @@
+[package]
+name = "claudio-vfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std Virtual Filesystem layer for ClaudioOS — unifies ext4, btrfs, NTFS, FAT32 behind a single API"
+
+[dependencies]
+log = { workspace = true }
