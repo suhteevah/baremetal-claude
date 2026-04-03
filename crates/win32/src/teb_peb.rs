@@ -94,9 +94,13 @@ pub struct Peb {
     pub os_platform_id: u16,
 }
 
+/// Wrapper to make raw pointers Send for use in Mutex.
+struct SendPtr<T>(*mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+
 /// Global TEB and PEB pointers.
-static TEB_PTR: Mutex<Option<*mut Teb>> = Mutex::new(None);
-static PEB_PTR: Mutex<Option<*mut Peb>> = Mutex::new(None);
+static TEB_PTR: Mutex<Option<SendPtr<Teb>>> = Mutex::new(None);
+static PEB_PTR: Mutex<Option<SendPtr<Peb>>> = Mutex::new(None);
 
 /// Allocate and initialize the TEB and PEB for the main thread of a Windows process.
 ///
@@ -162,8 +166,8 @@ pub fn init(image_base: u64, stack_base: u64, stack_limit: u64) {
     }
 
     // Store globally
-    *TEB_PTR.lock() = Some(teb_ptr);
-    *PEB_PTR.lock() = Some(peb_ptr);
+    *TEB_PTR.lock() = Some(SendPtr(teb_ptr));
+    *PEB_PTR.lock() = Some(SendPtr(peb_ptr));
 
     // Set GS base to point to TEB
     #[cfg(target_arch = "x86_64")]
@@ -188,12 +192,12 @@ pub fn init(image_base: u64, stack_base: u64, stack_limit: u64) {
 
 /// Get the current TEB pointer.
 pub fn get_teb() -> Option<*mut Teb> {
-    *TEB_PTR.lock()
+    TEB_PTR.lock().as_ref().map(|p| p.0)
 }
 
 /// Get the current PEB pointer.
 pub fn get_peb() -> Option<*mut Peb> {
-    *PEB_PTR.lock()
+    PEB_PTR.lock().as_ref().map(|p| p.0)
 }
 
 /// Get the last error value from the TEB.
@@ -219,10 +223,10 @@ pub fn cleanup() {
     let teb = TEB_PTR.lock().take();
     let peb = PEB_PTR.lock().take();
 
-    if let Some(teb) = teb {
+    if let Some(SendPtr(teb)) = teb {
         unsafe { drop(Box::from_raw(teb)); }
     }
-    if let Some(peb) = peb {
+    if let Some(SendPtr(peb)) = peb {
         unsafe { drop(Box::from_raw(peb)); }
     }
 

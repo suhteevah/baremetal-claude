@@ -49,3 +49,5 @@ claudio-pe-loader = { path = "../crates/pe-loader" }
 claudio-vulkan = { path = "../crates/vulkan" }
 claudio-win32 = { path = "../crates/win32" }
 claudio-dxvk-bridge = { path = "../crates/dxvk-bridge" }
+claudio-dotnet-clr = { path = "../crates/dotnet-clr" }
+claudio-winrt = { path = "../crates/winrt" }

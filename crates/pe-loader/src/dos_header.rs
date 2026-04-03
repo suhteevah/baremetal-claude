@@ -65,10 +65,11 @@ impl DosHeader {
 
         let header = unsafe { &*(data.as_ptr() as *const DosHeader) };
 
-        if header.e_magic != DOS_MAGIC {
+        let magic = { header.e_magic };
+        if magic != DOS_MAGIC {
             log::error!(
                 "[pe-loader] DOS header: bad magic 0x{:04X} (expected 0x{:04X})",
-                header.e_magic, DOS_MAGIC
+                magic, DOS_MAGIC
             );
             return None;
         }

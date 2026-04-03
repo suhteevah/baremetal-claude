@@ -261,6 +261,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-dotnet-clr"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
 name = "claudio-dxvk-bridge"
 version = "0.1.0"
 dependencies = [
@@ -371,6 +379,7 @@ dependencies = [
  "claudio-auth",
  "claudio-bluetooth",
  "claudio-btrfs",
+ "claudio-dotnet-clr",
  "claudio-dxvk-bridge",
  "claudio-elf-loader",
  "claudio-ext4",
@@ -392,6 +401,7 @@ dependencies = [
  "claudio-vfs",
  "claudio-vulkan",
  "claudio-win32",
+ "claudio-winrt",
  "claudio-xhci",
  "conquer-once",
  "linked_list_allocator",
@@ -499,6 +509,14 @@ version = "0.1.0"
 dependencies = [
  "claudio-pe-loader",
  "claudio-vfs",
+ "log",
+ "spin",
+]
+
+[[package]]
+name = "claudio-winrt"
+version = "0.1.0"
+dependencies = [
  "log",
  "spin",
 ]

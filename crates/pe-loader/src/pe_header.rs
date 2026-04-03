@@ -32,8 +32,9 @@ impl PeSignature {
             return None;
         }
         let sig = unsafe { &*(data.as_ptr() as *const PeSignature) };
-        if sig.signature != PE_SIGNATURE {
-            log::error!("[pe-loader] Bad PE signature: 0x{:08X}", sig.signature);
+        let sig_val = { sig.signature };
+        if sig_val != PE_SIGNATURE {
+            log::error!("[pe-loader] Bad PE signature: 0x{:08X}", sig_val);
             return None;
         }
         log::trace!("[pe-loader] PE signature valid");
@@ -70,17 +71,20 @@ impl CoffHeader {
         }
         let header = unsafe { &*(data.as_ptr() as *const CoffHeader) };
 
-        if header.machine != IMAGE_FILE_MACHINE_AMD64 {
+        let machine = { header.machine };
+        if machine != IMAGE_FILE_MACHINE_AMD64 {
             log::error!(
                 "[pe-loader] Unsupported machine type: 0x{:04X} (need x86_64 = 0x{:04X})",
-                header.machine, IMAGE_FILE_MACHINE_AMD64
+                machine, IMAGE_FILE_MACHINE_AMD64
             );
             return None;
         }
 
+        let num_sections = { header.number_of_sections };
+        let opt_header_size = { header.size_of_optional_header };
         log::trace!(
             "[pe-loader] COFF: {} sections, optional header size={}",
-            header.number_of_sections, header.size_of_optional_header
+            num_sections, opt_header_size
         );
         Some(header)
     }

@@ -205,6 +205,94 @@ pub fn init() {
     register(&mut table, crt, "time", crate::msvcrt::time as FnPtr);
     register(&mut table, crt, "clock", crate::msvcrt::clock as FnPtr);
 
+    // === dwrite.dll (DirectWrite) ===
+    let dw = "dwrite.dll";
+    modules.insert(0x7FF8_8000_0000u64, String::from(dw));
+
+    register(&mut table, dw, "DWriteCreateFactory", crate::directwrite::dwrite_create_factory as FnPtr);
+
+    // === d2d1.dll (Direct2D) ===
+    let d2d = "d2d1.dll";
+    modules.insert(0x7FF8_9000_0000u64, String::from(d2d));
+
+    register(&mut table, d2d, "D2D1CreateFactory", crate::direct2d::d2d1_create_factory as FnPtr);
+
+    // === wasapi (via ole32 CoCreateInstance) ===
+    // WASAPI functions are accessed through COM interfaces, not direct DLL exports.
+    // The following are registered for GetProcAddress fallback resolution.
+    let wasapi_dll = "audioses.dll";
+    modules.insert(0x7FF8_A000_0000u64, String::from(wasapi_dll));
+
+    register(&mut table, wasapi_dll, "CreateDeviceEnumerator", crate::wasapi::create_device_enumerator as FnPtr);
+    register(&mut table, wasapi_dll, "GetDefaultAudioEndpoint", crate::wasapi::get_default_audio_endpoint as FnPtr);
+    register(&mut table, wasapi_dll, "DeviceActivate", crate::wasapi::device_activate as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientInitialize", crate::wasapi::audio_client_initialize as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientGetBufferSize", crate::wasapi::audio_client_get_buffer_size as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientGetCurrentPadding", crate::wasapi::audio_client_get_current_padding as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientGetMixFormat", crate::wasapi::audio_client_get_mix_format as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientGetService", crate::wasapi::audio_client_get_service as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientStart", crate::wasapi::audio_client_start as FnPtr);
+    register(&mut table, wasapi_dll, "AudioClientStop", crate::wasapi::audio_client_stop as FnPtr);
+    register(&mut table, wasapi_dll, "RenderClientGetBuffer", crate::wasapi::render_client_get_buffer as FnPtr);
+    register(&mut table, wasapi_dll, "RenderClientReleaseBuffer", crate::wasapi::render_client_release_buffer as FnPtr);
+
+    // === xinput1_4.dll (XInput) ===
+    let xi = "xinput1_4.dll";
+    modules.insert(0x7FF8_B000_0000u64, String::from(xi));
+
+    register(&mut table, xi, "XInputGetState", crate::xinput::xinput_get_state as FnPtr);
+    register(&mut table, xi, "XInputSetState", crate::xinput::xinput_set_state as FnPtr);
+    register(&mut table, xi, "XInputGetCapabilities", crate::xinput::xinput_get_capabilities as FnPtr);
+    register(&mut table, xi, "XInputGetBatteryInformation", crate::xinput::xinput_get_battery_information as FnPtr);
+    register(&mut table, xi, "XInputEnable", crate::xinput::xinput_enable as FnPtr);
+
+    // Also register under xinput1_3.dll and xinput9_1_0.dll for compatibility
+    let xi3 = "xinput1_3.dll";
+    modules.insert(0x7FF8_B100_0000u64, String::from(xi3));
+    register(&mut table, xi3, "XInputGetState", crate::xinput::xinput_get_state as FnPtr);
+    register(&mut table, xi3, "XInputSetState", crate::xinput::xinput_set_state as FnPtr);
+    register(&mut table, xi3, "XInputGetCapabilities", crate::xinput::xinput_get_capabilities as FnPtr);
+
+    // === windowscodecs.dll (WIC) ===
+    // WIC is primarily COM-based, but we register for GetProcAddress.
+    let wic_dll = "windowscodecs.dll";
+    modules.insert(0x7FF8_C000_0000u64, String::from(wic_dll));
+
+    register(&mut table, wic_dll, "CreateImagingFactory", crate::wic::create_imaging_factory as FnPtr);
+
+    // === shell32.dll ===
+    let sh = "shell32.dll";
+    modules.insert(0x7FF8_D000_0000u64, String::from(sh));
+
+    register(&mut table, sh, "SHGetFolderPathW", crate::shell32::sh_get_folder_path_w as FnPtr);
+    register(&mut table, sh, "SHGetSpecialFolderPathW", crate::shell32::sh_get_special_folder_path_w as FnPtr);
+    register(&mut table, sh, "ShellExecuteW", crate::shell32::shell_execute_w as FnPtr);
+    register(&mut table, sh, "SHGetFileInfoW", crate::shell32::sh_get_file_info_w as FnPtr);
+    register(&mut table, sh, "SHGetKnownFolderPath", crate::shell32::sh_get_known_folder_path as FnPtr);
+    register(&mut table, sh, "PathCombineW", crate::shell32::path_combine_w as FnPtr);
+
+    // === winmm.dll ===
+    let wmm = "winmm.dll";
+    modules.insert(0x7FF8_E000_0000u64, String::from(wmm));
+
+    register(&mut table, wmm, "waveOutGetNumDevs", crate::winmm::wave_out_get_num_devs as FnPtr);
+    register(&mut table, wmm, "waveOutGetDevCapsW", crate::winmm::wave_out_get_dev_caps_w as FnPtr);
+    register(&mut table, wmm, "waveOutOpen", crate::winmm::wave_out_open as FnPtr);
+    register(&mut table, wmm, "waveOutPrepareHeader", crate::winmm::wave_out_prepare_header as FnPtr);
+    register(&mut table, wmm, "waveOutUnprepareHeader", crate::winmm::wave_out_unprepare_header as FnPtr);
+    register(&mut table, wmm, "waveOutWrite", crate::winmm::wave_out_write as FnPtr);
+    register(&mut table, wmm, "waveOutReset", crate::winmm::wave_out_reset as FnPtr);
+    register(&mut table, wmm, "waveOutPause", crate::winmm::wave_out_pause as FnPtr);
+    register(&mut table, wmm, "waveOutRestart", crate::winmm::wave_out_restart as FnPtr);
+    register(&mut table, wmm, "waveOutClose", crate::winmm::wave_out_close as FnPtr);
+    register(&mut table, wmm, "waveOutGetVolume", crate::winmm::wave_out_get_volume as FnPtr);
+    register(&mut table, wmm, "waveOutSetVolume", crate::winmm::wave_out_set_volume as FnPtr);
+    register(&mut table, wmm, "waveOutGetPosition", crate::winmm::wave_out_get_position as FnPtr);
+    register(&mut table, wmm, "timeGetTime", crate::winmm::time_get_time as FnPtr);
+    register(&mut table, wmm, "timeBeginPeriod", crate::winmm::time_begin_period as FnPtr);
+    register(&mut table, wmm, "timeEndPeriod", crate::winmm::time_end_period as FnPtr);
+    register(&mut table, wmm, "PlaySoundW", crate::winmm::play_sound_w as FnPtr);
+
     let count = table.len();
     *DISPATCH.lock() = Some(table);
     *MODULE_MAP.lock() = Some(modules);

@@ -66,6 +66,7 @@ mod agent_memory;
 mod vectordb;
 mod linux_compat;
 mod win32_compat;
+mod dotnet_compat;
 
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use core::panic::PanicInfo;

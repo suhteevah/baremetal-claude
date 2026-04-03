@@ -245,7 +245,7 @@ pub fn nt_free_virtual_memory(
     }
 
     let addr = unsafe { *base_address };
-    let size = if region_size.is_null() { 0 } else { unsafe { *region_size } as usize };
+    let size = if region_size.is_null() { 0 } else { unsafe { *region_size as usize } };
     log::debug!("[ntdll] NtFreeVirtualMemory: addr=0x{:X}, size={}, type=0x{:X}", addr, size, free_type);
 
     if addr != 0 && size > 0 {

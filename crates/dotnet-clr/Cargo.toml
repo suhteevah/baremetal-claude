@@ -1,0 +1,11 @@
+[package]
+name = "claudio-dotnet-clr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std .NET CLR (Common Language Runtime) for ClaudioOS — runs C#/.NET assemblies on bare metal"
+
+[dependencies]
+log = { workspace = true }
+spin = { workspace = true }

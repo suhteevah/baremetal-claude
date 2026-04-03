@@ -173,7 +173,8 @@ pub fn wsa_startup(version_requested: u16, wsa_data: *mut WsaData) -> i32 {
 
             // Write "ClaudioOS Winsock" into description
             let desc = b"ClaudioOS Winsock 2.2";
-            (*wsa_data).description[..desc.len()].copy_from_slice(desc);
+            let dst = core::ptr::addr_of_mut!((*wsa_data).description);
+            core::ptr::copy_nonoverlapping(desc.as_ptr(), (*dst).as_mut_ptr(), desc.len());
         }
     }
 

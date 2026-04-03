@@ -97,15 +97,16 @@ impl ImportDirectory {
 
             let functions = parse_import_lookup_table(data, lookup_rva as usize);
 
+            let first_thunk_val = { desc.first_thunk };
             log::debug!(
                 "[pe-loader] Import: '{}' — {} functions, IAT RVA=0x{:08X}",
-                dll_name, functions.len(), desc.first_thunk
+                dll_name, functions.len(), first_thunk_val
             );
 
             entries.push(ImportEntry {
                 dll_name,
                 functions,
-                iat_rva: desc.first_thunk,
+                iat_rva: first_thunk_val,
             });
 
             offset += 20;
