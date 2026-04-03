@@ -53,3 +53,9 @@ claudio-dotnet-clr = { path = "../crates/dotnet-clr" }
 claudio-winrt = { path = "../crates/winrt" }
 claudio-cc-lite = { path = "../crates/cc-lite" }
 claudio-asm-x86 = { path = "../crates/asm-x86" }
+claudio-wasm-runtime = { path = "../crates/wasm-runtime" }
+claudio-lua-lite = { path = "../crates/lua-lite" }
+claudio-go-lite = { path = "../crates/go-lite" }
+claudio-ts-lite = { path = "../crates/ts-lite" }
+claudio-jvm-lite = { path = "../crates/jvm-lite" }
+claudio-cpp-lite = { path = "../crates/cpp-lite" }

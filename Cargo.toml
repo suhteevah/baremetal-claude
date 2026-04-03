@@ -41,6 +41,12 @@ members = [
     "crates/winrt",
     "crates/cc-lite",
     "crates/asm-x86",
+    "crates/wasm-runtime",
+    "crates/lua-lite",
+    "crates/go-lite",
+    "crates/ts-lite",
+    "crates/jvm-lite",
+    "crates/cpp-lite",
 ]
 exclude = [
     "tools/image-builder",  # Host-side tool, must NOT inherit x86_64-unknown-none target

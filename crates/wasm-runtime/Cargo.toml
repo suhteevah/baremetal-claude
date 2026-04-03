@@ -1,0 +1,11 @@
+[package]
+name = "claudio-wasm-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std WebAssembly interpreter for ClaudioOS bare-metal environment"
+
+[dependencies]
+log = { workspace = true }
+spin = { workspace = true }

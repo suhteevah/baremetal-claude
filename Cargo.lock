@@ -278,6 +278,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-cpp-lite"
+version = "0.1.0"
+dependencies = [
+ "claudio-cc-lite",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "log",
+ "spin",
+]
+
+[[package]]
 name = "claudio-dotnet-clr"
 version = "0.1.0"
 dependencies = [
@@ -326,6 +337,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-go-lite"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "log",
+ "spin",
+]
+
+[[package]]
 name = "claudio-gpu"
 version = "0.1.0"
 dependencies = [
@@ -348,11 +369,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-jvm-lite"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
 name = "claudio-linux-compat"
 version = "0.1.0"
 dependencies = [
  "claudio-elf-loader",
  "claudio-vfs",
+ "log",
+]
+
+[[package]]
+name = "claudio-lua-lite"
+version = "0.1.0"
+dependencies = [
  "log",
 ]
 
@@ -398,15 +434,19 @@ dependencies = [
  "claudio-bluetooth",
  "claudio-btrfs",
  "claudio-cc-lite",
+ "claudio-cpp-lite",
  "claudio-dotnet-clr",
  "claudio-dxvk-bridge",
  "claudio-elf-loader",
  "claudio-ext4",
  "claudio-fs",
+ "claudio-go-lite",
  "claudio-gpu",
  "claudio-hda",
  "claudio-intel-nic",
+ "claudio-jvm-lite",
  "claudio-linux-compat",
+ "claudio-lua-lite",
  "claudio-net",
  "claudio-ntfs",
  "claudio-nvme",
@@ -416,9 +456,11 @@ dependencies = [
  "claudio-smp",
  "claudio-sshd",
  "claudio-terminal",
+ "claudio-ts-lite",
  "claudio-usb-storage",
  "claudio-vfs",
  "claudio-vulkan",
+ "claudio-wasm-runtime",
  "claudio-win32",
  "claudio-winrt",
  "claudio-xhci",
@@ -493,6 +535,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-ts-lite"
+version = "0.1.0"
+dependencies = [
+ "js-lite",
+ "log",
+]
+
+[[package]]
 name = "claudio-usb-storage"
 version = "0.1.0"
 dependencies = [
@@ -516,6 +566,14 @@ dependencies = [
 
 [[package]]
 name = "claudio-vulkan"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
+name = "claudio-wasm-runtime"
 version = "0.1.0"
 dependencies = [
  "log",

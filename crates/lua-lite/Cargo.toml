@@ -1,0 +1,10 @@
+[package]
+name = "claudio-lua-lite"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std Lua 5.4 interpreter for ClaudioOS bare-metal environment"
+
+[dependencies]
+log = { workspace = true }

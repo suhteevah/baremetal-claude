@@ -1,0 +1,11 @@
+[package]
+name = "claudio-ts-lite"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TypeScript type checker and transpiler layered on js-lite for ClaudioOS bare-metal environment"
+
+[dependencies]
+log = { workspace = true }
+js-lite = { path = "../js-lite" }
