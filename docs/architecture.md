@@ -71,14 +71,22 @@ single-address-space async Rust application manages all hardware.
 |  | PS/2 Kbd | | HDA     | | GPU       | | ACPI   | | SMP/APIC   | |
 |  | IRQ1     | | Audio   | | NVIDIA    | | tables | | multi-core | |
 |  +----------+ +---------+ +-----------+ +--------+ +------------+ |
-|  +----------+ +---------+ +-----------+                            |
-|  | USB Mouse| | RTC     | | PC Speaker|                            |
-|  | HID boot | | CMOS    | | PIT ch2   |                            |
-|  +----------+ +---------+ +-----------+                            |
+|  +----------+ +---------+ +-----------+ +----------+ +------------+ |
+|  | USB Mouse| | RTC     | | PC Speaker| | WiFi     | | Bluetooth  | |
+|  | HID boot | | CMOS    | | PIT ch2   | | AX201    | | HCI/L2CAP  | |
+|  +----------+ +---------+ +-----------+ +----------+ +------------+ |
+|  +----------+ +---------+ +-----------+                              |
+|  | USB Stor | | Touchpad| |           |                              |
+|  | BOT+SCSI| | gestures| |           |                              |
+|  +----------+ +---------+ +-----------+                              |
 +=====================================================================+
 |                       KERNEL SERVICES                               |
 |  +---------------------------------------------------------------+ |
 |  | Init System | Users | Themes | Splash | Screensaver | Chime   | |
+|  +---------------------------------------------------------------+ |
+|  | Firewall | Encryption | Swap | Cron | VConsoles | Clipboard   | |
+|  +---------------------------------------------------------------+ |
+|  | Power Mgmt | Touchpad | ManPages | NetTools                    | |
 |  +---------------------------------------------------------------+ |
 |  | Async Executor (interrupt-driven, hlt when idle)              | |
 |  +---------------------------------------------------------------+ |
@@ -223,6 +231,9 @@ kernel
   +-- claudio-smp
   +-- claudio-gpu
   +-- claudio-sshd
+  +-- claudio-wifi
+  +-- claudio-bluetooth
+  +-- claudio-usb-storage
   +-- claudio-editor
   +-- claudio-fs (FAT32 persistence, stubbed)
   +-- wraith-dom
@@ -235,18 +246,22 @@ kernel
   |     +-- cranelift-control-nostd
   |     +-- rustc-hash-nostd
   |     +-- arbitrary-stub
-  +-- kernel modules (17):
+  +-- kernel modules (42):
         acpi_init, smp_init, usb, intel_nic, ssh_server,
         rtc, mouse, ipc, init, users, sysmon, splash,
         boot_sound, themes, screensaver, browser, filemanager,
-        conversations, session_manager
+        conversations, session_manager, power, encryption,
+        firewall, nettools, touchpad, manpages, swap, cron,
+        vconsole, clipboard, dashboard, agent_loop, executor,
+        framebuffer, interrupts, keyboard, memory, pci,
+        serial, gdt, logger, terminal
 ```
 
-## All 33 Crates + 17 Kernel Modules
+## All 36 Crates + 42 Kernel Modules
 
 | # | Crate | Path | Lines | Description |
 |---|-------|------|-------|-------------|
-| 1 | `claudio-os` | `kernel/` | 4,537+ | Kernel binary: boot, hardware init, async executor, dashboard |
+| 1 | `claudio-os` | `kernel/` | 18,000+ | Kernel binary: boot, hardware init, async executor, dashboard, 42 modules |
 | 2 | `claudio-terminal` | `crates/terminal/` | 1,794 | Framebuffer terminal, split panes, ANSI/VTE, font rendering |
 | 3 | `claudio-net` | `crates/net/` | 3,172 | VirtIO-net driver, smoltcp TCP/IP, TLS 1.3, HTTP/SSE |
 | 4 | `claudio-api` | `crates/api-client/` | 1,849 | Anthropic Messages API client, SSE streaming, tool use protocol |
@@ -271,39 +286,65 @@ kernel
 | 23 | `claudio-smp` | `crates/smp/` | 3,391 | SMP: APIC, AP trampoline, per-CPU data, work-stealing scheduler |
 | 24 | `claudio-gpu` | `crates/gpu/` | 3,392 | NVIDIA GPU: MMIO, Falcon, FIFO, compute dispatch, tensor ops |
 | 25 | `claudio-sshd` | `crates/sshd/` | 4,191 | Post-quantum SSH daemon: ML-KEM-768 + X25519, ML-DSA-65 |
-| 26 | `wraith-dom` | `crates/wraith-dom/` | 2,070 | no_std HTML parser, CSS selectors, form detection |
-| 27 | `wraith-render` | `crates/wraith-render/` | 1,225 | HTML to text-mode character grid renderer |
-| 28 | `wraith-transport` | `crates/wraith-transport/` | 572 | HTTP/HTTPS client over smoltcp |
-| 29 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
-| 30 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
-| 31 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
-| 32 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
-| 33 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
+| 26 | `claudio-wifi` | `crates/wifi/` | 3,513 | WiFi: Intel AX201/AX200, WPA2/WPA3, scanning, association |
+| 27 | `claudio-bluetooth` | `crates/bluetooth/` | 3,075 | Bluetooth: HCI/L2CAP/GAP/GATT, USB transport, HID |
+| 28 | `claudio-usb-storage` | `crates/usb-storage/` | 1,357 | USB mass storage: BOT protocol, SCSI command set |
+| 29 | `wraith-dom` | `crates/wraith-dom/` | 2,070 | no_std HTML parser, CSS selectors, form detection |
+| 30 | `wraith-render` | `crates/wraith-render/` | 1,225 | HTML to text-mode character grid renderer |
+| 31 | `wraith-transport` | `crates/wraith-transport/` | 572 | HTTP/HTTPS client over smoltcp |
+| 32 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
+| 33 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
+| 34 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
+| 35 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
+| 36 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
 | -- | `arbitrary-stub` | `crates/arbitrary-stub/` | -- | no_std stub for arbitrary crate (Cranelift dep) |
 
-### Kernel Modules (17)
+### Kernel Modules (42)
 
-| Module | Path | Description |
-|--------|------|-------------|
-| `acpi_init` | `kernel/src/acpi_init.rs` | ACPI hardware discovery: MADT (CPUs, I/O APICs), FADT (power mgmt, S5 shutdown), HPET (precision timer), MCFG (PCIe ECAM) |
-| `smp_init` | `kernel/src/smp_init.rs` | Multi-core boot: reads MADT, disables legacy PIC, boots AP cores via SIPI, enables APIC mode |
-| `usb` | `kernel/src/usb.rs` | xHCI controller PCI detection, USB keyboard -> PS/2 scancode bridge, USB mouse polling stub |
-| `intel_nic` | `kernel/src/intel_nic.rs` | Intel NIC -> smoltcp Device adapter, page-table virt-to-phys, IntelNetworkStack with DHCP |
-| `ssh_server` | `kernel/src/ssh_server.rs` | SSH listener on port 22, TCP session management, version exchange, echo shell, up to 4 sessions |
-| `rtc` | `kernel/src/rtc.rs` | CMOS RTC (MC146818), BCD/binary decode, 12h/24h, boot timestamp, PIT-corrected wall clock |
-| `mouse` | `kernel/src/mouse.rs` | USB HID boot protocol mouse, XOR crosshair cursor on framebuffer, event queue |
-| `ipc` | `kernel/src/ipc.rs` | Message bus (per-agent inboxes), named channels (4K ring buffers), shared memory, 8 tools |
-| `init` | `kernel/src/init.rs` | fw_cfg config loading (key=value), hostname, log level, auto-mount, SSH, startup scripts |
-| `users` | `kernel/src/users.rs` | User database, SHA-256 password auth (in-kernel impl), SSH public key auth, default "matt" user |
-| `sysmon` | `kernel/src/sysmon.rs` | System monitor pane: CPU/memory/network/agent stats, ANSI progress bars, auto-refresh |
-| `splash` | `kernel/src/splash.rs` | Boot splash: ASCII art "CLAUDIOOS" logo, 4-stage progress bar (Hardware/Network/Auth/Ready) |
-| `boot_sound` | `kernel/src/boot_sound.rs` | PC speaker boot chime: PIT channel 2, C5-E5-G5 ascending triad (523/659/784 Hz) |
-| `themes` | `kernel/src/themes.rs` | 9 color themes: default, solarized-dark/light, monokai, dracula, nord, gruvbox, claudioos, templeos |
-| `screensaver` | `kernel/src/screensaver.rs` | 5 modes: 3D starfield, matrix rain, bouncing logo, pipes, digital clock. Idle timeout activation |
-| `browser` | `kernel/src/browser.rs` | Text-mode web browser pane: wraith HTML/CSS rendering, URL bar, link following, history, scroll |
-| `filemanager` | `kernel/src/filemanager.rs` | Visual file manager pane: directory listing, copy/move/rename/delete, search filter, VFS integration |
-| `conversations` | `kernel/src/conversations.rs` | Conversation management: list/select/rename/delete via claude.ai REST API, per-agent active conv |
-| `session_manager` | `kernel/src/session_manager.rs` | Session auto-refresh: JWT expiry parsing, periodic /api/auth/session refresh, warning thresholds |
+| Module | Path | Lines | Description |
+|--------|------|-------|-------------|
+| `dashboard` | `kernel/src/dashboard.rs` | 1,862 | Main dashboard loop, pane management, input dispatch, layout engine |
+| `main` | `kernel/src/main.rs` | 1,248 | Boot sequence, hardware init, stack switch, async entry point |
+| `screensaver` | `kernel/src/screensaver.rs` | 951 | 5 modes: 3D starfield, matrix rain, bouncing logo, pipes, digital clock |
+| `power` | `kernel/src/power.rs` | 921 | ACPI S3/S5 suspend/resume, battery status monitoring, power profiles |
+| `encryption` | `kernel/src/encryption.rs` | 905 | LUKS-compatible disk encryption, key derivation, crypto layer |
+| `filemanager` | `kernel/src/filemanager.rs` | 843 | Visual file manager pane: directory listing, copy/move/rename/delete, search |
+| `firewall` | `kernel/src/firewall.rs` | 788 | Stateful packet filtering, allow/deny rules, IP/port-based filtering |
+| `nettools` | `kernel/src/nettools.rs` | 787 | ping, wget, curl, netstat, ifconfig, dns, traceroute, nslookup |
+| `ipc` | `kernel/src/ipc.rs` | 783 | Message bus (per-agent inboxes), named channels (4K ring buffers), shared memory |
+| `agent_loop` | `kernel/src/agent_loop.rs` | 774 | Agent tool loop, SSE streaming, tool execution dispatch |
+| `touchpad` | `kernel/src/touchpad.rs` | 734 | PS/2 and USB touchpad driver, gesture recognition (tap, scroll, two-finger) |
+| `manpages` | `kernel/src/manpages.rs` | 674 | Built-in manual pages for all commands and subsystems |
+| `browser` | `kernel/src/browser.rs` | 659 | Text-mode web browser pane: wraith HTML/CSS, URL bar, link following |
+| `ssh_server` | `kernel/src/ssh_server.rs` | 568 | SSH listener on port 22, TCP session management, echo shell, 4 sessions |
+| `acpi_init` | `kernel/src/acpi_init.rs` | 523 | ACPI discovery: MADT (CPUs, I/O APICs), FADT (power), HPET, MCFG (PCIe) |
+| `conversations` | `kernel/src/conversations.rs` | 517 | Conversation management: list/select/rename/delete via claude.ai REST API |
+| `init` | `kernel/src/init.rs` | 505 | fw_cfg config loading, hostname, log level, auto-mount, startup scripts |
+| `swap` | `kernel/src/swap.rs` | 499 | Virtual memory swap to disk, configurable swap partitions |
+| `session_manager` | `kernel/src/session_manager.rs` | 487 | Session auto-refresh: JWT expiry parsing, periodic token refresh |
+| `intel_nic` | `kernel/src/intel_nic.rs` | 454 | Intel NIC -> smoltcp Device adapter, page-table virt-to-phys, DHCP |
+| `users` | `kernel/src/users.rs` | 440 | User database, SHA-256 password auth, SSH public key auth |
+| `cron` | `kernel/src/cron.rs` | 410 | Periodic task scheduler, crontab-style time specifications |
+| `mouse` | `kernel/src/mouse.rs` | 402 | USB HID boot protocol mouse, XOR crosshair cursor, event queue |
+| `interrupts` | `kernel/src/interrupts.rs` | 387 | IDT setup, exception handlers, IRQ routing, interrupt stacks |
+| `vconsole` | `kernel/src/vconsole.rs` | 372 | Virtual consoles, Ctrl+Alt+F1-F6 switching, independent sessions |
+| `themes` | `kernel/src/themes.rs` | 365 | 9 color themes: default, solarized-dark/light, monokai, dracula, nord, gruvbox, claudioos, templeos |
+| `sysmon` | `kernel/src/sysmon.rs` | 306 | System monitor pane: CPU/memory/network/agent stats, ANSI progress bars |
+| `rtc` | `kernel/src/rtc.rs` | 299 | CMOS RTC (MC146818), BCD/binary decode, 12h/24h, PIT-corrected wall clock |
+| `executor` | `kernel/src/executor.rs` | 287 | Interrupt-driven async executor, hlt when idle, task waker |
+| `framebuffer` | `kernel/src/framebuffer.rs` | 263 | GOP framebuffer init, double-buffered, dirty region tracking |
+| `pci` | `kernel/src/pci.rs` | 245 | PCI bus enumeration, BAR mapping, bus mastering, device discovery |
+| `smp_init` | `kernel/src/smp_init.rs` | 233 | Multi-core boot: MADT-driven AP startup, APIC mode, legacy PIC disable |
+| `splash` | `kernel/src/splash.rs` | 214 | Boot splash: ASCII art "CLAUDIOOS" logo, 4-stage progress bar |
+| `usb` | `kernel/src/usb.rs` | 186 | xHCI controller PCI detection, USB keyboard -> PS/2 scancode bridge |
+| `keyboard` | `kernel/src/keyboard.rs` | 180 | PS/2 keyboard decoder, scancode queue, key event dispatch |
+| `memory` | `kernel/src/memory.rs` | 124 | Page table setup, physical memory offset, address translation |
+| `boot_sound` | `kernel/src/boot_sound.rs` | 111 | PC speaker boot chime: PIT channel 2, C5-E5-G5 (523/659/784 Hz) |
+| `clipboard` | `kernel/src/clipboard.rs` | 108 | System-wide copy/paste buffer, shared across all panes |
+| `serial` | `kernel/src/serial.rs` | 103 | UART 16550 serial output at 0x3F8, 115200 baud |
+| `gdt` | `kernel/src/gdt.rs` | 76 | GDT + TSS setup for long mode |
+| `logger` | `kernel/src/logger.rs` | 32 | Log framework: serial + framebuffer sinks |
+| `terminal` | `kernel/src/terminal.rs` | 28 | Terminal crate bridge |
 
 ## Network Stack
 
@@ -339,3 +380,5 @@ claude.ai API / api.anthropic.com
 5. **Minimal dependencies** -- Only well-audited no_std crates from crates.io. Forked when necessary.
 6. **Multiple pane types** -- Dashboard supports 6 pane types: Agent, Shell, Browser, FileManager, SysMonitor, Screensaver.
 7. **Agent collaboration** -- IPC message bus, named channels, and shared memory let agents communicate and collaborate.
+8. **Daily-driver features** -- Firewall, disk encryption, swap, cron, virtual consoles, clipboard, power management, touchpad, and man pages make it usable as a real OS.
+9. **Full wireless stack** -- WiFi (WPA2/WPA3) and Bluetooth (HCI/L2CAP/GAP/GATT) with USB transport for untethered operation.
