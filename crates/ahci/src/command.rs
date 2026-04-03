@@ -293,17 +293,25 @@ pub const CMD_TABLE_PRDT_OFFSET: usize = 128;
 ///
 /// The Command Table must be 128-byte aligned. Returns the physical address
 /// of the allocated table.
-pub fn allocate_cmd_table(prdt_count: usize) -> u64 {
+pub fn allocate_cmd_table(prdt_count: usize) -> Option<u64> {
     let size = CMD_TABLE_HEADER_SIZE + prdt_count * core::mem::size_of::<PrdtEntry>();
-    let layout =
-        Layout::from_size_align(size, 128).expect("[ahci] command table layout");
+    let layout = match Layout::from_size_align(size, 128) {
+        Ok(l) => l,
+        Err(_) => {
+            log::error!("[ahci] invalid command table layout (size={}, prdt={})", size, prdt_count);
+            return None;
+        }
+    };
     let ptr = unsafe { alloc_zeroed(layout) };
-    assert!(!ptr.is_null(), "[ahci] failed to allocate command table");
+    if ptr.is_null() {
+        log::error!("[ahci] failed to allocate command table ({} bytes)", size);
+        return None;
+    }
     log::trace!(
         "[ahci] allocated command table at {:#x} ({} bytes, {} PRDT entries)",
         ptr as u64, size, prdt_count
     );
-    ptr as u64
+    Some(ptr as u64)
 }
 
 /// Write a FIS_REG_H2D into the CFIS area of a Command Table.
@@ -346,7 +354,7 @@ pub fn build_read_dma_ext(
     count: u16,
     buf_phys_addr: u64,
     sector_size: u32,
-) -> (CommandHeader, u64) {
+) -> Option<(CommandHeader, u64)> {
     log::trace!(
         "[ahci] build READ DMA EXT: LBA={}, count={}, buf={:#x}",
         lba, count, buf_phys_addr
@@ -354,7 +362,7 @@ pub fn build_read_dma_ext(
 
     let byte_count = count as u32 * sector_size;
     let prdt_count = prdt_entries_needed(byte_count);
-    let ct_addr = allocate_cmd_table(prdt_count);
+    let ct_addr = allocate_cmd_table(prdt_count)?;
 
     // Build FIS
     let mut fis = FisRegH2d::new();
@@ -382,7 +390,7 @@ pub fn build_read_dma_ext(
     hdr.set_write(false); // Read = D2H
     hdr.set_ctba(ct_addr);
 
-    (hdr, ct_addr)
+    Some((hdr, ct_addr))
 }
 
 /// Build a WRITE DMA EXT command (ATA command 0x35).
@@ -395,7 +403,7 @@ pub fn build_write_dma_ext(
     count: u16,
     buf_phys_addr: u64,
     sector_size: u32,
-) -> (CommandHeader, u64) {
+) -> Option<(CommandHeader, u64)> {
     log::trace!(
         "[ahci] build WRITE DMA EXT: LBA={}, count={}, buf={:#x}",
         lba, count, buf_phys_addr
@@ -403,7 +411,7 @@ pub fn build_write_dma_ext(
 
     let byte_count = count as u32 * sector_size;
     let prdt_count = prdt_entries_needed(byte_count);
-    let ct_addr = allocate_cmd_table(prdt_count);
+    let ct_addr = allocate_cmd_table(prdt_count)?;
 
     // Build FIS
     let mut fis = FisRegH2d::new();
@@ -431,7 +439,7 @@ pub fn build_write_dma_ext(
     hdr.set_write(true); // Write = H2D
     hdr.set_ctba(ct_addr);
 
-    (hdr, ct_addr)
+    Some((hdr, ct_addr))
 }
 
 /// Build an ATA IDENTIFY DEVICE command (0xEC).
@@ -439,13 +447,13 @@ pub fn build_write_dma_ext(
 /// Returns 512 bytes of device identification data.
 ///
 /// Returns `(cmd_header, cmd_table_addr, identify_buf_addr)`.
-pub fn build_identify(identify_buf_addr: u64) -> (CommandHeader, u64) {
+pub fn build_identify(identify_buf_addr: u64) -> Option<(CommandHeader, u64)> {
     log::trace!(
         "[ahci] build IDENTIFY DEVICE: buf={:#x}",
         identify_buf_addr
     );
 
-    let ct_addr = allocate_cmd_table(1); // 1 PRDT entry for 512 bytes
+    let ct_addr = allocate_cmd_table(1)?; // 1 PRDT entry for 512 bytes
 
     // Build FIS
     let mut fis = FisRegH2d::new();
@@ -464,16 +472,16 @@ pub fn build_identify(identify_buf_addr: u64) -> (CommandHeader, u64) {
     hdr.set_write(false); // IDENTIFY is D2H
     hdr.set_ctba(ct_addr);
 
-    (hdr, ct_addr)
+    Some((hdr, ct_addr))
 }
 
 /// Build a FLUSH CACHE EXT command (0xEA).
 ///
 /// Returns `(cmd_header, cmd_table_addr)`.
-pub fn build_flush_cache() -> (CommandHeader, u64) {
+pub fn build_flush_cache() -> Option<(CommandHeader, u64)> {
     log::trace!("[ahci] build FLUSH CACHE EXT");
 
-    let ct_addr = allocate_cmd_table(0); // No data transfer
+    let ct_addr = allocate_cmd_table(0)?; // No data transfer
 
     let mut fis = FisRegH2d::new();
     fis.set_command_bit();
@@ -486,7 +494,7 @@ pub fn build_flush_cache() -> (CommandHeader, u64) {
     hdr.set_write(false);
     hdr.set_ctba(ct_addr);
 
-    (hdr, ct_addr)
+    Some((hdr, ct_addr))
 }
 
 /// Calculate how many PRDT entries are needed for a given byte count.

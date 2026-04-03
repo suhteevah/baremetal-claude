@@ -294,7 +294,8 @@ pub fn handle_conv_command(
     }
 
     // We need claude.ai auth mode.
-    let (session_cookie, org_id, _conv_id) = match auth_mode() {
+    let auth = auth_mode();
+    let (session_cookie, org_id, _conv_id) = match auth.as_ref() {
         Some(AuthMode::ClaudeAi {
             session_cookie,
             org_id,
@@ -423,10 +424,9 @@ fn cmd_use(uuid: &str, agent_id: Option<usize>) -> String {
     match agent_id {
         Some(aid) => {
             // Update the global auth mode's conv_id.
-            unsafe {
-                if let Some(AuthMode::ClaudeAi { conv_id, .. }) =
-                    &mut *core::ptr::addr_of_mut!(crate::agent_loop::AUTH_MODE)
-                {
+            {
+                let mut guard = crate::agent_loop::AUTH_MODE.lock();
+                if let Some(AuthMode::ClaudeAi { conv_id, .. }) = guard.as_mut() {
                     *conv_id = String::from(uuid);
                 }
             }
@@ -438,10 +438,9 @@ fn cmd_use(uuid: &str, agent_id: Option<usize>) -> String {
         }
         None => {
             // Shell pane — just update the global auth mode.
-            unsafe {
-                if let Some(AuthMode::ClaudeAi { conv_id, .. }) =
-                    &mut *core::ptr::addr_of_mut!(crate::agent_loop::AUTH_MODE)
-                {
+            {
+                let mut guard = crate::agent_loop::AUTH_MODE.lock();
+                if let Some(AuthMode::ClaudeAi { conv_id, .. }) = guard.as_mut() {
                     *conv_id = String::from(uuid);
                 }
             }
@@ -502,10 +501,9 @@ fn cmd_new(name: &str, agent_id: Option<usize>) -> String {
     }
 
     // Update global auth mode conv_id to empty so next request creates new conv.
-    unsafe {
-        if let Some(AuthMode::ClaudeAi { conv_id, .. }) =
-            &mut *core::ptr::addr_of_mut!(crate::agent_loop::AUTH_MODE)
-        {
+    {
+        let mut guard = crate::agent_loop::AUTH_MODE.lock();
+        if let Some(AuthMode::ClaudeAi { conv_id, .. }) = guard.as_mut() {
             *conv_id = String::new();
         }
     }

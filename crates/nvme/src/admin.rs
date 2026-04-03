@@ -411,7 +411,13 @@ pub fn identify_controller(
     }
 
     log::info!("[nvme:admin] Identify Controller completed successfully");
-    let data: &[u8; IDENTIFY_CTRL_SIZE] = buf[..IDENTIFY_CTRL_SIZE].try_into().unwrap();
+    let data: &[u8; IDENTIFY_CTRL_SIZE] = match buf[..IDENTIFY_CTRL_SIZE].try_into() {
+        Ok(d) => d,
+        Err(_) => {
+            log::error!("[nvme:admin] Identify Controller buffer size mismatch");
+            return None;
+        }
+    };
     Some(parse_identify_controller(data))
 }
 
@@ -457,7 +463,13 @@ pub fn identify_namespace(
         "[nvme:admin] Identify Namespace {} completed successfully",
         nsid
     );
-    let data: &[u8; IDENTIFY_NS_SIZE] = buf[..IDENTIFY_NS_SIZE].try_into().unwrap();
+    let data: &[u8; IDENTIFY_NS_SIZE] = match buf[..IDENTIFY_NS_SIZE].try_into() {
+        Ok(d) => d,
+        Err(_) => {
+            log::error!("[nvme:admin] Identify Namespace buffer size mismatch");
+            return None;
+        }
+    };
     Some(parse_identify_namespace(data))
 }
 

@@ -49,15 +49,13 @@ const MAX_TOOL_ROUNDS: usize = 20;
 /// capture the network stack. We store a pointer here during init.
 ///
 /// SAFETY: Set once during single-threaded boot, read during tool execution.
-/// The network stack outlives all agent sessions. Using spin::Once ensures
-/// safe one-time initialization without `static mut`.
-static BUILD_STACK: spin::Once<*mut NetworkStack> = spin::Once::new();
-// SAFETY: The raw pointer is only dereferenced in the single-threaded executor
-// context. We need Send+Sync for the static.
+/// The network stack outlives all agent sessions. Using spin::Once with a
+/// Send+Sync wrapper ensures safe one-time initialization without `static mut`.
 struct SendNetPtr(*mut NetworkStack);
 unsafe impl Send for SendNetPtr {}
 unsafe impl Sync for SendNetPtr {}
 
+static BUILD_STACK: spin::Once<SendNetPtr> = spin::Once::new();
 static BUILD_NOW_FN: spin::Once<fn() -> claudio_net::Instant> = spin::Once::new();
 
 /// Initialize the compile_rust tool handler.
@@ -73,7 +71,7 @@ pub unsafe fn init_compile_handler(
     stack: *mut NetworkStack,
     now: fn() -> claudio_net::Instant,
 ) {
-    BUILD_STACK.call_once(|| stack);
+    BUILD_STACK.call_once(|| SendNetPtr(stack));
     BUILD_NOW_FN.call_once(|| now);
     claudio_api::tools::set_compile_handler(compile_handler);
     log::info!("[agent_loop] compile_rust handler registered (build server port {})", build_server_port());
@@ -84,11 +82,11 @@ pub unsafe fn init_compile_handler(
 /// Sends an HTTP POST to the build server at 10.0.2.2:{BUILD_SERVER_PORT}
 /// and returns the raw HTTP response bytes.
 fn compile_handler(body: &[u8]) -> Result<Vec<u8>, String> {
-    let stack_ptr = BUILD_STACK
+    let send_ptr = BUILD_STACK
         .get()
         .ok_or_else(|| String::from("network stack not initialized"))?;
     let stack = unsafe {
-        stack_ptr.as_mut()
+        send_ptr.0.as_mut()
             .ok_or_else(|| String::from("network stack pointer is null"))?
     };
     let now = *BUILD_NOW_FN

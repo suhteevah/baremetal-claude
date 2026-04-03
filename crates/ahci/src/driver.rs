@@ -232,7 +232,10 @@ impl AhciController {
         let id_buf_addr = id_buf as u64;
 
         // Build the IDENTIFY command.
-        let (cmd_hdr, _ct_addr) = command::build_identify(id_buf_addr);
+        let (cmd_hdr, _ct_addr) = match command::build_identify(id_buf_addr) {
+            Some(v) => v,
+            None => return Err(AhciError::InitFailed),
+        };
 
         // Write the command header to slot 0 in the Command List.
         unsafe {
@@ -363,7 +366,8 @@ impl AhciDisk {
         let buf_addr = buf.as_mut_ptr() as u64;
 
         // Build the READ DMA EXT command.
-        let (cmd_hdr, _ct_addr) = command::build_read_dma_ext(lba, count, buf_addr, self.sector_size);
+        let (cmd_hdr, _ct_addr) = command::build_read_dma_ext(lba, count, buf_addr, self.sector_size)
+            .ok_or(AhciError::IoError)?;
 
         // Write command header to slot 0.
         unsafe {
@@ -414,7 +418,8 @@ impl AhciDisk {
         let buf_addr = buf.as_ptr() as u64;
 
         // Build the WRITE DMA EXT command.
-        let (cmd_hdr, _ct_addr) = command::build_write_dma_ext(lba, count, buf_addr, self.sector_size);
+        let (cmd_hdr, _ct_addr) = command::build_write_dma_ext(lba, count, buf_addr, self.sector_size)
+            .ok_or(AhciError::IoError)?;
 
         // Write command header to slot 0.
         unsafe {
@@ -438,7 +443,8 @@ impl AhciDisk {
     pub fn flush(&self, hba: &HbaRegs) -> Result<(), AhciError> {
         log::debug!("[ahci] port {}: flushing write cache", self.port);
 
-        let (cmd_hdr, _ct_addr) = command::build_flush_cache();
+        let (cmd_hdr, _ct_addr) = command::build_flush_cache()
+            .ok_or(AhciError::IoError)?;
 
         unsafe {
             ptr::copy_nonoverlapping(

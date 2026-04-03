@@ -241,25 +241,20 @@ pub fn periodic_check(
 
                 // Also update the agent_loop AuthMode so subsequent API calls
                 // use the refreshed cookie.
-                unsafe {
+                {
+                    let mut guard = crate::agent_loop::AUTH_MODE.lock();
                     if let Some(crate::agent_loop::AuthMode::ClaudeAi {
-                        session_cookie: _,
-                        ref org_id,
-                        ref conv_id,
-                    }) = crate::agent_loop::auth_mode().cloned()
+                        session_cookie,
+                        ..
+                    }) = guard.as_mut()
                     {
-                        crate::agent_loop::set_auth_mode(
-                            crate::agent_loop::AuthMode::ClaudeAi {
-                                session_cookie: new_cookie.clone(),
-                                org_id: org_id.clone(),
-                                conv_id: conv_id.clone(),
-                            },
-                        );
+                        *session_cookie = new_cookie.clone();
                     }
                 }
 
                 // Emit SAVE_SESSION marker so the host script can persist it.
                 log::info!("[oauth] SAVE_SESSION:{}", new_cookie);
+                log::info!("[session] cookie refreshed ({} bytes) [REDACTED]", new_cookie.len());
                 log::info!("[session] refresh successful — session extended");
             }
         }
