@@ -57,6 +57,14 @@ single-address-space async Rust application manages all hardware.
 |  | Search (full-text)| | Notifications     | | Image Viewer      |  |
 |  +-------------------+ +-------------------+ +-------------------+  |
 +=====================================================================+
+|                    WINDOWS COMPATIBILITY                            |
+|  +---------------------------------------------------------------+ |
+|  | PE/COFF Loader (parse, relocate, import resolution)           | |
+|  | Win32 API (kernel32, user32, gdi32, DirectWrite, D2D, WASAPI) | |
+|  | .NET CLR (PE/CLI, IL interpreter, GC, BCL) | WinRT (async)    | |
+|  | Vulkan 1.3 Driver | DXVK Bridge (DX9/10/11 -> Vulkan)        | |
+|  +---------------------------------------------------------------+ |
++=====================================================================+
 |                       LINUX COMPATIBILITY                           |
 |  +---------------------------------------------------------------+ |
 |  | ELF Loader (parse, relocate, execute ELF64 binaries)          | |
@@ -234,6 +242,12 @@ kernel
   |     +-- claudio-terminal (split-pane renderer)
   |     +-- claudio-net (VirtIO + smoltcp + TLS)
   +-- claudio-shell
+  +-- claudio-pe-loader
+  +-- claudio-win32
+  +-- claudio-vulkan
+  +-- claudio-dxvk-bridge
+  +-- claudio-dotnet-clr
+  +-- claudio-winrt
   +-- claudio-elf-loader
   +-- claudio-linux-compat
   +-- claudio-vfs
@@ -265,8 +279,9 @@ kernel
   |     +-- cranelift-control-nostd
   |     +-- rustc-hash-nostd
   |     +-- arbitrary-stub
-  +-- kernel modules (53):
+  +-- kernel modules (56):
         acpi_init, smp_init, usb, intel_nic, ssh_server,
+        win32_compat, dotnet_compat,
         rtc, mouse, ipc, init, users, sysmon, splash,
         boot_sound, themes, screensaver, browser, filemanager,
         conversations, session_manager, power, encryption,
@@ -278,11 +293,11 @@ kernel
         linux_compat, notifications, streaming, model_select
 ```
 
-## All 38 Crates + 53 Kernel Modules
+## All 44 Crates + 56 Kernel Modules
 
 | # | Crate | Path | Lines | Description |
 |---|-------|------|-------|-------------|
-| 1 | `claudio-os` | `kernel/` | 29,533 | Kernel binary: boot, hardware init, async executor, dashboard, 53 modules |
+| 1 | `claudio-os` | `kernel/` | 29,533 | Kernel binary: boot, hardware init, async executor, dashboard, 56 modules |
 | 2 | `claudio-terminal` | `crates/terminal/` | 2,930 | Framebuffer terminal, split panes, ANSI/VTE, font rendering |
 | 3 | `claudio-net` | `crates/net/` | 3,172 | VirtIO-net driver, smoltcp TCP/IP, TLS 1.3, HTTP/SSE |
 | 4 | `claudio-api` | `crates/api-client/` | 1,849 | Anthropic Messages API client, SSE streaming, tool use protocol |
@@ -315,14 +330,20 @@ kernel
 | 31 | `wraith-dom` | `crates/wraith-dom/` | 2,070 | no_std HTML parser, CSS selectors, form detection |
 | 32 | `wraith-render` | `crates/wraith-render/` | 1,225 | HTML to text-mode character grid renderer |
 | 33 | `wraith-transport` | `crates/wraith-transport/` | 572 | HTTP/HTTPS client over smoltcp |
-| 34 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
-| 35 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
-| 36 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
-| 37 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
-| 38 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
+| 34 | `claudio-pe-loader` | `crates/pe-loader/` | 1,497 | PE/COFF binary loader: parsing, relocation, import resolution |
+| 35 | `claudio-win32` | `crates/win32/` | 10,458 | Win32 API compat: kernel32, user32, gdi32, DirectWrite, D2D, WASAPI, XInput, WIC |
+| 36 | `claudio-vulkan` | `crates/vulkan/` | 3,811 | Vulkan 1.3 driver: instance, device, swapchain, command buffers, shaders |
+| 37 | `claudio-dxvk-bridge` | `crates/dxvk-bridge/` | 2,039 | DirectX 9/10/11 to Vulkan translation layer (DXVK-style) |
+| 38 | `claudio-dotnet-clr` | `crates/dotnet-clr/` | 5,179 | .NET CLR: PE/CLI loader, IL interpreter, GC, BCL |
+| 39 | `claudio-winrt` | `crates/winrt/` | 1,676 | Windows Runtime API projection: activation, metadata, async patterns |
+| 40 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
+| 41 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
+| 42 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
+| 43 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
+| 44 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
 | -- | `arbitrary-stub` | `crates/arbitrary-stub/` | -- | no_std stub for arbitrary crate (Cranelift dep) |
 
-### Kernel Modules (53)
+### Kernel Modules (56)
 
 | Module | Path | Lines | Description |
 |--------|------|-------|-------------|
@@ -360,6 +381,8 @@ kernel
 | `vconsole` | `kernel/src/vconsole.rs` | 372 | Virtual consoles, Ctrl+Alt+F1-F6 switching, independent sessions |
 | `themes` | `kernel/src/themes.rs` | 365 | 9 color themes: default, solarized-dark/light, monokai, dracula, nord, gruvbox, claudioos, templeos |
 | `sysmon` | `kernel/src/sysmon.rs` | 306 | System monitor pane: CPU/memory/network/agent stats, ANSI progress bars |
+| `win32_compat` | `kernel/src/win32_compat.rs` | 175 | Windows binary compat: PE loading, Win32 API dispatch, DLL resolution |
+| `dotnet_compat` | `kernel/src/dotnet_compat.rs` | 83 | .NET CLR integration: assembly loading, IL execution, managed/native interop |
 | `linux_compat` | `kernel/src/linux_compat.rs` | 301 | Linux binary compat: syscall translation, /proc emulation, signal dispatch |
 | `notifications` | `kernel/src/notifications.rs` | 300 | System-wide notification framework: priority levels, agent alerts, toasts |
 | `rtc` | `kernel/src/rtc.rs` | 299 | CMOS RTC (MC146818), BCD/binary decode, 12h/24h, PIT-corrected wall clock |
@@ -418,3 +441,4 @@ claude.ai API / api.anthropic.com
 9. **Full wireless stack** -- WiFi (WPA2/WPA3) and Bluetooth (HCI/L2CAP/GAP/GATT) with USB transport for untethered operation.
 10. **Linux binary compatibility** -- ELF loader + syscall translation layer runs unmodified Linux binaries on bare metal.
 11. **Semantic memory** -- In-kernel vector database with cosine similarity powers agent memory and RAG across sessions.
+12. **Windows binary compatibility** -- PE/COFF loader + Win32 API layer + .NET CLR + WinRT + Vulkan 1.3 + DXVK bridge runs Windows executables and DirectX games on bare metal.

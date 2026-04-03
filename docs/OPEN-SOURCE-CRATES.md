@@ -1,6 +1,6 @@
 # ClaudioOS Open-Source Crates
 
-ClaudioOS has published 29 crates as standalone, reusable libraries. Each crate is
+ClaudioOS has published 35 crates as standalone, reusable libraries. Each crate is
 `#![no_std]` and can be used independently of ClaudioOS in any bare-metal or
 embedded Rust project.
 
@@ -56,13 +56,29 @@ embedded Rust project.
 | 25 | **terminal-nostd** | 2,930 | Framebuffer terminal: split panes, ANSI/VTE parsing, font rendering, scroll |
 | 26 | **agent-nostd** | 501 | Agent session lifecycle: tool loop (20 rounds), conversation state management |
 
+### Windows Compatibility Crates
+
+| # | Crate | Lines | Description |
+|---|-------|-------|-------------|
+| 27 | **pe-loader-nostd** | 1,497 | PE/COFF binary loader: parsing, section mapping, relocation, import resolution |
+| 28 | **win32-nostd** | 10,458 | Win32 API layer: kernel32, user32, gdi32, DirectWrite, Direct2D, WASAPI, XInput, WIC |
+| 29 | **dotnet-clr-nostd** | 5,179 | .NET Common Language Runtime: PE/CLI loader, IL interpreter, garbage collector, BCL |
+| 30 | **winrt-nostd** | 1,676 | Windows Runtime API projection: activation factories, metadata parsing, async patterns |
+
+### Graphics Crates
+
+| # | Crate | Lines | Description |
+|---|-------|-------|-------------|
+| 31 | **vulkan-nostd** | 3,811 | Vulkan 1.3 GPU driver: instance, device, swapchain, command buffers, pipeline, shaders |
+| 32 | **dxvk-bridge-nostd** | 2,039 | DirectX 9/10/11 to Vulkan translation layer (DXVK-style), D3D device/context emulation |
+
 ### Web / Browser Crates
 
 | # | Crate | Lines | Description |
 |---|-------|-------|-------------|
-| 27 | **wraith-dom** | 2,070 | no_std HTML parser with CSS selector matching and form field detection (32 tests) |
-| 28 | **wraith-render** | 1,225 | HTML document to text-mode character grid renderer (12 tests) |
-| 29 | **wraith-transport** | 572 | HTTP/HTTPS client over smoltcp TCP/IP stack |
+| 33 | **wraith-dom** | 2,070 | no_std HTML parser with CSS selector matching and form field detection (32 tests) |
+| 34 | **wraith-render** | 1,225 | HTML document to text-mode character grid renderer (12 tests) |
+| 35 | **wraith-transport** | 572 | HTTP/HTTPS client over smoltcp TCP/IP stack |
 
 ---
 

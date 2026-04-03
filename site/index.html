@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClaudioOS — Bare Metal AI Agent OS</title>
-  <meta name="description" content="A bare-metal Rust operating system with 38 crates, 53 kernel modules, and ~237,000 lines of Rust: UEFI boot, SMP multi-core, Linux binary compatibility (ELF loader + syscall translation), NVMe/AHCI storage, WiFi, Bluetooth, USB storage, TLS 1.3, post-quantum SSH, firewall, disk encryption, vector store, git client, email, NTP, streaming, model selection, multi-agent Claude dashboard with 6 pane types, IPC, 3 language interpreters, and 29 published open-source crates. No Linux kernel. Just Rust and Claude.">
+  <meta name="description" content="A bare-metal Rust operating system with 44 crates, 56 kernel modules, and ~269,000 lines of Rust: UEFI boot, SMP multi-core, Windows binary compatibility (PE loader + Win32 + .NET CLR + WinRT), Vulkan 1.3 + DXVK DirectX translation, Linux binary compatibility (ELF loader + syscall translation), NVMe/AHCI storage, WiFi, Bluetooth, USB storage, TLS 1.3, post-quantum SSH, firewall, disk encryption, vector store, git client, email, NTP, streaming, model selection, multi-agent Claude dashboard with 6 pane types, IPC, 3 language interpreters, and 35 published open-source crates. No Windows. No Linux kernel. Just Rust and Claude.">
   <meta property="og:title" content="ClaudioOS — Bare Metal AI Agent OS">
-  <meta property="og:description" content="38-crate bare-metal Rust OS with 53 kernel modules and ~237k lines for running AI coding agents. Linux binary compat, vector store, git, email, WiFi, Bluetooth, firewall, encryption, post-quantum SSH, NVMe, ext4, btrfs, GPU compute, 6 pane types, IPC, streaming, model select. 29 open-source crates published.">
+  <meta property="og:description" content="44-crate bare-metal Rust OS with 56 kernel modules and ~269k lines for running AI coding agents. Windows binary compat (PE + Win32 + .NET CLR), Vulkan 1.3 + DXVK, Linux binary compat, vector store, git, email, WiFi, Bluetooth, firewall, encryption, post-quantum SSH, NVMe, ext4, btrfs, GPU compute, 6 pane types, IPC, streaming, model select. 35 open-source crates published.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://claudioos.vercel.app">
   <link rel="stylesheet" href="style.css">
@@ -31,15 +31,16 @@
 <!-- ======== HERO ======== -->
 <header class="hero">
   <div class="container">
-    <div class="hero-eyebrow">38 crates &middot; 53 kernel modules &middot; 29 published &middot; ~237k lines of Rust &middot; 0 lines of C</div>
+    <div class="hero-eyebrow">44 crates &middot; 56 kernel modules &middot; 35 published &middot; ~269k lines of Rust &middot; 0 lines of C</div>
     <h1>ClaudioOS</h1>
     <p class="tagline">
       A bare-metal operating system for AI coding agents.<br>
       <strong>No Linux. No POSIX. No JavaScript.</strong><span class="cursor"></span>
     </p>
     <p class="hero-sub">
-      Boots via UEFI on real hardware. <strong>Runs Linux binaries via ELF loader + syscall translation</strong> --
-      no Linux kernel required. Drives NVMe, AHCI, Intel NICs, WiFi (WPA2/WPA3),
+      Boots via UEFI on real hardware. <strong>Runs Windows binaries via PE loader + Win32 API + .NET CLR</strong>.
+      <strong>Runs Linux binaries via ELF loader + syscall translation</strong>. Vulkan 1.3 GPU driver with
+      DXVK bridge for DirectX 9/10/11. No Windows. No Linux kernel. Drives NVMe, AHCI, Intel NICs, WiFi (WPA2/WPA3),
       Bluetooth, USB 3.0 (keyboard + mouse + storage + touchpad), and NVIDIA GPUs
       from Ring 0. Authenticates to claude.ai via OAuth, runs multi-agent sessions with 6 pane types
       on a 2560x1600 framebuffer with real-time SSE streaming, runtime model selection (Opus/Sonnet/Haiku),
@@ -59,7 +60,7 @@
     </div>
     <div class="hero-actions">
       <a href="https://github.com/suhteevah/baremetal-claude" class="btn btn-primary">View Source</a>
-      <a href="#crates" class="btn btn-secondary">29 Open-Source Crates</a>
+      <a href="#crates" class="btn btn-secondary">35 Open-Source Crates</a>
     </div>
   </div>
 </header>
@@ -69,19 +70,19 @@
   <div class="container">
     <div class="stats-grid">
       <div class="stat">
-        <div class="stat-number">38</div>
+        <div class="stat-number">44</div>
         <div class="stat-label">Workspace Crates</div>
       </div>
       <div class="stat">
-        <div class="stat-number">53</div>
+        <div class="stat-number">56</div>
         <div class="stat-label">Kernel Modules</div>
       </div>
       <div class="stat">
-        <div class="stat-number">29</div>
+        <div class="stat-number">35</div>
         <div class="stat-label">Published OSS Crates</div>
       </div>
       <div class="stat">
-        <div class="stat-number">~237k</div>
+        <div class="stat-number">~269k</div>
         <div class="stat-label">Lines of Rust</div>
       </div>
       <div class="stat">
@@ -109,6 +110,24 @@
         <div class="label">Boot &amp; Core</div>
         <h3>UEFI + SMP Multi-Core</h3>
         <p>UEFI boot with GDT/IDT, 48 MB heap, ACPI table parsing (MADT/FADT/HPET/MCFG), and symmetric multiprocessing. AP cores started via SIPI with work-stealing scheduler. Boot splash with progress bar and PC speaker chime.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Win32</div>
+        <h3>Windows Binary Compatibility</h3>
+        <p>PE/COFF loader (1,497 lines) + Win32 API layer (10,458 lines): kernel32, user32, gdi32, DirectWrite text rendering, Direct2D graphics, WASAPI audio, XInput gamepad, WIC image decoding. Run Windows .exe files on bare metal.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">.NET</div>
+        <h3>.NET CLR + WinRT</h3>
+        <p>.NET Common Language Runtime (5,179 lines): PE/CLI metadata loader, IL bytecode interpreter, mark-sweep garbage collector, Base Class Library stubs. WinRT API projection (1,676 lines) with activation factories and async patterns.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="label">Graphics</div>
+        <h3>Vulkan 1.3 + DXVK</h3>
+        <p>Native Vulkan 1.3 GPU driver (3,811 lines): instance, device, swapchain, command buffers, graphics/compute pipelines, SPIR-V shaders. DXVK bridge (2,039 lines) translates DirectX 9/10/11 calls to Vulkan for game compatibility.</p>
       </div>
 
       <div class="feature-card">
@@ -396,6 +415,9 @@
 | pkt filter   | LUKS-compat  | disk swap   | Clipboard + Power    |
 | IP/port ACL  |              |             | ManPages + NetTools  |
 +--------------+--------------+-------------+----------------------+
+| Windows Compat (PE loader + Win32 + .NET CLR + WinRT)            |
+| Vulkan 1.3 + DXVK (DirectX 9/10/11 -> Vulkan translation)       |
++--------------+--------------+-------------+----------------------+
 | Linux Compat (ELF loader + syscall translation)                  |
 +--------------+--------------+-------------+----------------------+
 |     Networking              |    Filesystems                     |
@@ -418,7 +440,7 @@
 
   <!-- ======== OPEN SOURCE CRATES ======== -->
   <section id="crates">
-    <h2>// 29 Open-Source Crates</h2>
+    <h2>// 35 Open-Source Crates</h2>
     <p class="section-intro">Every crate is <code>#![no_std]</code>, published individually, and usable in any bare-metal or embedded Rust project.</p>
 
     <h3 class="crate-category">Filesystems</h3>
@@ -537,6 +559,38 @@
       </a>
     </div>
 
+    <h3 class="crate-category">Windows Compatibility</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/pe-loader-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">pe-loader-nostd</div>
+        <div class="crate-desc">PE/COFF binary loader: parse, relocate, imports (1,497 lines)</div>
+      </a>
+      <a href="https://github.com/suhteevah/win32-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">win32-nostd</div>
+        <div class="crate-desc">Win32 API: kernel32, user32, gdi32, DirectWrite, D2D, WASAPI, XInput, WIC (10,458 lines)</div>
+      </a>
+      <a href="https://github.com/suhteevah/dotnet-clr-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">dotnet-clr-nostd</div>
+        <div class="crate-desc">.NET CLR: PE/CLI loader, IL interpreter, GC, BCL (5,179 lines)</div>
+      </a>
+      <a href="https://github.com/suhteevah/winrt-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">winrt-nostd</div>
+        <div class="crate-desc">WinRT API projection: activation, metadata, async (1,676 lines)</div>
+      </a>
+    </div>
+
+    <h3 class="crate-category">Graphics</h3>
+    <div class="crate-grid">
+      <a href="https://github.com/suhteevah/vulkan-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">vulkan-nostd</div>
+        <div class="crate-desc">Vulkan 1.3 GPU driver: instance, device, swapchain, pipelines (3,811 lines)</div>
+      </a>
+      <a href="https://github.com/suhteevah/dxvk-bridge-nostd" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">dxvk-bridge-nostd</div>
+        <div class="crate-desc">DirectX 9/10/11 to Vulkan translation (2,039 lines)</div>
+      </a>
+    </div>
+
     <h3 class="crate-category">Web &amp; Browser</h3>
     <div class="crate-grid">
       <a href="https://github.com/suhteevah/wraith-dom" class="crate-card" target="_blank" rel="noopener">
@@ -584,11 +638,13 @@
       </p>
       <p>
         The development itself is recursive: Claude helps build the OS that runs Claude. The project
-        has grown from a simple UEFI bootloader to a 38-crate workspace with 53 kernel modules,
-        ~237,000 lines of Rust, and hardware drivers for NVMe, AHCI, Intel NICs, WiFi, Bluetooth,
+        has grown from a simple UEFI bootloader to a 44-crate workspace with 56 kernel modules,
+        ~269,000 lines of Rust, and hardware drivers for NVMe, AHCI, Intel NICs, WiFi, Bluetooth,
         USB 3.0 (keyboard + mouse + storage + touchpad), HDA audio, and NVIDIA GPUs. It loads and
         runs Linux binaries via an ELF loader and syscall translation layer. It reads ext4,
-        btrfs, and NTFS filesystems. It has a native git client, email (SMTP/IMAP), NTP time sync,
+        btrfs, and NTFS filesystems. It runs Windows .exe files via a PE loader, Win32 API layer,
+        .NET CLR, and WinRT, with Vulkan 1.3 graphics and a DXVK bridge for DirectX game compatibility.
+        It has a native git client, email (SMTP/IMAP), NTP time sync,
         an in-kernel vector database for agent memory, real-time SSE streaming with model selection,
         full-text search, a notification system, a stateful firewall, LUKS-compatible disk encryption,
         swap management, a cron scheduler, virtual consoles, and power management with battery monitoring.
@@ -597,7 +653,7 @@
         monitor, 9 color themes, 5 screensaver modes, man pages, and a boot splash with chime.
       </p>
       <p>
-        29 crates have been extracted and published as standalone open-source libraries, each usable
+        35 crates have been extracted and published as standalone open-source libraries, each usable
         in any <code>#![no_std]</code> Rust project. The goal isn't just an OS -- it's proving that
         AI-native systems programming is possible, practical, and productive.
       </p>
@@ -616,7 +672,7 @@
 rustup target add x86_64-unknown-none
 cargo install bootimage
 
-<span class="code-comment"># Build the kernel (38 crates + 53 kernel modules)</span>
+<span class="code-comment"># Build the kernel (44 crates, 56 kernel modules, ~269k lines)</span>
 cargo build
 
 <span class="code-comment"># Create bootable disk images</span>

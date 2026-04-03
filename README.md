@@ -4,7 +4,7 @@ A bare-metal Rust operating system purpose-built for running multiple AI coding 
 (Anthropic Claude) simultaneously. No Linux kernel, no POSIX, no JavaScript runtime --
 just Rust, UEFI, and direct HTTPS to Claude.
 
-**38 crates. 53 kernel modules. ~237,000 lines of Rust. 428 tests. Zero external OS dependencies.**
+**44 crates. 56 kernel modules. ~269,000 lines of Rust. 428 tests. Zero external OS dependencies.**
 
 ClaudioOS boots your machine into a split-pane terminal dashboard where each pane is an
 independent Claude agent session with tool use (text editor, Python interpreter, Rust
@@ -24,6 +24,8 @@ handshakes to SSE streaming -- is a single-address-space async Rust application.
 
 - **Multi-agent dashboard** -- tmux-style split panes, each running an independent Claude session
 - **6 pane types** -- Agent, Shell, Web Browser, File Manager, System Monitor, Screensaver
+- **Windows binary compatibility** -- PE loader + Win32 API layer + .NET CLR + WinRT, run Windows executables on bare metal
+- **Vulkan + DirectX graphics** -- Vulkan 1.3 driver + DXVK bridge (DirectX 9/10/11 to Vulkan translation)
 - **Linux binary compatibility** -- ELF loader + Linux syscall translation layer, run Linux binaries on bare metal
 - **Native TLS 1.3** -- AES-128-GCM-SHA256 with hardware AES-NI, direct HTTPS to Claude APIs
 - **SSE streaming** -- real-time token-by-token streaming with backpressure, buffered rendering, rate limiting
@@ -94,6 +96,9 @@ handshakes to SSE streaming -- is a single-address-space async Rust application.
 |  VectorDB + Agent Memory   | Model Select  | Streaming (backpres.) |
 |  Firewall | Encryption | Swap | Cron | VConsoles | Clipboard        |
 +=====================================================================+
+|  Windows Compat (PE loader + Win32 + .NET CLR + WinRT)              |
+|  Vulkan 1.3 + DXVK (DirectX 9/10/11 -> Vulkan translation)         |
++=====================================================================+
 |  Linux Compat (ELF loader + syscall translation)                    |
 +=====================================================================+
 |  VFS: ext4 | btrfs | NTFS | FAT32 | GPT/MBR                       |
@@ -124,7 +129,7 @@ handshakes to SSE streaming -- is a single-address-space async Rust application.
 ### Build and Run
 
 ```bash
-# 1. Build the kernel (38 crates, ~237k lines)
+# 1. Build the kernel (44 crates, ~269k lines)
 cargo build
 
 # 2. Create bootable disk image
@@ -166,12 +171,12 @@ setup, and troubleshooting.
 | [SHELL.md](docs/SHELL.md) | AI-native shell: 45+ builtins, pipes, env vars, scripting, network tools, themes |
 | [AGENTS.md](docs/AGENTS.md) | Multi-agent system: auth modes, dashboard, tool loop, IPC, session management |
 | [BUILDING.md](docs/building.md) | Build instructions, QEMU setup, run.ps1, troubleshooting |
-| [OPEN-SOURCE-CRATES.md](docs/OPEN-SOURCE-CRATES.md) | 29 published crates with usage examples |
+| [OPEN-SOURCE-CRATES.md](docs/OPEN-SOURCE-CRATES.md) | 35 published crates with usage examples |
 | [ROADMAP.md](docs/ROADMAP.md) | Feature roadmap and TODO list |
 
 ---
 
-## Published Crates (29)
+## Published Crates (35)
 
 These crates are standalone `#![no_std]` libraries usable in any bare-metal or
 embedded Rust project:
@@ -185,6 +190,8 @@ embedded Rust project:
 | **USB** | xhci-nostd |
 | **Audio** | hda-nostd |
 | **System** | acpi-nostd, smp-nostd, gpu-compute-nostd, elf-loader-nostd, linux-compat-nostd |
+| **Windows compat** | pe-loader-nostd, win32-nostd, dotnet-clr-nostd, winrt-nostd |
+| **Graphics** | vulkan-nostd, dxvk-bridge-nostd |
 | **Security** | sshd-pqc (post-quantum SSH) |
 | **Languages** | python-lite, js-lite, rustc-lite |
 | **Tools** | editor-nostd, shell-nostd, terminal-nostd, agent-nostd |
@@ -195,11 +202,11 @@ API documentation.
 
 ---
 
-## All 38 Crates
+## All 44 Crates
 
 | Crate | Lines | Description |
 |-------|-------|-------------|
-| kernel | 29,533 | Boot, hardware init, async executor, dashboard, 53 kernel modules |
+| kernel | 29,533 | Boot, hardware init, async executor, dashboard, 56 kernel modules |
 | claudio-terminal | 2,930 | Framebuffer terminal, split panes, ANSI/VTE |
 | claudio-net | 3,172 | VirtIO-net, smoltcp, TLS 1.3, HTTP/SSE |
 | claudio-api | 1,849 | Anthropic Messages API, SSE streaming, tools |
@@ -231,12 +238,18 @@ API documentation.
 | wraith-dom | 2,070 | HTML parser, CSS selectors (32 tests) |
 | wraith-render | 1,225 | HTML to text-mode renderer (12 tests) |
 | wraith-transport | 572 | HTTP/HTTPS over smoltcp |
+| claudio-pe-loader | 1,497 | PE/COFF binary loader: parsing, relocation, import resolution |
+| claudio-win32 | 10,458 | Win32 API compat: kernel32, user32, gdi32, DirectWrite, D2D, WASAPI, XInput, WIC |
+| claudio-vulkan | 3,811 | Vulkan 1.3 driver: instance, device, swapchain, command buffers, shaders |
+| claudio-dxvk-bridge | 2,039 | DirectX 9/10/11 to Vulkan translation layer (DXVK-style) |
+| claudio-dotnet-clr | 5,179 | .NET Common Language Runtime: PE/CLI loader, IL interpreter, GC, BCL |
+| claudio-winrt | 1,676 | Windows Runtime API projection: activation, metadata, async patterns |
 | claudio-fs | 40 | FAT32 persistence (stubbed) |
 | cranelift-*-nostd | -- | 4 forked Cranelift crates for no_std |
 | rustc-hash-nostd | -- | Forked rustc-hash for no_std |
 | arbitrary-stub | -- | no_std stub for arbitrary crate |
 
-### Kernel Modules (53)
+### Kernel Modules (56)
 
 These are in-kernel modules under `kernel/src/` that wire the standalone crates
 to the hardware and dashboard:
@@ -277,6 +290,8 @@ to the hardware and dashboard:
 | `vconsole.rs` | 372 | Virtual consoles, Ctrl+Alt+F1-F6 switching |
 | `themes.rs` | 365 | 9 color themes with ANSI 24-bit escape generation |
 | `sysmon.rs` | 306 | System monitor: CPU, memory, network, agent stats with ANSI rendering |
+| `win32_compat.rs` | 175 | Windows binary compat: PE loading, Win32 API dispatch, DLL resolution |
+| `dotnet_compat.rs` | 83 | .NET CLR integration: assembly loading, IL execution, managed/native interop |
 | `linux_compat.rs` | 301 | Linux binary compat: syscall translation, /proc emulation, signal dispatch |
 | `notifications.rs` | 300 | System-wide notification framework: priority levels, agent alerts, toasts |
 | `rtc.rs` | 299 | CMOS RTC wall clock, BCD/binary decode, PIT-corrected uptime |
@@ -314,7 +329,7 @@ to the hardware and dashboard:
 ## License
 
 - **ClaudioOS** (kernel + integration): [AGPL-3.0-or-later](LICENSE)
-- **Published crates** (29 standalone libraries): MIT + Apache-2.0 dual license
+- **Published crates** (35 standalone libraries): MIT + Apache-2.0 dual license
 
 Copyright (c) [Ridge Cell Repair LLC](https://github.com/suhteevah)
 

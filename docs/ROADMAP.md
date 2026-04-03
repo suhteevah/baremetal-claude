@@ -130,6 +130,19 @@ type: project
 - [ ] Fix keyboard input in QEMU graphical mode
 - [ ] Wire SSH shell to real shell crate (currently echo shell)
 
+## DONE — Windows Binary Compatibility
+- [x] PE/COFF loader (parse, relocate, import resolution, 1,497 lines)
+- [x] Win32 API layer (kernel32, user32, gdi32, 10,458 lines)
+- [x] DirectWrite text rendering
+- [x] Direct2D (D2D) 2D graphics
+- [x] WASAPI audio output
+- [x] XInput gamepad support
+- [x] WIC (Windows Imaging Component) image decoding
+- [x] Vulkan 1.3 GPU driver (instance, device, swapchain, command buffers, shaders, 3,811 lines)
+- [x] DXVK bridge (DirectX 9/10/11 to Vulkan translation, 2,039 lines)
+- [x] .NET Common Language Runtime (PE/CLI loader, IL interpreter, GC, BCL, 5,179 lines)
+- [x] WinRT API projection (activation, metadata, async patterns, 1,676 lines)
+
 ## TODO — Killer Features
 - [ ] GPU LLM inference (run local models on RTX 3070 Ti)
 - [ ] Live code reload (Cranelift JIT hot-swap)
@@ -140,7 +153,7 @@ type: project
 - [ ] Better font rendering (anti-aliased if GPU available)
 - [ ] Tab completion for file paths and command names
 
-## Published Open-Source Crates (29)
+## Published Open-Source Crates (35)
 1. ext4-rw
 2. btrfs-nostd
 3. ntfs-rw
@@ -170,3 +183,9 @@ type: project
 27. terminal-nostd
 28. net-nostd
 29. agent-nostd
+30. pe-loader-nostd
+31. win32-nostd
+32. vulkan-nostd
+33. dxvk-bridge-nostd
+34. dotnet-clr-nostd
+35. winrt-nostd
