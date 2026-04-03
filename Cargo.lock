@@ -261,6 +261,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-dxvk-bridge"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
 name = "claudio-editor"
 version = "0.1.0"
 dependencies = [
@@ -363,6 +371,7 @@ dependencies = [
  "claudio-auth",
  "claudio-bluetooth",
  "claudio-btrfs",
+ "claudio-dxvk-bridge",
  "claudio-elf-loader",
  "claudio-ext4",
  "claudio-fs",
@@ -373,6 +382,7 @@ dependencies = [
  "claudio-net",
  "claudio-ntfs",
  "claudio-nvme",
+ "claudio-pe-loader",
  "claudio-rustc",
  "claudio-shell",
  "claudio-smp",
@@ -380,6 +390,8 @@ dependencies = [
  "claudio-terminal",
  "claudio-usb-storage",
  "claudio-vfs",
+ "claudio-vulkan",
+ "claudio-win32",
  "claudio-xhci",
  "conquer-once",
  "linked_list_allocator",
@@ -392,6 +404,13 @@ dependencies = [
  "wraith-dom",
  "wraith-render",
  "x86_64",
+]
+
+[[package]]
+name = "claudio-pe-loader"
+version = "0.1.0"
+dependencies = [
+ "log",
 ]
 
 [[package]]
@@ -462,6 +481,24 @@ dependencies = [
  "claudio-ext4",
  "claudio-ntfs",
  "claudio-nvme",
+ "log",
+ "spin",
+]
+
+[[package]]
+name = "claudio-vulkan"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
+name = "claudio-win32"
+version = "0.1.0"
+dependencies = [
+ "claudio-pe-loader",
+ "claudio-vfs",
  "log",
  "spin",
 ]

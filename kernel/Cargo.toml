@@ -45,3 +45,7 @@ claudio-usb-storage = { path = "../crates/usb-storage" }
 claudio-bluetooth = { path = "../crates/bluetooth" }
 claudio-elf-loader = { path = "../crates/elf-loader" }
 claudio-linux-compat = { path = "../crates/linux-compat" }
+claudio-pe-loader = { path = "../crates/pe-loader" }
+claudio-vulkan = { path = "../crates/vulkan" }
+claudio-win32 = { path = "../crates/win32" }
+claudio-dxvk-bridge = { path = "../crates/dxvk-bridge" }

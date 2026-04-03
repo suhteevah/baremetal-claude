@@ -1,0 +1,10 @@
+[package]
+name = "claudio-pe-loader"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std PE/COFF executable loader for ClaudioOS — loads Windows x86_64 binaries"
+
+[dependencies]
+log = { workspace = true }

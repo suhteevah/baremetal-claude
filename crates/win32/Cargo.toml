@@ -1,0 +1,13 @@
+[package]
+name = "claudio-win32"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native Win32 API compatibility layer for ClaudioOS — runs Windows executables on bare metal"
+
+[dependencies]
+log = { workspace = true }
+spin = { workspace = true }
+claudio-vfs = { path = "../vfs" }
+claudio-pe-loader = { path = "../pe-loader" }

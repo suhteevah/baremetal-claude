@@ -33,6 +33,10 @@ members = [
     "crates/bluetooth",
     "crates/elf-loader",
     "crates/linux-compat",
+    "crates/pe-loader",
+    "crates/vulkan",
+    "crates/win32",
+    "crates/dxvk-bridge",
 ]
 exclude = [
     "tools/image-builder",  # Host-side tool, must NOT inherit x86_64-unknown-none target
