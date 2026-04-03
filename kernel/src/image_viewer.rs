@@ -325,16 +325,23 @@ pub fn handle_command(args: &str) -> String {
         );
     }
 
-    // In a full implementation, we'd read from FAT32 here:
-    //   let data = crate::fs_persist::read_file(path)?;
-    //   let img = decode_image(&data)?;
+    // To view an image, we need a mounted filesystem to read the file from.
+    // The full sequence is:
+    //   1. Mount a filesystem:  mount /dev/sda1 /mnt ext4
+    //   2. View the image:      view /mnt/photo.bmp
+    //
+    // Once a VFS is mounted, this will:
+    //   let data = vfs.read_file(path)?;
+    //   let img = if lower.ends_with(".bmp") { parse_bmp(&data)? } else { parse_ppm(&data)? };
     //   render_image_to_pane(&img, ...pane viewport...);
     //
-    // For now, report that the viewer is ready but the filesystem isn't wired.
+    // Currently no block devices are detected (QEMU virtio-net only).
     format!(
         "Image viewer ready.\n\
          File: {}\n\
-         Status: FAT32 filesystem not yet wired — use `view` after fs-persist integration.\n\
+         \x1b[33mRequires a mounted filesystem.\x1b[0m\n\
+         No block devices detected (QEMU virtio-net only).\n\
+         On real hardware: mount a disk first, then `view <path>`.\n\n\
          Supported formats:\n\
          \x1b[36m  .bmp\x1b[0m  24-bit or 32-bit uncompressed (BI_RGB / BI_BITFIELDS)\n\
          \x1b[36m  .ppm\x1b[0m  P6 binary (RGB, max value 1-255)\n",

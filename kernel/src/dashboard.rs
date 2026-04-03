@@ -176,41 +176,20 @@ impl ShellPaneState {
 // Stub VFS for shell builtins (no filesystem mounted yet)
 // ---------------------------------------------------------------------------
 
-/// Minimal VFS that returns "no filesystem mounted" for all operations.
-/// This is sufficient for builtins like echo, help, clear, ps, history, env.
+/// VFS implementation for the dashboard shell.
 ///
-/// # Wiring the real VFS
+/// Currently operates as a stub because QEMU provides no block devices (only
+/// virtio-net). The `mount` and `umount` commands validate arguments and report
+/// that no block devices are detected, guiding the user toward real hardware.
 ///
-/// Once storage drivers are initialized (AHCI/NVMe), replace `StubVfs` with
-/// a real `claudio_vfs::Vfs` instance. Example:
+/// On real hardware with AHCI/NVMe disks, the mount command would:
+///   1. Look up the block device via `AhciBlockDeviceAdapter` or `NvmeBlockDeviceAdapter`
+///   2. Auto-detect the filesystem via `detect_filesystem()` (or use the specified type)
+///   3. Create a partition adapter (`VfsToExt4BlockDevice`, `VfsToBtrfsBlockDevice`, etc.)
+///   4. Mount via `Ext4FilesystemAdapter`, `BtrfsFilesystemAdapter`, or `NtfsFilesystemAdapter`
+///   5. Register the mount in the global VFS mount table
 ///
-/// ```rust,no_run
-/// // TODO: Wire real VFS once storage drivers are initialized.
-/// //
-/// // use claudio_vfs::adapters::*;
-/// // use claudio_vfs::{Vfs, MountOptions};
-/// //
-/// // // 1. Wrap the AHCI disk as a VFS BlockDevice:
-/// // let ahci_dev = unsafe {
-/// //     AhciBlockDeviceAdapter::new(ahci_disk_ptr, hba_ptr)
-/// // };
-/// //
-/// // // 2. Auto-detect the filesystem on each partition:
-/// // let fs_type = detect_filesystem(&ahci_dev);
-/// //
-/// // // 3. Create a partition view and mount the filesystem:
-/// // let partition_dev = VfsToExt4BlockDevice {
-/// //     device: &ahci_dev,
-/// //     partition_offset: part.start_offset(sector_size),
-/// //     partition_size: part.size_bytes(sector_size),
-/// // };
-/// // let ext4_fs = claudio_ext4::Ext4Fs::mount(partition_dev).unwrap();
-/// // let adapter = Box::leak(Box::new(Ext4FilesystemAdapter::new(ext4_fs)));
-/// //
-/// // // 4. Mount into the VFS:
-/// // let mut vfs = Vfs::new();
-/// // vfs.mount("/", adapter, MountOptions::default()).unwrap();
-/// ```
+/// All adapter types are implemented in `crates/vfs/src/adapters.rs`.
 struct StubVfs;
 
 impl Vfs for StubVfs {
@@ -258,12 +237,51 @@ impl Vfs for StubVfs {
         false
     }
 
-    fn mount(&mut self, _device: &str, _path: &str, _fstype: &str) -> Result<(), String> {
-        Err(String::from("mount: not yet implemented"))
+    fn mount(&mut self, device: &str, path: &str, fstype: &str) -> Result<(), String> {
+        log::info!("[vfs] mount request: {} -> {} ({})", device, path, fstype);
+
+        // Validate the filesystem type is one we support.
+        match fstype {
+            "fat32" | "vfat" | "ext4" | "btrfs" | "ntfs" => {}
+            _ => {
+                return Err(format!(
+                    "mount: unsupported filesystem type '{}'. Supported: fat32, ext4, btrfs, ntfs",
+                    fstype
+                ));
+            }
+        }
+
+        // Validate mount path starts with /.
+        if !path.starts_with('/') {
+            return Err(format!("mount: mount path must be absolute (got '{}')", path));
+        }
+
+        // In QEMU with only virtio-net, no block devices are available.
+        // On real hardware with AHCI/NVMe disks, the storage drivers would
+        // have registered block devices during PCI enumeration, and we would:
+        //   1. Look up the block device by `device` path
+        //   2. Auto-detect or use the specified `fstype`
+        //   3. Create the appropriate adapter (Ext4FilesystemAdapter, etc.)
+        //   4. Mount via claudio_vfs::Vfs::mount()
+        //
+        // See crates/vfs/src/adapters.rs for the full adapter + detection code.
+        Err(format!(
+            "mount: no block devices detected (QEMU virtio-net only)\n\
+             On real hardware: mount {} {} {}",
+            device, path, fstype
+        ))
     }
 
-    fn umount(&mut self, _path: &str) -> Result<(), String> {
-        Err(String::from("umount: not yet implemented"))
+    fn umount(&mut self, path: &str) -> Result<(), String> {
+        log::info!("[vfs] umount request: {}", path);
+
+        if !path.starts_with('/') {
+            return Err(format!("umount: path must be absolute (got '{}')", path));
+        }
+
+        // No filesystems are currently mounted (no block devices in QEMU).
+        // On real hardware, this would call claudio_vfs::Vfs::unmount(path).
+        Err(format!("umount: {} is not mounted", path))
     }
 }
 

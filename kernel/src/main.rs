@@ -1061,12 +1061,13 @@ async fn main_async() {
                                 conv_id.clone(),
                             );
 
-                            // Register compile handler
+                            // Register compile handler + VFS/command tool handlers
                             unsafe {
                                 agent_loop::init_compile_handler(
                                     &mut stack as *mut _,
                                     now,
                                 );
+                                agent_loop::init_tool_handlers();
                             }
 
                             splash::show_splash(splash::BootStage::Ready);
@@ -1162,12 +1163,14 @@ async fn main_async() {
                         log::info!("[main]   c = new agent, x = close pane");
 
                         // Register the compile_rust tool handler so agents
-                        // can compile Rust code via the host build server.
+                        // can compile Rust code via the host build server,
+                        // plus VFS + command tool handlers.
                         unsafe {
                             agent_loop::init_compile_handler(
                                 &mut stack as *mut _,
                                 now,
                             );
+                            agent_loop::init_tool_handlers();
                         }
 
                         // Start the SSH server on port 22 (polled from dashboard loop).

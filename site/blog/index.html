@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blog — ClaudioOS</title>
+  <meta name="description" content="Technical blog posts about building ClaudioOS, a bare-metal Rust operating system for AI coding agents.">
+  <meta property="og:title" content="Blog — ClaudioOS">
+  <meta property="og:description" content="Technical deep dives into building a bare-metal OS in Rust: boot to Claude in 48 hours, Linux syscalls on bare metal, post-quantum SSH from scratch.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://claudioos.vercel.app/blog">
+  <meta property="og:image" content="https://claudioos.vercel.app/og-image.png">
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    .blog-hero {
+      padding: 64px 0 48px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+      background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0, 255, 65, 0.04), transparent);
+    }
+    .blog-hero h1 {
+      font-size: 2.4rem;
+      color: var(--accent);
+      margin-bottom: 12px;
+      letter-spacing: -1px;
+    }
+    .blog-hero p {
+      font-size: 0.92rem;
+      color: var(--text-dim);
+    }
+    .post-list {
+      padding: 48px 0;
+    }
+    .post-card {
+      display: block;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 32px;
+      margin-bottom: 20px;
+      text-decoration: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .post-card:hover {
+      border-color: var(--accent-dim);
+      box-shadow: 0 0 24px rgba(0, 255, 65, 0.05);
+      text-decoration: none;
+    }
+    .post-meta {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+    .post-card h2 {
+      font-size: 1.3rem;
+      color: var(--accent);
+      margin-bottom: 12px;
+      line-height: 1.4;
+      border: none;
+      padding: 0;
+    }
+    .post-card p {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      line-height: 1.7;
+    }
+    .post-tag {
+      display: inline-block;
+      padding: 2px 10px;
+      font-size: 0.68rem;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text-dim);
+      margin-right: 6px;
+      margin-top: 12px;
+    }
+    .post-tag.green { border-color: var(--accent-dim); color: var(--accent); }
+    .post-tag.cyan { border-color: var(--cyan); color: var(--cyan); }
+    .post-tag.magenta { border-color: var(--magenta); color: var(--magenta); }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="https://claudioos.vercel.app" class="nav-logo" style="text-decoration:none;">ClaudioOS</a>
+    <div class="nav-links">
+      <a href="https://claudioos.vercel.app">Home</a>
+      <a href="/blog" class="active">Blog</a>
+      <a href="https://claudioos.vercel.app/docs.html">Docs</a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="nav-github">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="blog-hero">
+  <div class="container">
+    <h1>Blog</h1>
+    <p>Technical deep dives into building a bare-metal OS for AI coding agents.</p>
+  </div>
+</header>
+
+<div class="post-list">
+  <div class="container">
+
+    <a href="post-quantum-ssh-from-scratch.html" class="post-card">
+      <div class="post-meta">April 2026 &middot; Matt Gates &middot; 14 min read</div>
+      <h2>Post-Quantum SSH from Scratch: ML-KEM + X25519 Hybrid Key Exchange on Bare Metal</h2>
+      <p>
+        We built a complete SSH implementation from scratch in no_std Rust with hybrid post-quantum
+        key exchange. ML-KEM-768 for quantum resistance, X25519 for classical security, ML-DSA-65
+        host keys with dual signatures. No OpenSSL. No libcrypto. 29 open-source crates published.
+      </p>
+      <span class="post-tag magenta">cryptography</span>
+      <span class="post-tag green">no_std</span>
+      <span class="post-tag">ssh</span>
+    </a>
+
+    <a href="linux-syscalls-on-bare-metal.html" class="post-card">
+      <div class="post-meta">April 2026 &middot; Matt Gates &middot; 12 min read</div>
+      <h2>Implementing 456 Linux Syscalls on Bare Metal &mdash; Running Linux Binaries Without Linux</h2>
+      <p>
+        ClaudioOS runs unmodified Linux ELF binaries via a syscall translation layer in Ring 0.
+        No kernel mode switch. No process isolation overhead. We implemented 456 syscalls including
+        mmap, epoll, futex, and full POSIX file I/O -- all in safe-ish Rust on bare metal.
+      </p>
+      <span class="post-tag cyan">linux-compat</span>
+      <span class="post-tag green">no_std</span>
+      <span class="post-tag">elf</span>
+    </a>
+
+    <a href="building-os-in-rust-with-ai.html" class="post-card">
+      <div class="post-meta">April 2026 &middot; Matt Gates &middot; 10 min read</div>
+      <h2>Building a Bare-Metal OS in Rust with AI &mdash; From Boot to Claude in 48 Hours</h2>
+      <p>
+        The origin story of ClaudioOS: how we went from an empty Cargo project to a bare-metal
+        operating system running Claude agents in 48 hours. TLS 1.3 handshakes from scratch,
+        Cranelift JIT on bare metal, and every "impossible" moment along the way.
+      </p>
+      <span class="post-tag green">origin-story</span>
+      <span class="post-tag">rust</span>
+      <span class="post-tag">bare-metal</span>
+    </a>
+
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner container">
+    <p><a href="https://claudioos.vercel.app">ClaudioOS</a> &mdash; Bare metal AI agent OS</p>
+    <p class="footer-sub">Built with Rust, Claude, and zero lines of C.</p>
+  </div>
+</footer>
+
+</body>
+</html>

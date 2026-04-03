@@ -1,7 +1,8 @@
 //! High-level NTFS filesystem read/write API.
 //!
 //! This module provides the main `NtfsFs` type that ties together the boot sector,
-//! MFT, attributes, indexes, and data runs into a usable filesystem interface.
+//! MFT, attributes, indexes, data runs, journal, compression, and attribute lists
+//! into a usable filesystem interface.
 //!
 //! ## Usage
 //!
@@ -18,14 +19,19 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::fmt;
 
-use crate::attribute::{AttributeHeader, AttributeType};
+use crate::attribute::{AttributeHeader, AttributeType, ATTR_FLAG_COMPRESSED};
+use crate::attribute_list;
 use crate::boot_sector::{BootSector, BOOT_SECTOR_SIZE};
+use crate::compression;
 use crate::data_runs::{self, DataRun};
 use crate::filename::{FileNameAttr, FileNamespace};
-use crate::index::{self, IndexEntry, IndexNodeHeader, IndexRoot};
-use crate::mft::{self, MftEntry, MFT_ENTRY_ROOT, MFT_ENTRY_UPCASE};
+use crate::index::{self, IndexEntry, IndexNodeHeader, IndexRoot, INDEX_ENTRY_FLAG_LAST_ENTRY, INDEX_ENTRY_FLAG_HAS_SUB_NODE, INDEX_HEADER_FLAG_LARGE_INDEX};
+use crate::journal::{Journal, JournalOp};
+use crate::mft::{self, MftEntry, MFT_ENTRY_ROOT, MFT_ENTRY_UPCASE, MFT_ENTRY_LOGFILE};
+
 use crate::upcase::UpCaseTable;
 
 /// Errors that can occur during NTFS filesystem operations.
@@ -131,7 +137,8 @@ pub struct DirEntry {
 
 /// Main NTFS filesystem handle.
 ///
-/// Holds the parsed boot sector, cached MFT location, and the $UpCase table.
+/// Holds the parsed boot sector, cached MFT location, the $UpCase table,
+/// and the transaction journal.
 /// All operations go through this struct.
 pub struct NtfsFs<D: BlockDevice> {
     /// The underlying block device.
@@ -148,13 +155,16 @@ pub struct NtfsFs<D: BlockDevice> {
     mft_offset: u64,
     /// Data runs for the $MFT itself (since $MFT can be non-contiguous).
     mft_data_runs: Vec<DataRun>,
+    /// Transaction journal for crash recovery (interior mutability for &self API).
+    journal: RefCell<Journal>,
 }
 
 impl<D: BlockDevice> NtfsFs<D> {
     /// Mount an NTFS filesystem from a block device.
     ///
     /// Reads the boot sector, locates the MFT, parses the $MFT entry to get
-    /// the full MFT data run list, and loads the $UpCase table.
+    /// the full MFT data run list, loads the $UpCase table, and initializes
+    /// the journal (with recovery if needed).
     pub fn mount(device: D) -> Result<Self, NtfsError> {
         log::info!("[ntfs] mounting NTFS filesystem...");
 
@@ -211,6 +221,65 @@ impl<D: BlockDevice> NtfsFs<D> {
             })
         };
 
+        // Step 4: Initialize journal
+        // Try to read the $LogFile (MFT entry 2) to get journal location
+        let journal = {
+            let logfile_offset = Self::resolve_mft_entry_offset(
+                &mft_data_runs, MFT_ENTRY_LOGFILE, mft_record_size, cluster_size, mft_offset,
+            );
+
+            match logfile_offset {
+                Ok(offset) => {
+                    // Use the $LogFile's disk location as journal storage area
+                    let journal_offset = offset;
+                    let journal_capacity = mft_record_size * 64; // Reserve space
+                    // Try to read existing journal
+                    let mut journal_buf = vec![0u8; journal_capacity as usize];
+                    match device.read_bytes(journal_offset, &mut journal_buf) {
+                        Ok(()) => {
+                            match Journal::from_bytes(&journal_buf, journal_offset, journal_capacity) {
+                                Some(mut j) => {
+                                    if !j.header.clean_shutdown {
+                                        log::warn!("[ntfs] unclean shutdown detected, checking journal...");
+                                        // Rollback uncommitted entries
+                                        let uncommitted = j.uncommitted_entries();
+                                        if !uncommitted.is_empty() {
+                                            log::warn!("[ntfs] rolling back {} uncommitted journal entries",
+                                                uncommitted.len());
+                                            for entry in uncommitted.iter().rev() {
+                                                if !entry.undo_data.is_empty() {
+                                                    log::debug!("[ntfs] rollback: offset=0x{:X}, {} bytes",
+                                                        entry.target_offset, entry.undo_data.len());
+                                                    let _ = device.write_bytes(
+                                                        entry.target_offset, &entry.undo_data
+                                                    );
+                                                }
+                                            }
+                                            let _ = device.flush();
+                                        }
+                                    }
+                                    j.mark_clean();
+                                    j
+                                }
+                                None => {
+                                    log::info!("[ntfs] no existing journal, creating new");
+                                    Journal::new(journal_offset, journal_capacity)
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            log::warn!("[ntfs] failed to read journal area, creating new");
+                            Journal::new(journal_offset, journal_capacity)
+                        }
+                    }
+                }
+                Err(_) => {
+                    log::warn!("[ntfs] $LogFile not found, journal disabled");
+                    Journal::new(0, 0)
+                }
+            }
+        };
+
         log::info!("[ntfs] NTFS filesystem mounted successfully: volume_size={} bytes",
             boot_sector.volume_size());
 
@@ -222,8 +291,102 @@ impl<D: BlockDevice> NtfsFs<D> {
             mft_record_size,
             mft_offset,
             mft_data_runs,
+            journal: RefCell::new(journal),
         })
     }
+
+    // -----------------------------------------------------------------------
+    // Journal helpers
+    // -----------------------------------------------------------------------
+
+    /// Perform a journaled write to the device.
+    ///
+    /// Logs old data (for undo) and new data (for redo) before writing.
+    fn journaled_write(&self, op: JournalOp, offset: u64, new_data: &[u8]) -> Result<(), NtfsError> {
+        // Read old data for undo
+        let mut old_data = vec![0u8; new_data.len()];
+        self.device.read_bytes(offset, &mut old_data)?;
+
+        // Log the operation
+        {
+            let mut journal = self.journal.borrow_mut();
+            journal.mark_dirty();
+            let _lsn = journal.log_write(op, offset, &old_data, new_data);
+        }
+
+        // Perform the actual write
+        self.device.write_bytes(offset, new_data)?;
+
+        Ok(())
+    }
+
+    /// Flush the journal to disk.
+    fn flush_journal(&self) -> Result<(), NtfsError> {
+        let journal = self.journal.borrow();
+        if journal.journal_capacity == 0 {
+            return Ok(()); // Journal disabled
+        }
+        let journal_bytes = journal.to_bytes();
+        if journal_bytes.len() as u64 <= journal.journal_capacity {
+            self.device.write_bytes(journal.journal_offset, &journal_bytes)?;
+        }
+        self.device.flush()
+    }
+
+    // -----------------------------------------------------------------------
+    // Attribute list support
+    // -----------------------------------------------------------------------
+
+    /// Find an attribute, checking $ATTRIBUTE_LIST if the attribute isn't
+    /// directly present in the base MFT entry.
+    fn find_attribute_with_list(
+        &self,
+        entry: &MftEntry,
+        attr_type: AttributeType,
+    ) -> Result<(MftEntry, AttributeHeader, usize), NtfsError> {
+        // First try the direct approach
+        if let Some((hdr, offset)) = entry.find_attribute(attr_type) {
+            return Ok((entry.clone(), hdr, offset));
+        }
+
+        // Check for $ATTRIBUTE_LIST
+        if let Some((_, al_offset)) = entry.find_attribute(AttributeType::AttributeList) {
+            log::debug!("[ntfs] checking $ATTRIBUTE_LIST for type 0x{:08X}", attr_type as u32);
+
+            // Read the attribute list data
+            let al_data = if let Some(data) = entry.resident_data(al_offset) {
+                data.to_vec()
+            } else {
+                // Non-resident attribute list
+                self.read_non_resident_data(entry, al_offset)?
+            };
+
+            let al_entries = attribute_list::parse_attribute_list(&al_data);
+            let matches = attribute_list::find_in_attribute_list(&al_entries, attr_type);
+
+            for al_entry in matches {
+                let ext_entry_num = al_entry.entry_number();
+                if ext_entry_num == 0 {
+                    continue; // Skip self-references to the base entry
+                }
+
+                log::trace!("[ntfs] $ATTRIBUTE_LIST: type 0x{:08X} in MFT#{}",
+                    attr_type as u32, ext_entry_num);
+
+                // Read the extension MFT entry
+                let ext_entry = self.read_mft_entry(ext_entry_num)?;
+                if let Some((hdr, offset)) = ext_entry.find_attribute(attr_type) {
+                    return Ok((ext_entry, hdr, offset));
+                }
+            }
+        }
+
+        Err(NtfsError::AttributeNotFound(attr_type.name()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Core MFT / data run operations
+    // -----------------------------------------------------------------------
 
     /// Read the data runs from a $DATA (or other) attribute in an MFT entry.
     fn read_data_runs_from_entry(entry: &MftEntry, attr_type: AttributeType) -> Result<Vec<DataRun>, NtfsError> {
@@ -295,7 +458,7 @@ impl<D: BlockDevice> NtfsFs<D> {
             .ok_or(NtfsError::CorruptMftEntry(entry_number))
     }
 
-    /// Write an MFT entry back to disk.
+    /// Write an MFT entry back to disk (with journal logging).
     pub fn write_mft_entry(&self, entry_number: u64, entry: &MftEntry) -> Result<(), NtfsError> {
         let offset = Self::resolve_mft_entry_offset(
             &self.mft_data_runs, entry_number,
@@ -305,16 +468,26 @@ impl<D: BlockDevice> NtfsFs<D> {
         let buf = entry.to_bytes();
         log::debug!("[ntfs] writing MFT entry {} ({} bytes) to offset 0x{:X}",
             entry_number, buf.len(), offset);
-        self.device.write_bytes(offset, &buf)?;
+
+        // Journal the MFT write
+        self.journaled_write(JournalOp::MftWrite, offset, &buf)?;
         self.device.flush()
     }
 
+    // -----------------------------------------------------------------------
+    // Non-resident data reading with compression support
+    // -----------------------------------------------------------------------
+
     /// Read all data for a non-resident attribute, following its data runs.
+    /// Handles LZNT1 decompression if the attribute is compressed.
     fn read_non_resident_data(
         &self,
         entry: &MftEntry,
         attr_offset: usize,
     ) -> Result<Vec<u8>, NtfsError> {
+        let hdr = AttributeHeader::from_bytes(&entry.data[attr_offset..])
+            .ok_or(NtfsError::Corrupt("missing attribute header"))?;
+
         let nr = entry.non_resident_header(attr_offset)
             .ok_or(NtfsError::Corrupt("missing non-resident header"))?;
 
@@ -322,20 +495,30 @@ impl<D: BlockDevice> NtfsFs<D> {
             .ok_or(NtfsError::Corrupt("missing data runs"))?;
 
         let runs = data_runs::decode_data_runs(run_bytes);
-        let data_size = nr.data_size as usize;
-        let mut result = vec![0u8; data_size];
+
+        let is_compressed = hdr.flags & ATTR_FLAG_COMPRESSED != 0 && nr.compression_unit > 0;
+
+        // For compressed data, read the allocated_size (includes compressed + sparse runs)
+        // For uncompressed, read data_size
+        let read_size = if is_compressed {
+            nr.allocated_size as usize
+        } else {
+            nr.data_size as usize
+        };
+
+        let mut raw_data = vec![0u8; read_size];
         let mut bytes_read = 0usize;
 
-        log::debug!("[ntfs] reading non-resident data: {} bytes across {} runs",
-            data_size, runs.len());
+        log::debug!("[ntfs] reading non-resident data: {} bytes across {} runs (compressed={})",
+            read_size, runs.len(), is_compressed);
 
         for run in &runs {
-            if bytes_read >= data_size {
+            if bytes_read >= read_size {
                 break;
             }
 
             let run_bytes_total = run.length * self.cluster_size;
-            let to_read = (data_size - bytes_read).min(run_bytes_total as usize);
+            let to_read = (read_size - bytes_read).min(run_bytes_total as usize);
 
             if run.is_sparse {
                 // Sparse run: fill with zeros (already zeroed in vec)
@@ -346,24 +529,42 @@ impl<D: BlockDevice> NtfsFs<D> {
 
             let disk_offset = run.lcn * self.cluster_size;
             log::trace!("[ntfs] reading {} bytes from disk offset 0x{:X}", to_read, disk_offset);
-            self.device.read_bytes(disk_offset, &mut result[bytes_read..bytes_read + to_read])?;
+            self.device.read_bytes(disk_offset, &mut raw_data[bytes_read..bytes_read + to_read])?;
             bytes_read += to_read;
         }
 
-        log::debug!("[ntfs] read {} bytes of non-resident data", bytes_read);
-        Ok(result)
+        // If compressed, decompress the raw data
+        if is_compressed {
+            log::debug!("[ntfs] decompressing LZNT1: {} raw bytes -> {} expected",
+                raw_data.len(), nr.data_size);
+            compression::decompress_attribute(
+                &raw_data, nr.data_size, nr.compression_unit, self.cluster_size,
+            ).ok_or(NtfsError::Corrupt("LZNT1 decompression failed"))
+        } else {
+            raw_data.truncate(nr.data_size as usize);
+            log::debug!("[ntfs] read {} bytes of non-resident data", raw_data.len());
+            Ok(raw_data)
+        }
     }
 
     /// Read attribute data (works for both resident and non-resident).
+    /// Also handles $ATTRIBUTE_LIST indirection.
     fn read_attribute_data_for_entry(
         &self,
         entry: &MftEntry,
         attr_type: AttributeType,
     ) -> Result<Vec<u8>, NtfsError> {
-        Self::read_attribute_data_static(
-            &self.device, entry, attr_type,
-            &self.mft_data_runs, self.mft_record_size, self.cluster_size, self.mft_offset,
-        )
+        // Try direct lookup first, then fall back to attribute list
+        let (actual_entry, hdr, offset) = self.find_attribute_with_list(entry, attr_type)?;
+
+        if !hdr.non_resident {
+            let data = actual_entry.resident_data(offset)
+                .ok_or(NtfsError::Corrupt("failed to read resident data"))?;
+            log::trace!("[ntfs] read {} bytes of resident {} data", data.len(), attr_type.name());
+            return Ok(data.to_vec());
+        }
+
+        self.read_non_resident_data(&actual_entry, offset)
     }
 
     /// Static version of attribute data reading (used during mount before self is available).
@@ -419,6 +620,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         log::trace!("[ntfs] read {} bytes of non-resident {} data", bytes_read, attr_type.name());
         Ok(result)
     }
+
+    // -----------------------------------------------------------------------
+    // Path resolution and directory operations
+    // -----------------------------------------------------------------------
 
     /// Split a path into components.
     fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, NtfsError> {
@@ -562,6 +767,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         Ok(current_entry)
     }
 
+    // -----------------------------------------------------------------------
+    // Read API
+    // -----------------------------------------------------------------------
+
     /// Read a file by path, returning its contents.
     pub fn read_file(&self, path: &[u8]) -> Result<Vec<u8>, NtfsError> {
         let path_str = core::str::from_utf8(path).unwrap_or("<invalid>");
@@ -578,6 +787,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         // Read the unnamed $DATA attribute
         self.read_attribute_data_for_entry(&entry, AttributeType::Data)
     }
+
+    // -----------------------------------------------------------------------
+    // Write API with resident-to-non-resident conversion and file growth
+    // -----------------------------------------------------------------------
 
     /// Write data to a file, creating it if it does not exist, or overwriting if it does.
     pub fn write_file(&self, path: &[u8], data: &[u8]) -> Result<(), NtfsError> {
@@ -630,86 +843,251 @@ impl<D: BlockDevice> NtfsFs<D> {
     }
 
     /// Write data to an existing file's $DATA attribute.
+    ///
+    /// Handles:
+    /// - Resident data that fits in the existing space
+    /// - Resident-to-non-resident conversion when data outgrows resident capacity
+    /// - Non-resident file growth (extending data runs)
     fn write_file_data(&self, entry_number: u64, data: &[u8]) -> Result<(), NtfsError> {
+        let txn = self.journal.borrow_mut().begin_transaction();
         let entry = self.read_mft_entry(entry_number)?;
         let (hdr, attr_offset) = entry.find_attribute(AttributeType::Data)
             .ok_or(NtfsError::AttributeNotFound("$DATA"))?;
 
         if hdr.non_resident {
-            // Non-resident: write to existing clusters (may need reallocation)
+            // Non-resident: write to existing clusters (may need growth)
             let runs = Self::read_data_runs_from_entry(&entry, AttributeType::Data)?;
-            let mut bytes_written = 0usize;
+            let current_allocated: u64 = runs.iter().map(|r| r.length * self.cluster_size).sum();
 
-            for run in &runs {
-                if bytes_written >= data.len() {
-                    break;
+            if data.len() as u64 <= current_allocated {
+                // Data fits in existing allocation — write directly
+                let mut bytes_written = 0usize;
+                for run in &runs {
+                    if bytes_written >= data.len() {
+                        break;
+                    }
+                    if run.is_sparse {
+                        bytes_written += (run.length * self.cluster_size) as usize;
+                        continue;
+                    }
+
+                    let disk_offset = run.lcn * self.cluster_size;
+                    let run_capacity = (run.length * self.cluster_size) as usize;
+                    let to_write = (data.len() - bytes_written).min(run_capacity);
+
+                    log::trace!("[ntfs] writing {} bytes to disk offset 0x{:X}", to_write, disk_offset);
+                    self.journaled_write(JournalOp::ClusterWrite, disk_offset,
+                        &data[bytes_written..bytes_written + to_write])?;
+                    bytes_written += to_write;
                 }
-                if run.is_sparse {
-                    bytes_written += (run.length * self.cluster_size) as usize;
-                    continue;
+
+                // Update data_size in the MFT entry's non-resident header
+                let mut updated = entry.clone();
+                let nr_base = attr_offset + AttributeHeader::HEADER_SIZE + 0x20; // data_size offset
+                updated.data[nr_base..nr_base + 8].copy_from_slice(&(data.len() as u64).to_le_bytes());
+                // Update initialized_size too
+                let init_base = attr_offset + AttributeHeader::HEADER_SIZE + 0x28;
+                updated.data[init_base..init_base + 8].copy_from_slice(&(data.len() as u64).to_le_bytes());
+                // Update LSN
+                updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+                self.write_mft_entry(entry_number, &updated)?;
+            } else {
+                // Need more clusters — allocate additional space
+                let extra_bytes = data.len() as u64 - current_allocated;
+                let extra_clusters = (extra_bytes + self.cluster_size - 1) / self.cluster_size;
+                let new_lcn = self.allocate_clusters(extra_clusters)?;
+
+                // Write existing portion
+                let mut bytes_written = 0usize;
+                for run in &runs {
+                    if bytes_written >= data.len() {
+                        break;
+                    }
+                    if run.is_sparse {
+                        bytes_written += (run.length * self.cluster_size) as usize;
+                        continue;
+                    }
+                    let disk_offset = run.lcn * self.cluster_size;
+                    let run_capacity = (run.length * self.cluster_size) as usize;
+                    let to_write = (data.len() - bytes_written).min(run_capacity);
+                    self.journaled_write(JournalOp::ClusterWrite, disk_offset,
+                        &data[bytes_written..bytes_written + to_write])?;
+                    bytes_written += to_write;
                 }
 
-                let disk_offset = run.lcn * self.cluster_size;
-                let run_capacity = (run.length * self.cluster_size) as usize;
-                let to_write = (data.len() - bytes_written).min(run_capacity);
+                // Write remaining to new clusters
+                if bytes_written < data.len() {
+                    let new_offset = new_lcn * self.cluster_size;
+                    self.journaled_write(JournalOp::ClusterWrite, new_offset,
+                        &data[bytes_written..])?;
+                }
 
-                log::trace!("[ntfs] writing {} bytes to disk offset 0x{:X}", to_write, disk_offset);
-                self.device.write_bytes(disk_offset, &data[bytes_written..bytes_written + to_write])?;
-                bytes_written += to_write;
+                // Build updated data runs (old runs + new run)
+                let mut all_runs: Vec<DataRun> = runs;
+                all_runs.push(DataRun { lcn: new_lcn, length: extra_clusters, is_sparse: false });
+                let new_run_bytes = data_runs::encode_data_runs(&all_runs);
+                let new_allocated = all_runs.iter().map(|r| r.length * self.cluster_size).sum::<u64>();
+
+                // Rebuild the non-resident attribute in the MFT entry
+                let mut updated = entry.clone();
+                let record_size = self.mft_record_size as usize;
+
+                // Rewrite from attr_offset
+                let mut attr_pos = attr_offset;
+                attr_pos = Self::write_non_resident_attribute(
+                    &mut updated.data, attr_pos, AttributeType::Data,
+                    &new_run_bytes, data.len() as u64, new_allocated,
+                    hdr.instance,
+                );
+
+                // Write end marker after the data attribute
+                if attr_pos + 4 <= record_size {
+                    updated.data[attr_pos..attr_pos + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+                    attr_pos += 4;
+                }
+
+                // Update used_size and LSN
+                updated.data[0x18..0x1C].copy_from_slice(&(attr_pos as u32).to_le_bytes());
+                updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+                // Re-parse to fix up header
+                let updated = MftEntry::from_bytes(&updated.data, record_size)
+                    .ok_or(NtfsError::Corrupt("failed to re-parse after data run extension"))?;
+                self.write_mft_entry(entry_number, &updated)?;
+
+                log::debug!("[ntfs] extended file MFT#{}: allocated {} additional clusters at LCN {}",
+                    entry_number, extra_clusters, new_lcn);
             }
-
-            if bytes_written < data.len() {
-                log::warn!("[ntfs] file data ({} bytes) exceeds allocated clusters ({} bytes written). \
-                    Cluster reallocation not yet implemented.",
-                    data.len(), bytes_written);
-                return Err(NtfsError::Unsupported("growing non-resident file data"));
-            }
-
-            // Update data_size in the non-resident header
-            // (This requires rewriting the MFT entry with updated attribute metadata)
-            log::debug!("[ntfs] wrote {} bytes to MFT#{} non-resident data", bytes_written, entry_number);
         } else {
-            // Resident: update inline data
-            // For simplicity, if the new data fits in the resident area, update in place.
-            // Otherwise, would need to convert to non-resident.
+            // Resident attribute
             let res_data = entry.resident_data(attr_offset)
                 .ok_or(NtfsError::Corrupt("failed to read resident data"))?;
 
-            if data.len() > res_data.len() {
-                log::warn!("[ntfs] new data ({} bytes) exceeds resident capacity ({} bytes). \
-                    Resident-to-non-resident conversion not yet implemented.",
-                    data.len(), res_data.len());
-                return Err(NtfsError::Unsupported("growing resident to non-resident"));
+            // Check if we can fit in the MFT entry (with some margin)
+            let record_size = self.mft_record_size as usize;
+            let available_space = record_size - attr_offset - 32; // header + margin
+
+            if data.len() <= res_data.len() {
+                // Fits in existing resident space — update in place
+                let mut updated = entry.clone();
+                let res_hdr = crate::attribute::ResidentHeader::from_bytes(
+                    &updated.data[attr_offset + AttributeHeader::HEADER_SIZE..]
+                ).ok_or(NtfsError::Corrupt("bad resident header"))?;
+
+                let data_start = attr_offset + res_hdr.value_offset as usize;
+                updated.data[data_start..data_start + data.len()].copy_from_slice(data);
+
+                // Zero out remaining space
+                for i in data.len()..res_hdr.value_length as usize {
+                    updated.data[data_start + i] = 0;
+                }
+
+                // Update value_length
+                let vl_offset = attr_offset + AttributeHeader::HEADER_SIZE;
+                updated.data[vl_offset..vl_offset + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+                // Update LSN
+                updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+                self.write_mft_entry(entry_number, &updated)?;
+                log::debug!("[ntfs] wrote {} bytes to MFT#{} resident data", data.len(), entry_number);
+            } else if data.len() + 24 < available_space {
+                // Fits in MFT entry if we grow the resident attribute
+                let mut updated = entry.clone();
+                let res_hdr = crate::attribute::ResidentHeader::from_bytes(
+                    &updated.data[attr_offset + AttributeHeader::HEADER_SIZE..]
+                ).ok_or(NtfsError::Corrupt("bad resident header"))?;
+
+                let data_start = attr_offset + res_hdr.value_offset as usize;
+
+                // Update value_length first
+                let vl_offset = attr_offset + AttributeHeader::HEADER_SIZE;
+                updated.data[vl_offset..vl_offset + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+
+                // Update attribute total length
+                let new_total = ((res_hdr.value_offset as usize + data.len()) + 7) & !7;
+                updated.data[attr_offset + 4..attr_offset + 8].copy_from_slice(&(new_total as u32).to_le_bytes());
+
+                // Write data
+                let end = data_start + data.len();
+                if end <= record_size {
+                    updated.data[data_start..end].copy_from_slice(data);
+                    // Pad to alignment
+                    for i in end..data_start + new_total - (res_hdr.value_offset as usize) {
+                        if i < record_size {
+                            updated.data[i] = 0;
+                        }
+                    }
+                }
+
+                // Write end marker
+                let end_pos = attr_offset + new_total;
+                if end_pos + 4 <= record_size {
+                    updated.data[end_pos..end_pos + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+                }
+
+                // Update used_size + LSN
+                updated.data[0x18..0x1C].copy_from_slice(&((end_pos + 4) as u32).to_le_bytes());
+                updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+                self.write_mft_entry(entry_number, &updated)?;
+                log::debug!("[ntfs] grew resident data for MFT#{} to {} bytes", entry_number, data.len());
+            } else {
+                // Resident-to-non-resident conversion
+                log::info!("[ntfs] converting MFT#{} from resident to non-resident ({} bytes)",
+                    entry_number, data.len());
+
+                let clusters_needed = (data.len() as u64 + self.cluster_size - 1) / self.cluster_size;
+                let start_lcn = self.allocate_clusters(clusters_needed)?;
+
+                // Write data to allocated clusters
+                let disk_offset = start_lcn * self.cluster_size;
+                self.journaled_write(JournalOp::ClusterWrite, disk_offset, data)?;
+
+                // Rebuild the MFT entry with non-resident $DATA
+                let mut updated = entry.clone();
+                let run = DataRun { lcn: start_lcn, length: clusters_needed, is_sparse: false };
+                let run_bytes = data_runs::encode_data_runs(&[run]);
+                let allocated_size = clusters_needed * self.cluster_size;
+
+                // Overwrite the attribute at its current position
+                let new_attr_end = Self::write_non_resident_attribute(
+                    &mut updated.data, attr_offset, AttributeType::Data,
+                    &run_bytes, data.len() as u64, allocated_size, hdr.instance,
+                );
+
+                // Write end marker
+                if new_attr_end + 4 <= record_size {
+                    updated.data[new_attr_end..new_attr_end + 4]
+                        .copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+                }
+
+                // Update used_size + LSN
+                updated.data[0x18..0x1C].copy_from_slice(&((new_attr_end + 4) as u32).to_le_bytes());
+                updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+                let updated = MftEntry::from_bytes(&updated.data, record_size)
+                    .ok_or(NtfsError::Corrupt("failed re-parse after resident-to-non-resident"))?;
+                self.write_mft_entry(entry_number, &updated)?;
+
+                log::info!("[ntfs] converted MFT#{} to non-resident: {} clusters at LCN {}",
+                    entry_number, clusters_needed, start_lcn);
             }
-
-            // Write updated data into MFT entry
-            let mut updated = entry.clone();
-            let res_hdr = crate::attribute::ResidentHeader::from_bytes(
-                &updated.data[attr_offset + AttributeHeader::HEADER_SIZE..]
-            ).ok_or(NtfsError::Corrupt("bad resident header"))?;
-
-            let data_start = attr_offset + res_hdr.value_offset as usize;
-            updated.data[data_start..data_start + data.len()].copy_from_slice(data);
-
-            // Zero out any remaining space
-            for i in data.len()..res_hdr.value_length as usize {
-                updated.data[data_start + i] = 0;
-            }
-
-            // Update value_length
-            let vl_offset = attr_offset + AttributeHeader::HEADER_SIZE;
-            updated.data[vl_offset..vl_offset + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
-
-            self.write_mft_entry(entry_number, &updated)?;
-            log::debug!("[ntfs] wrote {} bytes to MFT#{} resident data", data.len(), entry_number);
         }
 
+        self.journal.borrow_mut().commit_transaction(txn);
+        self.flush_journal()?;
         self.device.flush()
     }
+
+    // -----------------------------------------------------------------------
+    // File/directory creation
+    // -----------------------------------------------------------------------
 
     /// Create a new file in a parent directory.
     fn create_file(&self, parent_entry: u64, name: &str, data: &[u8]) -> Result<(), NtfsError> {
         log::info!("[ntfs] creating file '{}' in directory MFT#{}", name, parent_entry);
+        let txn = self.journal.borrow_mut().begin_transaction();
 
         // Allocate a new MFT entry
         let new_entry_number = self.allocate_mft_entry()?;
@@ -749,6 +1127,8 @@ impl<D: BlockDevice> NtfsFs<D> {
         // USA count (record_size / 512 + 1)
         let usa_count = (record_size / 512 + 1) as u16;
         entry_data[0x06..0x08].copy_from_slice(&usa_count.to_le_bytes());
+        // LSN
+        entry_data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
         // Sequence number = 1
         entry_data[0x10..0x12].copy_from_slice(&1u16.to_le_bytes());
         // Hard link count = 1
@@ -783,7 +1163,7 @@ impl<D: BlockDevice> NtfsFs<D> {
 
             // Write data to allocated clusters
             let disk_offset = start_lcn * self.cluster_size;
-            self.device.write_bytes(disk_offset, data)?;
+            self.journaled_write(JournalOp::ClusterWrite, disk_offset, data)?;
 
             // Write non-resident $DATA attribute with data runs
             let run = DataRun { lcn: start_lcn, length: clusters_needed, is_sparse: false };
@@ -810,13 +1190,386 @@ impl<D: BlockDevice> NtfsFs<D> {
 
         self.write_mft_entry(new_entry_number, &new_entry)?;
 
-        // TODO: Add index entry to parent directory's $INDEX_ROOT / $INDEX_ALLOCATION
-        log::warn!("[ntfs] directory index update not yet implemented — file created but not \
-            yet visible in directory listing");
+        // Insert index entry into parent directory
+        self.insert_index_entry(parent_entry, new_entry_number, &fn_attr)?;
+
+        self.journal.borrow_mut().commit_transaction(txn);
+        self.flush_journal()?;
 
         log::info!("[ntfs] created file '{}' as MFT#{}", name, new_entry_number);
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Directory index insertion (B+ tree)
+    // -----------------------------------------------------------------------
+
+    /// Insert a new index entry into a directory's index.
+    ///
+    /// This handles:
+    /// - Inserting into $INDEX_ROOT if there's room
+    /// - Splitting and promoting to $INDEX_ALLOCATION if the root is full
+    fn insert_index_entry(
+        &self,
+        dir_entry_number: u64,
+        file_entry_number: u64,
+        fn_attr: &FileNameAttr,
+    ) -> Result<(), NtfsError> {
+        log::debug!("[ntfs] inserting index entry for MFT#{} into directory MFT#{}",
+            file_entry_number, dir_entry_number);
+
+        let dir_mft = self.read_mft_entry(dir_entry_number)?;
+
+        let (_, ir_offset) = dir_mft.find_attribute(AttributeType::IndexRoot)
+            .ok_or(NtfsError::AttributeNotFound("$INDEX_ROOT"))?;
+
+        let ir_data = dir_mft.resident_data(ir_offset)
+            .ok_or(NtfsError::Corrupt("$INDEX_ROOT must be resident"))?
+            .to_vec();
+
+        let index_root = IndexRoot::from_bytes(&ir_data)
+            .ok_or(NtfsError::Corrupt("invalid $INDEX_ROOT"))?;
+
+        // Build the new index entry
+        let file_mft_ref = mft::make_mft_reference(file_entry_number, 1);
+        let new_entry_bytes = Self::build_index_entry(file_mft_ref, fn_attr);
+
+        // Get the current entries from the root
+        let entries_data = index_root.entries_data(&ir_data)
+            .ok_or(NtfsError::Corrupt("failed to get INDEX_ROOT entries"))?;
+        let existing_entries = index::parse_index_entries(entries_data);
+
+        // Find the insertion point (sorted by name)
+        let insert_pos = self.find_insert_position(&existing_entries, fn_attr);
+
+        // Calculate total size needed
+        let current_entries_size: usize = existing_entries.iter()
+            .map(|e| e.entry_length as usize)
+            .sum();
+        let new_total_size = current_entries_size + new_entry_bytes.len();
+
+        // Check if we can fit in the $INDEX_ROOT
+        let record_size = self.mft_record_size as usize;
+        let index_root_max = record_size - ir_offset - 64; // Rough max for resident data
+
+        if new_total_size + 32 < index_root_max {
+            // Fits in $INDEX_ROOT — insert directly
+            self.insert_into_index_root(
+                dir_entry_number, &dir_mft, ir_offset,
+                &ir_data, &existing_entries, insert_pos,
+                &new_entry_bytes,
+            )?;
+        } else {
+            // Node is full — need to split
+            // Move entries to $INDEX_ALLOCATION and keep only a pointer in root
+            log::debug!("[ntfs] $INDEX_ROOT full, splitting into $INDEX_ALLOCATION");
+            self.split_index_node(
+                dir_entry_number, &dir_mft, ir_offset,
+                &ir_data, &existing_entries, insert_pos,
+                &new_entry_bytes,
+            )?;
+        }
+
+        log::debug!("[ntfs] index entry inserted for MFT#{} in directory MFT#{}",
+            file_entry_number, dir_entry_number);
+        Ok(())
+    }
+
+    /// Find the correct insertion position in sorted index entries.
+    fn find_insert_position(&self, entries: &[IndexEntry], new_fn: &FileNameAttr) -> usize {
+        for (i, entry) in entries.iter().enumerate() {
+            if entry.is_last() {
+                return i; // Insert before the sentinel
+            }
+            if let Some(ref fn_attr) = entry.filename {
+                let cmp = self.upcase.compare_names(&new_fn.name_utf16, &fn_attr.name_utf16);
+                if cmp == core::cmp::Ordering::Less {
+                    return i;
+                }
+            }
+        }
+        // Insert at end (before sentinel if we somehow missed it)
+        entries.len().saturating_sub(1)
+    }
+
+    /// Build an index entry from an MFT reference and $FILE_NAME attribute.
+    fn build_index_entry(mft_ref: u64, fn_attr: &FileNameAttr) -> Vec<u8> {
+        let fn_bytes = fn_attr.to_bytes();
+        let entry_len = ((16 + fn_bytes.len()) + 7) & !7; // 8-byte aligned
+
+        let mut buf = vec![0u8; entry_len];
+        // MFT reference
+        buf[0..8].copy_from_slice(&mft_ref.to_le_bytes());
+        // Entry length
+        buf[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
+        // Content length
+        buf[10..12].copy_from_slice(&(fn_bytes.len() as u16).to_le_bytes());
+        // Flags = 0 (no sub-node, not last)
+        buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+        // $FILE_NAME content
+        buf[16..16 + fn_bytes.len()].copy_from_slice(&fn_bytes);
+
+        buf
+    }
+
+    /// Insert a new index entry into $INDEX_ROOT when it fits.
+    fn insert_into_index_root(
+        &self,
+        dir_entry_number: u64,
+        dir_mft: &MftEntry,
+        ir_offset: usize,
+        ir_data: &[u8],
+        existing_entries: &[IndexEntry],
+        insert_pos: usize,
+        new_entry_bytes: &[u8],
+    ) -> Result<(), NtfsError> {
+        // Rebuild the index entries area with the new entry inserted
+        let entries_data = self.rebuild_entries_with_insert(
+            ir_data, existing_entries, insert_pos, new_entry_bytes,
+        );
+
+        // Rebuild the full $INDEX_ROOT value
+        let new_ir_value = self.rebuild_index_root_value(ir_data, &entries_data);
+
+        // Update the MFT entry
+        let mut updated = dir_mft.clone();
+        let record_size = self.mft_record_size as usize;
+
+        // Rewrite the $INDEX_ROOT attribute
+        let instance = updated.data[ir_offset + 14] as u16;
+        let new_attr_end = Self::write_resident_attribute(
+            &mut updated.data, ir_offset, AttributeType::IndexRoot,
+            &new_ir_value, instance, // preserve instance
+        );
+
+        // Write end marker
+        if new_attr_end + 4 <= record_size {
+            updated.data[new_attr_end..new_attr_end + 4]
+                .copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        }
+
+        // Update used_size + LSN
+        updated.data[0x18..0x1C].copy_from_slice(&((new_attr_end + 4) as u32).to_le_bytes());
+        updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+        let updated = MftEntry::from_bytes(&updated.data, record_size)
+            .ok_or(NtfsError::Corrupt("failed re-parse after index insertion"))?;
+        self.write_mft_entry(dir_entry_number, &updated)
+    }
+
+    /// Rebuild index entries area with a new entry inserted at the given position.
+    fn rebuild_entries_with_insert(
+        &self,
+        ir_data: &[u8],
+        existing_entries: &[IndexEntry],
+        insert_pos: usize,
+        new_entry_bytes: &[u8],
+    ) -> Vec<u8> {
+        let ir = IndexRoot::from_bytes(ir_data).unwrap();
+        let entries_raw = ir.entries_data(ir_data).unwrap();
+
+        let mut result = Vec::new();
+        let mut raw_pos = 0;
+
+        for (i, entry) in existing_entries.iter().enumerate() {
+            if i == insert_pos {
+                // Insert the new entry here
+                result.extend_from_slice(new_entry_bytes);
+            }
+            // Copy the existing entry
+            let len = entry.entry_length as usize;
+            if raw_pos + len <= entries_raw.len() {
+                result.extend_from_slice(&entries_raw[raw_pos..raw_pos + len]);
+            }
+            raw_pos += len;
+        }
+
+        // If insert_pos is at the end (shouldn't happen normally, but be safe)
+        if insert_pos >= existing_entries.len() {
+            result.extend_from_slice(new_entry_bytes);
+        }
+
+        result
+    }
+
+    /// Rebuild a complete $INDEX_ROOT value from the header and new entries data.
+    fn rebuild_index_root_value(&self, old_ir_data: &[u8], entries_data: &[u8]) -> Vec<u8> {
+        // Index root header: 16 bytes
+        // Index header: 16 bytes
+        // Then entries
+        let entries_offset = 16u32; // from index header start
+        let total_entries_size = entries_offset as usize + entries_data.len();
+
+        let mut buf = vec![0u8; 16 + total_entries_size];
+
+        // Copy the index root header (first 16 bytes)
+        buf[0..16].copy_from_slice(&old_ir_data[..16.min(old_ir_data.len())]);
+
+        // Index header at offset 16
+        buf[16..20].copy_from_slice(&entries_offset.to_le_bytes()); // entries_offset
+        buf[20..24].copy_from_slice(&(total_entries_size as u32).to_le_bytes()); // total_size
+        buf[24..28].copy_from_slice(&(total_entries_size as u32).to_le_bytes()); // allocated_size
+
+        // Preserve flags from old data
+        if old_ir_data.len() > 0x1C {
+            buf[28] = old_ir_data[0x1C];
+        }
+
+        // Copy entries
+        buf[32..32 + entries_data.len()].copy_from_slice(entries_data);
+
+        buf
+    }
+
+    /// Split an index node when it's too full.
+    ///
+    /// Moves all entries to an INDX block in $INDEX_ALLOCATION,
+    /// and updates $INDEX_ROOT to be a large index with a pointer to the block.
+    fn split_index_node(
+        &self,
+        dir_entry_number: u64,
+        dir_mft: &MftEntry,
+        ir_offset: usize,
+        ir_data: &[u8],
+        existing_entries: &[IndexEntry],
+        insert_pos: usize,
+        new_entry_bytes: &[u8],
+    ) -> Result<(), NtfsError> {
+        let block_size = self.boot_sector.index_block_size() as usize;
+
+        // Build complete entries list with the new one inserted
+        let all_entries_data = self.rebuild_entries_with_insert(
+            ir_data, existing_entries, insert_pos, new_entry_bytes,
+        );
+
+        // Allocate a cluster for the INDX block
+        let indx_clusters = (block_size as u64 + self.cluster_size - 1) / self.cluster_size;
+        let indx_lcn = self.allocate_clusters(indx_clusters)?;
+
+        // Build the INDX block
+        let mut indx_buf = vec![0u8; block_size];
+
+        // INDX header
+        indx_buf[0..4].copy_from_slice(b"INDX");
+        // USA offset
+        let usa_offset = 0x28u16; // after INDX header
+        indx_buf[4..6].copy_from_slice(&usa_offset.to_le_bytes());
+        let usa_count = (block_size / 512 + 1) as u16;
+        indx_buf[6..8].copy_from_slice(&usa_count.to_le_bytes());
+        // LSN
+        indx_buf[8..16].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+        // VCN = 0
+        indx_buf[16..24].copy_from_slice(&0u64.to_le_bytes());
+
+        // Index header at 0x18
+        let entries_start = ((usa_offset as usize + usa_count as usize * 2) + 7) & !7;
+        let idx_entries_offset = (entries_start - 0x18) as u32;
+        indx_buf[0x18..0x1C].copy_from_slice(&idx_entries_offset.to_le_bytes());
+        let idx_total = idx_entries_offset as usize + all_entries_data.len();
+        indx_buf[0x1C..0x20].copy_from_slice(&(idx_total as u32).to_le_bytes());
+        indx_buf[0x20..0x24].copy_from_slice(&((block_size - 0x18) as u32).to_le_bytes());
+        indx_buf[0x24] = 0; // flags (leaf node)
+
+        // Write USA check value
+        indx_buf[usa_offset as usize..usa_offset as usize + 2]
+            .copy_from_slice(&0x0001u16.to_le_bytes());
+
+        // Copy entries into the block
+        let entries_abs_start = 0x18 + idx_entries_offset as usize;
+        if entries_abs_start + all_entries_data.len() <= block_size {
+            indx_buf[entries_abs_start..entries_abs_start + all_entries_data.len()]
+                .copy_from_slice(&all_entries_data);
+        }
+
+        // Write the INDX block to disk
+        let indx_disk_offset = indx_lcn * self.cluster_size;
+        self.journaled_write(JournalOp::IndexInsert, indx_disk_offset, &indx_buf)?;
+
+        // Update the directory MFT entry:
+        // 1. $INDEX_ROOT becomes a "large index" with just a sentinel pointing to VCN 0
+        // 2. Add $INDEX_ALLOCATION attribute with the data run
+        let mut updated = dir_mft.clone();
+        let record_size = self.mft_record_size as usize;
+
+        // Rebuild $INDEX_ROOT as large index with sentinel -> VCN 0
+        let new_ir_value = self.build_large_index_root(ir_data);
+        let mut attr_pos = ir_offset;
+        attr_pos = Self::write_resident_attribute(
+            &mut updated.data, attr_pos, AttributeType::IndexRoot,
+            &new_ir_value, 0, // instance 0
+        );
+
+        // Add $INDEX_ALLOCATION attribute (non-resident, points to the INDX block)
+        let ia_run = DataRun { lcn: indx_lcn, length: indx_clusters, is_sparse: false };
+        let ia_run_bytes = data_runs::encode_data_runs(&[ia_run]);
+        attr_pos = Self::write_non_resident_attribute(
+            &mut updated.data, attr_pos, AttributeType::IndexAllocation,
+            &ia_run_bytes, block_size as u64, indx_clusters * self.cluster_size, 2,
+        );
+
+        // Add $BITMAP attribute for index allocation tracking
+        let bitmap_value = [0x01u8]; // bit 0 = INDX block 0 is in use
+        attr_pos = Self::write_resident_attribute(
+            &mut updated.data, attr_pos, AttributeType::Bitmap, &bitmap_value, 3,
+        );
+
+        // Write end marker
+        if attr_pos + 4 <= record_size {
+            updated.data[attr_pos..attr_pos + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+            attr_pos += 4;
+        }
+
+        // Update used_size, flags (directory), LSN
+        updated.data[0x18..0x1C].copy_from_slice(&(attr_pos as u32).to_le_bytes());
+        updated.data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
+
+        let updated = MftEntry::from_bytes(&updated.data, record_size)
+            .ok_or(NtfsError::Corrupt("failed re-parse after index split"))?;
+        self.write_mft_entry(dir_entry_number, &updated)?;
+
+        log::info!("[ntfs] split index for directory MFT#{}: INDX block at LCN {}",
+            dir_entry_number, indx_lcn);
+        Ok(())
+    }
+
+    /// Build a large $INDEX_ROOT value that points to VCN 0 via a sentinel entry.
+    fn build_large_index_root(&self, old_ir_data: &[u8]) -> Vec<u8> {
+        // Build a sentinel entry with HAS_SUB_NODE pointing to VCN 0
+        let sentinel_len = 24usize; // 16 header + 8 VCN
+        let entries_offset = 16u32;
+        let total_size = entries_offset as usize + sentinel_len;
+
+        let mut buf = vec![0u8; 16 + total_size];
+
+        // Copy index root header (first 16 bytes)
+        let copy_len = 16.min(old_ir_data.len());
+        buf[0..copy_len].copy_from_slice(&old_ir_data[..copy_len]);
+
+        // Index header at offset 16
+        buf[16..20].copy_from_slice(&entries_offset.to_le_bytes());
+        buf[20..24].copy_from_slice(&(total_size as u32).to_le_bytes());
+        buf[24..28].copy_from_slice(&(total_size as u32).to_le_bytes());
+        buf[28] = INDEX_HEADER_FLAG_LARGE_INDEX; // flags: large index
+
+        // Sentinel entry at offset 32
+        let sentinel_offset = 32;
+        // MFT reference = 0
+        // entry_length = 24
+        buf[sentinel_offset + 8..sentinel_offset + 10]
+            .copy_from_slice(&(sentinel_len as u16).to_le_bytes());
+        // content_length = 0
+        // flags = LAST_ENTRY | HAS_SUB_NODE
+        let flags = INDEX_ENTRY_FLAG_LAST_ENTRY | INDEX_ENTRY_FLAG_HAS_SUB_NODE;
+        buf[sentinel_offset + 12..sentinel_offset + 14].copy_from_slice(&flags.to_le_bytes());
+        // VCN = 0 (last 8 bytes of entry)
+        buf[sentinel_offset + 16..sentinel_offset + 24].copy_from_slice(&0u64.to_le_bytes());
+
+        buf
+    }
+
+    // -----------------------------------------------------------------------
+    // Attribute writing helpers
+    // -----------------------------------------------------------------------
 
     /// Write a resident attribute into an MFT entry buffer.
     /// Returns the new position after the attribute.
@@ -846,8 +1599,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         buf[pos + 23] = 0; // padding
 
         // Value
-        buf[pos + value_offset as usize..pos + value_offset as usize + value.len()]
-            .copy_from_slice(value);
+        let end = (pos + value_offset as usize + value.len()).min(buf.len());
+        let copy_len = end - (pos + value_offset as usize);
+        buf[pos + value_offset as usize..end]
+            .copy_from_slice(&value[..copy_len]);
 
         log::trace!("[ntfs] wrote resident attribute {} ({} value bytes) at offset 0x{:04X}",
             attr_type.name(), value.len(), pos);
@@ -883,8 +1638,14 @@ impl<D: BlockDevice> NtfsFs<D> {
         // lowest_vcn = 0
         buf[nr_base..nr_base + 8].copy_from_slice(&0u64.to_le_bytes());
         // highest_vcn
-        let highest_vcn = if allocated_size > 0 {
-            (allocated_size / (allocated_size / data_size.max(1))).max(1) - 1
+        let cluster_size = if allocated_size > 0 && data_size > 0 {
+            // Estimate cluster size
+            allocated_size / ((allocated_size + data_size - 1) / data_size).max(1)
+        } else {
+            4096 // default
+        };
+        let highest_vcn = if allocated_size > 0 && cluster_size > 0 {
+            (allocated_size / cluster_size).saturating_sub(1)
         } else {
             0
         };
@@ -911,6 +1672,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         pos + total_len
     }
 
+    // -----------------------------------------------------------------------
+    // Allocation
+    // -----------------------------------------------------------------------
+
     /// Allocate a free MFT entry.
     ///
     /// Scans the $MFT bitmap for a free entry and marks it as allocated.
@@ -919,7 +1684,7 @@ impl<D: BlockDevice> NtfsFs<D> {
 
         // Read the $Bitmap attribute of $MFT (entry 0)
         let mft_entry = self.read_mft_entry(mft::MFT_ENTRY_MFT)?;
-        let bitmap_data = self.read_attribute_data_for_entry(&mft_entry, AttributeType::Bitmap)?;
+        let mut bitmap_data = self.read_attribute_data_for_entry(&mft_entry, AttributeType::Bitmap)?;
 
         // Scan for first free bit, starting after reserved entries
         for byte_idx in (mft::MFT_ENTRY_FIRST_USER as usize / 8)..bitmap_data.len() {
@@ -928,7 +1693,26 @@ impl<D: BlockDevice> NtfsFs<D> {
                     if bitmap_data[byte_idx] & (1 << bit) == 0 {
                         let entry_number = (byte_idx * 8 + bit) as u64;
                         log::info!("[ntfs] found free MFT entry #{}", entry_number);
-                        // TODO: set the bit in the bitmap and write it back
+
+                        // Mark the bit as allocated
+                        bitmap_data[byte_idx] |= 1 << bit;
+
+                        // Write the updated bitmap back (journal it)
+                        // For simplicity, update the resident data inline
+                        let (bmp_hdr, bmp_offset) = mft_entry.find_attribute(AttributeType::Bitmap)
+                            .ok_or(NtfsError::AttributeNotFound("$BITMAP"))?;
+                        if !bmp_hdr.non_resident {
+                            let mut updated_mft = mft_entry.clone();
+                            let res_hdr = crate::attribute::ResidentHeader::from_bytes(
+                                &updated_mft.data[bmp_offset + AttributeHeader::HEADER_SIZE..]
+                            ).ok_or(NtfsError::Corrupt("bad bitmap resident header"))?;
+                            let data_start = bmp_offset + res_hdr.value_offset as usize;
+                            if data_start + byte_idx < updated_mft.data.len() {
+                                updated_mft.data[data_start + byte_idx] = bitmap_data[byte_idx];
+                            }
+                            self.write_mft_entry(mft::MFT_ENTRY_MFT, &updated_mft)?;
+                        }
+
                         return Ok(entry_number);
                     }
                 }
@@ -941,13 +1725,13 @@ impl<D: BlockDevice> NtfsFs<D> {
 
     /// Allocate contiguous clusters from the volume bitmap.
     ///
-    /// Scans the $Bitmap (MFT entry 6) for free clusters.
+    /// Scans the $Bitmap (MFT entry 6) for free clusters and marks them allocated.
     fn allocate_clusters(&self, count: u64) -> Result<u64, NtfsError> {
         log::debug!("[ntfs] allocating {} clusters...", count);
 
         // Read the volume $Bitmap (MFT entry 6)
         let bitmap_entry = self.read_mft_entry(mft::MFT_ENTRY_BITMAP)?;
-        let bitmap_data = self.read_attribute_data_for_entry(&bitmap_entry, AttributeType::Data)?;
+        let mut bitmap_data = self.read_attribute_data_for_entry(&bitmap_entry, AttributeType::Data)?;
 
         // Simple first-fit allocation: find `count` contiguous free bits
         let total_bits = bitmap_data.len() * 8;
@@ -966,7 +1750,44 @@ impl<D: BlockDevice> NtfsFs<D> {
                 run_length += 1;
                 if run_length >= count {
                     log::info!("[ntfs] allocated {} clusters starting at LCN {}", count, run_start);
-                    // TODO: set the bits in the bitmap and write it back
+
+                    // Mark the bits as allocated
+                    for i in 0..count {
+                        let bi = (run_start + i) as usize;
+                        bitmap_data[bi / 8] |= 1 << (bi % 8);
+                    }
+
+                    // Write updated bitmap back
+                    // Journal the bitmap update
+                    let (bmp_hdr, _bmp_offset) = bitmap_entry.find_attribute(AttributeType::Data)
+                        .ok_or(NtfsError::AttributeNotFound("$DATA"))?;
+                    if bmp_hdr.non_resident {
+                        let runs = Self::read_data_runs_from_entry(&bitmap_entry, AttributeType::Data)?;
+                        // Write the modified bytes to the appropriate run(s)
+                        let start_byte = run_start as usize / 8;
+                        let end_byte = ((run_start + count) as usize + 7) / 8;
+                        let mut byte_offset = 0usize;
+                        for run in &runs {
+                            if run.is_sparse {
+                                byte_offset += (run.length * self.cluster_size) as usize;
+                                continue;
+                            }
+                            let run_end = byte_offset + (run.length * self.cluster_size) as usize;
+                            if start_byte < run_end && end_byte > byte_offset {
+                                let write_start = start_byte.max(byte_offset);
+                                let write_end = end_byte.min(run_end);
+                                let disk_off = run.lcn * self.cluster_size
+                                    + (write_start - byte_offset) as u64;
+                                self.journaled_write(
+                                    JournalOp::BitmapUpdate,
+                                    disk_off,
+                                    &bitmap_data[write_start..write_end],
+                                )?;
+                            }
+                            byte_offset = run_end;
+                        }
+                    }
+
                     return Ok(run_start);
                 }
             } else {
@@ -977,6 +1798,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         log::error!("[ntfs] no contiguous run of {} free clusters", count);
         Err(NtfsError::NoFreeClusters)
     }
+
+    // -----------------------------------------------------------------------
+    // mkdir
+    // -----------------------------------------------------------------------
 
     /// Create a directory.
     pub fn mkdir(&self, path: &[u8]) -> Result<(), NtfsError> {
@@ -1017,6 +1842,8 @@ impl<D: BlockDevice> NtfsFs<D> {
             return Err(NtfsError::NameTooLong);
         }
 
+        let txn = self.journal.borrow_mut().begin_transaction();
+
         // Allocate MFT entry
         let new_entry_number = self.allocate_mft_entry()?;
         log::debug!("[ntfs] allocated MFT entry #{} for directory '{}'", new_entry_number, dirname);
@@ -1041,7 +1868,7 @@ impl<D: BlockDevice> NtfsFs<D> {
             name_length: name_utf16.len() as u8,
             namespace: FileNamespace::Win32AndDos,
             name: String::from(dirname),
-            name_utf16,
+            name_utf16: name_utf16.clone(),
         };
 
         let record_size = self.mft_record_size as usize;
@@ -1052,6 +1879,8 @@ impl<D: BlockDevice> NtfsFs<D> {
         entry_data[0x04..0x06].copy_from_slice(&0x0030u16.to_le_bytes());
         let usa_count = (record_size / 512 + 1) as u16;
         entry_data[0x06..0x08].copy_from_slice(&usa_count.to_le_bytes());
+        // LSN
+        entry_data[0x08..0x10].copy_from_slice(&self.journal.borrow().current_lsn().to_le_bytes());
         entry_data[0x10..0x12].copy_from_slice(&1u16.to_le_bytes());
         entry_data[0x12..0x14].copy_from_slice(&1u16.to_le_bytes());
         let first_attr = ((0x30 + usa_count as usize * 2) + 7) & !7;
@@ -1089,9 +1918,11 @@ impl<D: BlockDevice> NtfsFs<D> {
 
         self.write_mft_entry(new_entry_number, &new_entry)?;
 
-        // TODO: Add index entry to parent directory
-        log::warn!("[ntfs] directory index update not yet implemented — directory created but \
-            not yet visible in parent listing");
+        // Insert index entry into parent directory
+        self.insert_index_entry(parent_entry_number, new_entry_number, &fn_attr)?;
+
+        self.journal.borrow_mut().commit_transaction(txn);
+        self.flush_journal()?;
 
         log::info!("[ntfs] created directory '{}' as MFT#{}", dirname, new_entry_number);
         Ok(())
@@ -1138,6 +1969,10 @@ impl<D: BlockDevice> NtfsFs<D> {
         buf
     }
 
+    // -----------------------------------------------------------------------
+    // list_dir
+    // -----------------------------------------------------------------------
+
     /// List the contents of a directory.
     pub fn list_dir(&self, path: &[u8]) -> Result<Vec<DirEntry>, NtfsError> {
         let path_str = core::str::from_utf8(path).unwrap_or("<invalid>");
@@ -1170,6 +2005,22 @@ impl<D: BlockDevice> NtfsFs<D> {
 
         log::info!("[ntfs] list_dir '{}': {} entries", path_str, results.len());
         Ok(results)
+    }
+
+    // -----------------------------------------------------------------------
+    // Shutdown
+    // -----------------------------------------------------------------------
+
+    /// Cleanly unmount the filesystem.
+    ///
+    /// Flushes the journal and marks it as clean.
+    pub fn unmount(&self) -> Result<(), NtfsError> {
+        self.journal.borrow_mut().checkpoint();
+        self.journal.borrow_mut().mark_clean();
+        self.flush_journal()?;
+        self.device.flush()?;
+        log::info!("[ntfs] filesystem unmounted cleanly");
+        Ok(())
     }
 }
 

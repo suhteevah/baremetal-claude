@@ -400,12 +400,20 @@ impl InputContext {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new(ctx_size: usize) -> Self {
+    pub unsafe fn new(ctx_size: usize) -> Option<Self> {
         let total_size = 33 * ctx_size;
-        let layout = Layout::from_size_align(total_size, 64)
-            .expect("xhci: input context layout");
+        let layout = match Layout::from_size_align(total_size, 64) {
+            Ok(l) => l,
+            Err(_) => {
+                log::error!("xhci: invalid input context layout");
+                return None;
+            }
+        };
         let buffer = alloc_zeroed(layout);
-        assert!(!buffer.is_null(), "xhci: input context allocation failed");
+        if buffer.is_null() {
+            log::error!("xhci: input context allocation failed");
+            return None;
+        }
 
         let phys = buffer as u64;
 
@@ -414,11 +422,11 @@ impl InputContext {
             phys, 33, ctx_size, total_size
         );
 
-        Self {
+        Some(Self {
             buffer,
             phys,
             ctx_size,
-        }
+        })
     }
 
     /// Physical address of the Input Context (for command TRBs).

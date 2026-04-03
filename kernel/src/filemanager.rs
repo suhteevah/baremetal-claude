@@ -178,6 +178,10 @@ impl FileManagerState {
     }
 
     /// Populate with stub entries when no VFS is mounted.
+    ///
+    /// This is the fallback used when no block devices are detected (e.g., QEMU
+    /// with only virtio-net). Once a filesystem is mounted via the VFS adapter
+    /// layer, call `refresh(vfs)` to switch to real directory listings.
     fn populate_stub(&mut self) {
         self.entries.clear();
         self.entries.push(DirEntry {
@@ -193,7 +197,9 @@ impl FileManagerState {
             modified: String::new(),
         });
         self.vfs_available = false;
-        self.status_message = String::from("No filesystem mounted. Use `mount` to attach a device.");
+        self.status_message = String::from(
+            "No filesystem mounted. Use `mount /dev/sdX /mnt ext4` in a shell pane."
+        );
     }
 
     /// Navigate into a directory or open a file.
@@ -710,10 +716,14 @@ pub fn render_to_pane(state: &FileManagerState, cols: usize, rows: usize) -> Str
     let listing_rows = rows.saturating_sub(5);
 
     if !state.vfs_available && state.entries.len() <= 2 {
-        // No VFS — show message.
+        // No VFS — show guidance message.
         out.push_str("\r\n");
         out.push_str("\x1b[33m  No filesystem mounted.\x1b[0m\r\n");
-        out.push_str("\x1b[90m  Use `mount` in a shell pane to attach a device.\x1b[0m\r\n");
+        out.push_str("\x1b[90m  In a shell pane, run:\x1b[0m\r\n");
+        out.push_str("\x1b[90m    mount /dev/sda1 /mnt ext4\x1b[0m\r\n");
+        out.push_str("\r\n");
+        out.push_str("\x1b[90m  No block devices in QEMU (virtio-net only).\x1b[0m\r\n");
+        out.push_str("\x1b[90m  On real hardware: AHCI/NVMe disks mount automatically.\x1b[0m\r\n");
     } else {
         let end = (state.scroll_offset + listing_rows).min(state.entries.len());
         let start = state.scroll_offset;

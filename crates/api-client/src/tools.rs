@@ -385,14 +385,38 @@ fn execute_file_read(call: &ToolCall) -> ToolResult {
         }
     };
 
+    if path.is_empty() {
+        return ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from("path must not be empty"),
+            is_error: true,
+        };
+    }
+
     log::info!("[tools] file_read: {}", path);
 
-    // TODO: Implement via fs-persist crate once FAT32 filesystem is available.
-    // Will read from the mounted FAT32 partition.
-    ToolResult {
-        tool_use_id: call.id.clone(),
-        content: format!("file_read not yet implemented (requested path: {})", path),
-        is_error: true,
+    let handler = unsafe { FILE_READ_HANDLER };
+    match handler {
+        Some(h) => match h(path) {
+            Ok(contents) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: contents,
+                is_error: false,
+            },
+            Err(e) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("file_read error: {}", e),
+                is_error: true,
+            },
+        },
+        None => ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from(
+                "file_read: no handler registered. \
+                 The kernel must call set_file_read_handler() at init.",
+            ),
+            is_error: true,
+        },
     }
 }
 
@@ -419,17 +443,38 @@ fn execute_file_write(call: &ToolCall) -> ToolResult {
         }
     };
 
+    if path.is_empty() {
+        return ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from("path must not be empty"),
+            is_error: true,
+        };
+    }
+
     log::info!("[tools] file_write: {} ({} bytes)", path, content.len());
 
-    // TODO: Implement via fs-persist crate once FAT32 filesystem is available.
-    ToolResult {
-        tool_use_id: call.id.clone(),
-        content: format!(
-            "file_write not yet implemented (requested path: {}, {} bytes)",
-            path,
-            content.len()
-        ),
-        is_error: true,
+    let handler = unsafe { FILE_WRITE_HANDLER };
+    match handler {
+        Some(h) => match h(path, content) {
+            Ok(()) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("Successfully wrote {} bytes to {}", content.len(), path),
+                is_error: false,
+            },
+            Err(e) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("file_write error: {}", e),
+                is_error: true,
+            },
+        },
+        None => ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from(
+                "file_write: no handler registered. \
+                 The kernel must call set_file_write_handler() at init.",
+            ),
+            is_error: true,
+        },
     }
 }
 
@@ -445,13 +490,38 @@ fn execute_list_dir(call: &ToolCall) -> ToolResult {
         }
     };
 
+    if path.is_empty() {
+        return ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from("path must not be empty"),
+            is_error: true,
+        };
+    }
+
     log::info!("[tools] list_directory: {}", path);
 
-    // TODO: Implement via fs-persist crate once FAT32 filesystem is available.
-    ToolResult {
-        tool_use_id: call.id.clone(),
-        content: format!("list_directory not yet implemented (requested path: {})", path),
-        is_error: true,
+    let handler = unsafe { LIST_DIRECTORY_HANDLER };
+    match handler {
+        Some(h) => match h(path) {
+            Ok(listing) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: listing,
+                is_error: false,
+            },
+            Err(e) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("list_directory error: {}", e),
+                is_error: true,
+            },
+        },
+        None => ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from(
+                "list_directory: no handler registered. \
+                 The kernel must call set_list_directory_handler() at init.",
+            ),
+            is_error: true,
+        },
     }
 }
 
@@ -467,18 +537,45 @@ fn execute_command(call: &ToolCall) -> ToolResult {
         }
     };
 
+    if command.is_empty() {
+        return ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from("command must not be empty"),
+            is_error: true,
+        };
+    }
+
     log::info!("[tools] execute_command: {}", command);
 
-    // TODO: ClaudioOS has no shell or process model. This will need a custom
-    // command interpreter that can run built-in operations (cargo build, git, etc.)
-    // via direct kernel-level execution or a minimal shell implementation.
-    ToolResult {
-        tool_use_id: call.id.clone(),
-        content: format!(
-            "execute_command not yet implemented (requested command: {})",
-            command
-        ),
-        is_error: true,
+    let handler = unsafe { EXECUTE_COMMAND_HANDLER };
+    match handler {
+        Some(h) => match h(command) {
+            Ok(output) => {
+                let content = if output.is_empty() {
+                    String::from("(no output)")
+                } else {
+                    output
+                };
+                ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content,
+                    is_error: false,
+                }
+            }
+            Err(e) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("execute_command error: {}", e),
+                is_error: true,
+            },
+        },
+        None => ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from(
+                "execute_command: no handler registered. \
+                 The kernel must call set_execute_command_handler() at init.",
+            ),
+            is_error: true,
+        },
     }
 }
 
@@ -738,8 +835,20 @@ fn parse_compile_response(call: &ToolCall, raw: &[u8]) -> ToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// Compile handler — function pointer injected by the kernel
+// Tool handlers — function pointers injected by the kernel
 // ---------------------------------------------------------------------------
+
+/// Handler type for file read: takes a path, returns file contents or error.
+pub type FileReadHandler = fn(&str) -> Result<String, String>;
+
+/// Handler type for file write: takes (path, content), returns Ok(()) or error.
+pub type FileWriteHandler = fn(&str, &str) -> Result<(), String>;
+
+/// Handler type for directory listing: takes a path, returns listing or error.
+pub type ListDirectoryHandler = fn(&str) -> Result<String, String>;
+
+/// Handler type for command execution: takes a command, returns output or error.
+pub type ExecuteCommandHandler = fn(&str) -> Result<String, String>;
 
 /// Type for the compile handler function.
 ///
@@ -749,12 +858,48 @@ fn parse_compile_response(call: &ToolCall, raw: &[u8]) -> ToolResult {
 /// kernel, which owns the network stack.
 pub type CompileHandler = fn(&[u8]) -> Result<Vec<u8>, String>;
 
-/// Global compile handler — set by the kernel at startup.
+/// Global handlers — set by the kernel at startup.
 ///
-/// SAFETY: This is only written once during kernel init (single-threaded boot)
-/// and read during tool execution. In a multi-agent scenario the handler is
+/// SAFETY: These are only written once during kernel init (single-threaded boot)
+/// and read during tool execution. In a multi-agent scenario the handlers are
 /// read-only after init.
+static mut FILE_READ_HANDLER: Option<FileReadHandler> = None;
+static mut FILE_WRITE_HANDLER: Option<FileWriteHandler> = None;
+static mut LIST_DIRECTORY_HANDLER: Option<ListDirectoryHandler> = None;
+static mut EXECUTE_COMMAND_HANDLER: Option<ExecuteCommandHandler> = None;
 static mut COMPILE_RUST_HANDLER: Option<CompileHandler> = None;
+
+/// Register the file read handler. Called by the kernel during init.
+///
+/// # Safety
+/// Must be called once during single-threaded kernel initialization.
+pub unsafe fn set_file_read_handler(handler: FileReadHandler) {
+    FILE_READ_HANDLER = Some(handler);
+}
+
+/// Register the file write handler. Called by the kernel during init.
+///
+/// # Safety
+/// Must be called once during single-threaded kernel initialization.
+pub unsafe fn set_file_write_handler(handler: FileWriteHandler) {
+    FILE_WRITE_HANDLER = Some(handler);
+}
+
+/// Register the directory listing handler. Called by the kernel during init.
+///
+/// # Safety
+/// Must be called once during single-threaded kernel initialization.
+pub unsafe fn set_list_directory_handler(handler: ListDirectoryHandler) {
+    LIST_DIRECTORY_HANDLER = Some(handler);
+}
+
+/// Register the command execution handler. Called by the kernel during init.
+///
+/// # Safety
+/// Must be called once during single-threaded kernel initialization.
+pub unsafe fn set_execute_command_handler(handler: ExecuteCommandHandler) {
+    EXECUTE_COMMAND_HANDLER = Some(handler);
+}
 
 /// Register the compile handler. Called by the kernel during init.
 ///

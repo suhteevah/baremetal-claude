@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 
+use crate::XhciError;
 use crate::context::{
     Dcbaa, EndpointContext, InputContext, SlotContext,
     EP_TYPE_CONTROL, EP_TYPE_INTERRUPT_IN,
@@ -90,7 +91,7 @@ impl XhciController {
     ///
     /// # Safety
     /// `pci_bar0` must be a valid, identity-mapped MMIO address for an xHCI controller.
-    pub unsafe fn init(pci_bar0: usize) -> Self {
+    pub unsafe fn init(pci_bar0: usize) -> Result<Self, XhciError> {
         log::info!("xhci: initializing controller at BAR0={:#x}", pci_bar0);
 
         // --- Step 1: Read capability registers ---
@@ -125,7 +126,8 @@ impl XhciController {
         while !op.is_ready() {
             timeout -= 1;
             if timeout == 0 {
-                panic!("xhci: controller not ready after timeout (USBSTS={:#x})", op.usbsts());
+                log::error!("xhci: controller not ready after timeout (USBSTS={:#x})", op.usbsts());
+                return Err(XhciError::Timeout("controller not ready (CNR did not clear)"));
             }
         }
         log::info!("xhci: controller ready");
@@ -141,7 +143,8 @@ impl XhciController {
             while !op.is_halted() {
                 timeout -= 1;
                 if timeout == 0 {
-                    panic!("xhci: controller did not halt (USBSTS={:#x})", op.usbsts());
+                    log::error!("xhci: controller did not halt (USBSTS={:#x})", op.usbsts());
+                    return Err(XhciError::Timeout("controller did not halt"));
                 }
             }
             log::debug!("xhci: controller halted");
@@ -154,7 +157,8 @@ impl XhciController {
         while op.usbcmd() & USBCMD_HCRST != 0 {
             timeout -= 1;
             if timeout == 0 {
-                panic!("xhci: HCRST did not clear");
+                log::error!("xhci: HCRST did not clear");
+                return Err(XhciError::Timeout("HCRST did not clear"));
             }
         }
 
@@ -163,7 +167,8 @@ impl XhciController {
         while !op.is_ready() {
             timeout -= 1;
             if timeout == 0 {
-                panic!("xhci: controller not ready after reset");
+                log::error!("xhci: controller not ready after reset");
+                return Err(XhciError::Timeout("controller not ready after reset"));
             }
         }
         log::info!("xhci: controller reset complete");
@@ -211,10 +216,11 @@ impl XhciController {
 
         // Verify the controller is running
         if op.is_halted() {
-            panic!(
+            log::error!(
                 "xhci: controller still halted after setting RS (USBSTS={:#x})",
                 op.usbsts()
             );
+            return Err(XhciError::ControllerError("controller still halted after setting RS"));
         }
 
         // Initialize device tracking arrays
@@ -227,7 +233,7 @@ impl XhciController {
 
         log::info!("xhci: initialization complete, {} ports available", max_ports);
 
-        Self {
+        Ok(Self {
             bar0: pci_bar0,
             cap,
             op,
@@ -242,7 +248,7 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboard: None,
-        }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -915,7 +921,10 @@ impl XhciController {
                 let code = evt.completion_code();
 
                 // Re-borrow keyboard info
-                let kb = self.keyboard.as_mut().unwrap();
+                let kb = match self.keyboard.as_mut() {
+                    Some(kb) => kb,
+                    None => continue,
+                };
 
                 if evt_slot == kb.slot_id && evt_ep == kb.dci {
                     log::trace!(

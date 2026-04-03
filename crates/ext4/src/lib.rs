@@ -9,6 +9,11 @@
 //! - Directory entry parsing, creation, and lookup
 //! - Block and inode bitmap allocation
 //! - High-level file read/write/create/mkdir API
+//! - HTree indexed directory lookup
+//! - Legacy indirect block map (ext2/ext3 compatibility)
+//! - JBD2 journal replay
+//! - CRC32C metadata checksums
+//! - Encryption detection
 //!
 //! ## Usage
 //!
@@ -27,9 +32,14 @@ extern crate alloc;
 
 pub mod bitmap;
 pub mod block_group;
+pub mod block_map;
+pub mod crc32c;
 pub mod dir;
+pub mod encrypt;
 pub mod extent;
+pub mod htree;
 pub mod inode;
+pub mod journal;
 pub mod readwrite;
 pub mod superblock;
 
@@ -40,3 +50,8 @@ pub use inode::Inode;
 pub use dir::DirEntry;
 pub use extent::{ExtentHeader, ExtentIndex, ExtentLeaf};
 pub use bitmap::BitmapAllocator;
+pub use crc32c::{crc32c, crc32c_seed, crc32c_uuid_seed};
+pub use journal::{JournalSuperblock, JournalTransaction};
+pub use htree::{dx_hash, EXT4_INDEX_FL};
+pub use block_map::read_block_map;
+pub use encrypt::{check_encryption, EXT4_ENCRYPT_FL};

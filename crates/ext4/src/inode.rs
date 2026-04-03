@@ -60,6 +60,10 @@ pub const EXT4_APPEND_FL: u32 = 0x00000020;
 pub const EXT4_NODUMP_FL: u32 = 0x00000040;
 /// Do not update atime.
 pub const EXT4_NOATIME_FL: u32 = 0x00000080;
+/// Directory is hash-indexed (HTree).
+pub const EXT4_INDEX_FL: u32 = 0x00001000;
+/// Inode is encrypted.
+pub const EXT4_ENCRYPT_FL: u32 = 0x00000800;
 /// Inode uses extents.
 pub const EXT4_EXTENTS_FL: u32 = 0x00080000;
 /// Inode stores large extended attribute values in its data blocks.

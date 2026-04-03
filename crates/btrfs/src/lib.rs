@@ -28,6 +28,7 @@
 extern crate alloc;
 
 pub mod chunk;
+pub mod compress;
 pub mod crc32c;
 pub mod dir;
 pub mod extent;

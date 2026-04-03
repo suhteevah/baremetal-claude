@@ -176,6 +176,10 @@ pub struct Superblock {
     /// Directory where last mounted (null-terminated).
     pub last_mounted: [u8; 64],
 
+    // --- Journal ---
+    /// Inode number of the journal file.
+    pub journal_inum: u32,
+
     // --- 64-bit support ---
     /// Block group descriptor size (32 or 64 bytes).
     pub desc_size: u16,
@@ -237,6 +241,11 @@ impl Superblock {
             uuid:                    read_uuid(buf, 0x68),
             volume_name:             read_16bytes(buf, 0x78),
             last_mounted:            read_64bytes(buf, 0x88),
+            journal_inum: if buf.len() >= 0xE0 + 4 {
+                read_u32(buf, 0xE0)
+            } else {
+                8 // default journal inode
+            },
             desc_size: if buf.len() >= 0xFE + 2 {
                 read_u16(buf, 0xFE)
             } else {
@@ -304,6 +313,7 @@ impl Superblock {
         buf[0x68..0x78].copy_from_slice(&self.uuid);
         buf[0x78..0x88].copy_from_slice(&self.volume_name);
         buf[0x88..0xC8].copy_from_slice(&self.last_mounted);
+        write_u32(&mut buf, 0xE0, self.journal_inum);
         write_u16(&mut buf, 0xFE, self.desc_size);
         write_u32(&mut buf, 0x150, self.blocks_count_hi);
         write_u32(&mut buf, 0x158, self.free_blocks_count_hi);
@@ -377,6 +387,18 @@ impl Superblock {
     #[inline]
     pub fn has_flex_bg(&self) -> bool {
         self.feature_incompat & INCOMPAT_FLEX_BG != 0
+    }
+
+    /// Whether the filesystem has metadata checksums.
+    #[inline]
+    pub fn has_metadata_csum(&self) -> bool {
+        self.feature_ro_compat & RO_COMPAT_METADATA_CSUM != 0
+    }
+
+    /// Whether the filesystem has encrypted inodes.
+    #[inline]
+    pub fn has_encrypt(&self) -> bool {
+        self.feature_incompat & INCOMPAT_ENCRYPT != 0
     }
 
     /// Get the volume name as a string (trimming null bytes).

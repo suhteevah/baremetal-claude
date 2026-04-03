@@ -20,6 +20,10 @@ use alloc::vec::Vec;
 
 use sha2::{Sha256, Digest};
 
+use ml_kem::{KemCore, MlKem768, EncodedSizeUser as MlKemEncodedSizeUser};
+use ml_kem::kem::{Decapsulate, Encapsulate};
+use x25519_dalek::{EphemeralSecret as X25519Secret, PublicKey as X25519PublicKey};
+
 use crate::transport::{KexInit, TransportError};
 use crate::wire::*;
 
@@ -344,10 +348,10 @@ fn derive_key(
 
 /// Server-side ephemeral keys for hybrid PQ KEX.
 pub struct HybridKexServerState {
-    /// ML-KEM-768 decapsulation key (secret).
-    mlkem_dk: Vec<u8>,
-    /// ML-KEM-768 encapsulation key (public, 1184 bytes for ML-KEM-768).
-    mlkem_ek: Vec<u8>,
+    /// ML-KEM-768 decapsulation key (serialized).
+    mlkem_dk_bytes: Vec<u8>,
+    /// ML-KEM-768 encapsulation key (serialized, 1184 bytes for ML-KEM-768).
+    mlkem_ek_bytes: Vec<u8>,
     /// X25519 secret key (32 bytes).
     x25519_secret: [u8; 32],
     /// X25519 public key (32 bytes).
@@ -363,45 +367,32 @@ impl HybridKexServerState {
     pub fn generate(rng: &mut dyn FnMut(&mut [u8])) -> Self {
         log::info!("kex: generating hybrid PQ ephemeral keys (ML-KEM-768 + X25519)");
 
-        // Generate ML-KEM-768 keypair
-        // TODO: Wire up ml_kem::kem::MlKem768 when crate API is confirmed.
-        // The ml-kem 0.2 crate provides:
-        //   use ml_kem::{MlKem768, KemCore};
-        //   let (dk, ek) = MlKem768::generate(&mut rng);
-        //
-        // For now, generate placeholder keys to validate the protocol flow.
-        let mut mlkem_ek = alloc::vec![0u8; 1184]; // ML-KEM-768 encapsulation key size
-        rng(&mut mlkem_ek);
-        let mut mlkem_dk = alloc::vec![0u8; 2400]; // ML-KEM-768 decapsulation key size
-        rng(&mut mlkem_dk);
+        // Generate ML-KEM-768 keypair using real ml-kem crate
+        let mut rng_wrapper = FnRng(rng);
+        let (dk, ek) = MlKem768::generate(&mut rng_wrapper);
+        let rng = rng_wrapper.0; // recover borrow
+
+        // Serialize keys to bytes for storage
+        let mlkem_dk_bytes = Vec::from(dk.as_bytes().as_slice());
+        let mlkem_ek_bytes = Vec::from(ek.as_bytes().as_slice());
 
         log::debug!(
             "kex: ML-KEM-768 keypair generated — ek={} bytes, dk={} bytes",
-            mlkem_ek.len(),
-            mlkem_dk.len(),
+            mlkem_ek_bytes.len(),
+            mlkem_dk_bytes.len(),
         );
 
-        // Generate X25519 keypair
-        // TODO: Wire up x25519_dalek when available:
-        //   let secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
-        //   let public = x25519_dalek::PublicKey::from(&secret);
-        let mut x25519_secret = [0u8; 32];
-        rng(&mut x25519_secret);
-        // Clamp per RFC 7748
-        x25519_secret[0] &= 248;
-        x25519_secret[31] &= 127;
-        x25519_secret[31] |= 64;
-
-        let mut x25519_public = [0u8; 32];
-        // TODO: x25519_public = x25519_dalek::PublicKey::from(&StaticSecret::from(x25519_secret)).to_bytes();
-        // Placeholder: in real implementation, compute the X25519 base point multiplication
-        rng(&mut x25519_public);
+        // Generate X25519 keypair using real x25519-dalek
+        let x25519_secret_key = x25519_dalek::StaticSecret::random_from_rng(FnRng(rng));
+        let x25519_public_key = X25519PublicKey::from(&x25519_secret_key);
+        let x25519_secret = x25519_secret_key.to_bytes();
+        let x25519_public = x25519_public_key.to_bytes();
 
         log::debug!("kex: X25519 keypair generated");
 
         Self {
-            mlkem_dk,
-            mlkem_ek,
+            mlkem_dk_bytes,
+            mlkem_ek_bytes,
             x25519_secret,
             x25519_public,
         }
@@ -412,13 +403,13 @@ impl HybridKexServerState {
     /// For the hybrid PQ KEX, this is:
     /// `mlkem_ek (1184 bytes) || x25519_public (32 bytes)`
     pub fn server_ephemeral_public(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.mlkem_ek.len() + self.x25519_public.len());
-        out.extend_from_slice(&self.mlkem_ek);
+        let mut out = Vec::with_capacity(self.mlkem_ek_bytes.len() + self.x25519_public.len());
+        out.extend_from_slice(&self.mlkem_ek_bytes);
         out.extend_from_slice(&self.x25519_public);
         log::debug!(
             "kex: server ephemeral public = {} bytes (mlkem_ek={} + x25519={})",
             out.len(),
-            self.mlkem_ek.len(),
+            self.mlkem_ek_bytes.len(),
             self.x25519_public.len(),
         );
         out
@@ -460,36 +451,36 @@ impl HybridKexServerState {
             x25519_client_pk.len(),
         );
 
-        // TODO: Decapsulate ML-KEM-768
-        // use ml_kem::{MlKem768, KemCore, Decapsulate};
-        // let dk = MlKem768DecapsulationKey::from_bytes(&self.mlkem_dk);
-        // let mlkem_shared = dk.decapsulate(mlkem_ct)?;
-        let mut mlkem_shared = [0u8; 32];
-        // Placeholder: derive from ciphertext + dk for now
-        let mut hasher = Sha256::new();
-        hasher.update(mlkem_ct);
-        hasher.update(&self.mlkem_dk[..32]);
-        let h = hasher.finalize();
-        mlkem_shared.copy_from_slice(&h);
-        log::debug!("kex: ML-KEM-768 shared secret derived (placeholder)");
+        // Decapsulate ML-KEM-768 using real ml-kem crate
+        let dk = <MlKem768 as KemCore>::DecapsulationKey::from_bytes(
+            ml_kem::Encoded::<<MlKem768 as KemCore>::DecapsulationKey>::from_slice(&self.mlkem_dk_bytes),
+        );
+        let ct = ml_kem::Ciphertext::<MlKem768>::from_slice(mlkem_ct);
+        let mlkem_shared = dk.decapsulate(ct)
+            .map_err(|_| {
+                log::error!("kex: ML-KEM-768 decapsulation failed");
+                KexError::MlKemDecapsulationFailed
+            })?;
+        log::debug!("kex: ML-KEM-768 shared secret derived ({} bytes)", mlkem_shared.len());
 
-        // TODO: X25519 DH
-        // use x25519_dalek::{StaticSecret, PublicKey};
-        // let secret = StaticSecret::from(self.x25519_secret);
-        // let their_public = PublicKey::from(<[u8; 32]>::try_from(x25519_client_pk)?);
-        // let x25519_shared = secret.diffie_hellman(&their_public);
-        let mut x25519_shared = [0u8; 32];
-        let mut hasher = Sha256::new();
-        hasher.update(&self.x25519_secret);
-        hasher.update(x25519_client_pk);
-        let h = hasher.finalize();
-        x25519_shared.copy_from_slice(&h);
-        log::debug!("kex: X25519 shared secret derived (placeholder)");
+        // X25519 DH using real x25519-dalek
+        let x25519_secret = x25519_dalek::StaticSecret::from(self.x25519_secret);
+        let mut client_pk_bytes = [0u8; 32];
+        client_pk_bytes.copy_from_slice(x25519_client_pk);
+        let their_public = X25519PublicKey::from(client_pk_bytes);
+        let x25519_shared = x25519_secret.diffie_hellman(&their_public);
+
+        // Check for all-zero output (low-order point attack)
+        if x25519_shared.as_bytes().iter().all(|&b| b == 0) {
+            log::error!("kex: X25519 DH produced all-zero output — invalid client public key");
+            return Err(KexError::X25519ZeroOutput);
+        }
+        log::debug!("kex: X25519 shared secret derived");
 
         // Combine: shared_secret = SHA-256(mlkem_shared || x25519_shared)
         let mut hasher = Sha256::new();
-        hasher.update(&mlkem_shared);
-        hasher.update(&x25519_shared);
+        hasher.update(mlkem_shared.as_slice());
+        hasher.update(x25519_shared.as_bytes());
         let combined = hasher.finalize();
 
         log::info!(

@@ -33,3 +33,14 @@ pub mod driver;
 
 pub use driver::XhciController;
 pub use hid::KeyEvent;
+
+/// Errors from xHCI controller operations.
+#[derive(Debug)]
+pub enum XhciError {
+    /// The controller did not become ready within the timeout period.
+    Timeout(&'static str),
+    /// The controller is in an unexpected state.
+    ControllerError(&'static str),
+    /// A memory allocation failed.
+    AllocFailed(&'static str),
+}

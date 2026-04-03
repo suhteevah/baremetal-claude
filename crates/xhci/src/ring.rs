@@ -363,11 +363,19 @@ impl CommandRing {
     /// # Safety
     /// The returned physical address must be identity-mapped or the caller must
     /// ensure the xHCI controller can DMA to it.
-    pub unsafe fn new() -> Self {
-        let layout = Layout::from_size_align(RING_SEGMENT_SIZE, 64)
-            .expect("xhci: command ring layout");
+    pub unsafe fn new() -> Option<Self> {
+        let layout = match Layout::from_size_align(RING_SEGMENT_SIZE, 64) {
+            Ok(l) => l,
+            Err(_) => {
+                log::error!("xhci: invalid command ring layout");
+                return None;
+            }
+        };
         let ptr = alloc_zeroed(layout);
-        assert!(!ptr.is_null(), "xhci: command ring allocation failed");
+        if ptr.is_null() {
+            log::error!("xhci: command ring allocation failed");
+            return None;
+        }
 
         let ring_va = ptr as *mut Trb;
         // In ClaudioOS, virtual == physical (identity mapped)
@@ -395,7 +403,7 @@ impl CommandRing {
 
         log::debug!("xhci: command ring link TRB at index {}", link_idx);
 
-        ring
+        Some(ring)
     }
 
     /// Physical address of the ring (for programming into CRCR).
@@ -507,24 +515,40 @@ impl EventRing {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new() -> Self {
+    pub unsafe fn new() -> Option<Self> {
         // Allocate the event ring segment
-        let ring_layout = Layout::from_size_align(RING_SEGMENT_SIZE, 64)
-            .expect("xhci: event ring layout");
+        let ring_layout = match Layout::from_size_align(RING_SEGMENT_SIZE, 64) {
+            Ok(l) => l,
+            Err(_) => {
+                log::error!("xhci: invalid event ring layout");
+                return None;
+            }
+        };
         let ring_ptr = alloc_zeroed(ring_layout);
-        assert!(!ring_ptr.is_null(), "xhci: event ring allocation failed");
+        if ring_ptr.is_null() {
+            log::error!("xhci: event ring allocation failed");
+            return None;
+        }
 
         let ring_va = ring_ptr as *const Trb;
         let ring_phys = ring_ptr as u64;
 
         // Allocate the Event Ring Segment Table (one entry)
-        let erst_layout = Layout::from_size_align(
+        let erst_layout = match Layout::from_size_align(
             core::mem::size_of::<EventRingSegmentTableEntry>(),
             64,
-        )
-        .expect("xhci: ERST layout");
+        ) {
+            Ok(l) => l,
+            Err(_) => {
+                log::error!("xhci: invalid ERST layout");
+                return None;
+            }
+        };
         let erst_ptr = alloc_zeroed(erst_layout);
-        assert!(!erst_ptr.is_null(), "xhci: ERST allocation failed");
+        if erst_ptr.is_null() {
+            log::error!("xhci: ERST allocation failed");
+            return None;
+        }
 
         let erst_va = erst_ptr as *mut EventRingSegmentTableEntry;
         let erst_phys = erst_ptr as u64;
@@ -548,7 +572,7 @@ impl EventRing {
             erst_phys,
         );
 
-        Self {
+        Some(Self {
             ring_va,
             ring_phys,
             erst_va,
@@ -556,7 +580,7 @@ impl EventRing {
             segment_len: RING_SEGMENT_TRBS,
             dequeue_idx: 0,
             cycle: true,
-        }
+        })
     }
 
     /// Physical address of the ERST (for programming ERSTBA)
@@ -636,11 +660,19 @@ impl TransferRing {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new() -> Self {
-        let layout = Layout::from_size_align(RING_SEGMENT_SIZE, 64)
-            .expect("xhci: transfer ring layout");
+    pub unsafe fn new() -> Option<Self> {
+        let layout = match Layout::from_size_align(RING_SEGMENT_SIZE, 64) {
+            Ok(l) => l,
+            Err(_) => {
+                log::error!("xhci: invalid transfer ring layout");
+                return None;
+            }
+        };
         let ptr = alloc_zeroed(layout);
-        assert!(!ptr.is_null(), "xhci: transfer ring allocation failed");
+        if ptr.is_null() {
+            log::error!("xhci: transfer ring allocation failed");
+            return None;
+        }
 
         let ring_va = ptr as *mut Trb;
         let ring_phys = ptr as u64;
@@ -665,7 +697,7 @@ impl TransferRing {
         let link_trb = Trb::link(ring_phys, true, ring.cycle);
         ptr::write_volatile(ring_va.add(link_idx), link_trb);
 
-        ring
+        Some(ring)
     }
 
     /// Physical address of the ring start (for TR Dequeue Pointer in endpoint context).

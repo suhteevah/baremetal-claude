@@ -22,10 +22,21 @@ use core::fmt;
 
 use crate::bitmap::BitmapAllocator;
 use crate::block_group::{self, BlockGroupDesc};
+use crate::block_map;
+use crate::crc32c;
 use crate::dir::{self, DirEntry, DirEntryIter, FT_DIR, FT_REG_FILE};
-use crate::extent::{self, ExtentHeader, ExtentLeaf, EXTENT_HEADER_SIZE, EXTENT_LEAF_SIZE};
+use crate::encrypt;
+use crate::extent::{
+    self, ExtentHeader, ExtentIndex, ExtentLeaf,
+    EXTENT_HEADER_SIZE, EXTENT_INDEX_SIZE, EXTENT_LEAF_SIZE,
+};
+use crate::htree;
 use crate::inode::{self, Inode, ROOT_INODE};
-use crate::superblock::{Superblock, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE};
+use crate::journal::{self, JournalSuperblock, JOURNAL_INODE};
+use crate::superblock::{
+    Superblock, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE,
+    INCOMPAT_RECOVER, RO_COMPAT_METADATA_CSUM,
+};
 
 /// Errors that can occur during ext4 filesystem operations.
 #[derive(Debug)]
@@ -117,12 +128,20 @@ pub struct Ext4Fs<D: BlockDevice> {
     pub sb: Superblock,
     /// Block group descriptors, one per block group.
     pub groups: Vec<BlockGroupDesc>,
+    /// CRC32C seed computed from the superblock UUID.
+    /// Only meaningful when `has_metadata_csum` is true.
+    pub csum_seed: u32,
+    /// Whether metadata checksums are enabled.
+    pub has_metadata_csum: bool,
+    /// Hash seed for HTree directory lookups (from superblock s_hash_seed).
+    pub hash_seed: [u32; 4],
 }
 
 impl<D: BlockDevice> Ext4Fs<D> {
     /// Mount an ext4 filesystem from the given block device.
     ///
     /// Reads and validates the superblock, then loads all block group descriptors.
+    /// If the journal has uncommitted transactions (INCOMPAT_RECOVER), replays them.
     pub fn mount(device: D) -> Result<Self, Ext4Error> {
         log::info!("[ext4::mount] mounting ext4 filesystem...");
 
@@ -134,6 +153,32 @@ impl<D: BlockDevice> Ext4Fs<D> {
             log::error!("[ext4::mount] failed to parse superblock");
             Ext4Error::InvalidSuperblock
         })?;
+
+        let has_metadata_csum = sb.feature_ro_compat & RO_COMPAT_METADATA_CSUM != 0;
+        let csum_seed = if has_metadata_csum {
+            let seed = crc32c::crc32c_uuid_seed(&sb.uuid);
+            log::debug!("[ext4::mount] metadata checksums enabled, UUID seed=0x{:08X}", seed);
+
+            // Verify superblock checksum
+            if !crc32c::verify_superblock_checksum(&sb_buf) {
+                log::warn!("[ext4::mount] superblock checksum verification failed (continuing anyway)");
+            }
+            seed
+        } else {
+            0
+        };
+
+        // Read hash seed from superblock (at offset 0xEC, 4 x u32)
+        let hash_seed = if sb_buf.len() >= 0xFC {
+            [
+                u32::from_le_bytes([sb_buf[0xEC], sb_buf[0xED], sb_buf[0xEE], sb_buf[0xEF]]),
+                u32::from_le_bytes([sb_buf[0xF0], sb_buf[0xF1], sb_buf[0xF2], sb_buf[0xF3]]),
+                u32::from_le_bytes([sb_buf[0xF4], sb_buf[0xF5], sb_buf[0xF6], sb_buf[0xF7]]),
+                u32::from_le_bytes([sb_buf[0xF8], sb_buf[0xF9], sb_buf[0xFA], sb_buf[0xFB]]),
+            ]
+        } else {
+            [0u32; 4]
+        };
 
         log::info!("[ext4::mount] superblock valid: {} blocks, {} inodes, block_size={}, volume={:?}",
             sb.total_blocks(), sb.inodes_count, sb.block_size(), sb.volume_name_str());
@@ -159,7 +204,171 @@ impl<D: BlockDevice> Ext4Fs<D> {
 
         log::info!("[ext4::mount] mounted successfully: {} block groups", groups.len());
 
-        Ok(Ext4Fs { device, sb, groups })
+        let mut fs = Ext4Fs { device, sb, groups, csum_seed, has_metadata_csum, hash_seed };
+
+        // Journal replay if needed
+        if fs.sb.has_journal() && (fs.sb.feature_incompat & INCOMPAT_RECOVER != 0) {
+            log::info!("[ext4::mount] filesystem needs journal recovery, replaying...");
+            match fs.replay_journal() {
+                Ok(count) => {
+                    log::info!("[ext4::mount] journal replay complete: {} transactions replayed", count);
+                }
+                Err(e) => {
+                    log::error!("[ext4::mount] journal replay failed: {}, continuing with caution", e);
+                }
+            }
+        } else if fs.sb.has_journal() {
+            log::debug!("[ext4::mount] journal present but clean, no replay needed");
+        }
+
+        Ok(fs)
+    }
+
+    /// Replay the journal (JBD2) if it has uncommitted transactions.
+    ///
+    /// Returns the number of transactions replayed.
+    fn replay_journal(&mut self) -> Result<usize, Ext4Error> {
+        // Read the journal inode (typically inode 8)
+        let journal_ino = JOURNAL_INODE;
+        let journal_inode = self.read_inode(journal_ino)?;
+
+        if journal_inode.size() == 0 {
+            log::warn!("[ext4::journal] journal inode {} has zero size", journal_ino);
+            return Ok(0);
+        }
+
+        // Resolve journal data blocks (the journal itself uses extents or block map)
+        let journal_blocks = if journal_inode.uses_extents() {
+            self.resolve_extents(&journal_inode)?
+        } else {
+            // For block-map journals, we need a different approach.
+            // Build a synthetic extent list by resolving each logical block.
+            log::debug!("[ext4::journal] journal inode uses block map");
+            Vec::new() // Will use block_map for individual reads below
+        };
+
+        let uses_block_map = journal_blocks.is_empty() && !journal_inode.uses_extents();
+        let block_size = self.sb.block_size();
+
+        // Helper: read a journal-relative block
+        let read_journal_block = |journal_block_idx: u64| -> Option<Vec<u8>> {
+            if uses_block_map {
+                match block_map::read_block_map(
+                    // We can't pass &self here in a closure, so we handle differently below.
+                    // This path is unlikely for ext4 journals; they almost always use extents.
+                    unsafe { &*(self as *const Self) },
+                    &journal_inode,
+                    journal_block_idx,
+                ) {
+                    Ok(Some(phys)) => {
+                        let mut buf = vec![0u8; block_size as usize];
+                        match self.device.read_bytes(phys * block_size, &mut buf) {
+                            Ok(()) => Some(buf),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                // Find the physical block from extents
+                for ext in &journal_blocks {
+                    if let Some(phys) = ext.map_block(journal_block_idx as u32) {
+                        let mut buf = vec![0u8; block_size as usize];
+                        match self.device.read_bytes(phys * block_size, &mut buf) {
+                            Ok(()) => return Some(buf),
+                            Err(_) => return None,
+                        }
+                    }
+                }
+                None
+            }
+        };
+
+        // Read journal superblock (block 0 of journal)
+        let jsb_data = read_journal_block(0).ok_or(Ext4Error::Corrupt("failed to read journal superblock"))?;
+        let jsb = JournalSuperblock::from_bytes(&jsb_data)
+            .ok_or(Ext4Error::Corrupt("invalid journal superblock"))?;
+
+        if !jsb.needs_recovery() {
+            log::info!("[ext4::journal] journal is clean (log_start=0)");
+            return Ok(0);
+        }
+
+        // Scan for committed transactions
+        let transactions = journal::scan_journal(&jsb, read_journal_block);
+
+        if transactions.is_empty() {
+            log::info!("[ext4::journal] no committed transactions to replay");
+            return Ok(0);
+        }
+
+        // Replay each transaction: copy journaled blocks to their final filesystem locations
+        let mut replayed = 0;
+        for txn in &transactions {
+            log::info!("[ext4::journal] replaying transaction seq={} ({} blocks)",
+                txn.sequence, txn.mappings.len());
+
+            for mapping in &txn.mappings {
+                // Read the journaled data block
+                let jblock = if uses_block_map {
+                    match block_map::read_block_map(
+                        unsafe { &*(self as *const Self) },
+                        &journal_inode,
+                        mapping.journal_block,
+                    ) {
+                        Ok(Some(phys)) => {
+                            let mut buf = vec![0u8; block_size as usize];
+                            self.device.read_bytes(phys * block_size, &mut buf)?;
+                            buf
+                        }
+                        _ => {
+                            log::error!("[ext4::journal] failed to read journal block {}", mapping.journal_block);
+                            continue;
+                        }
+                    }
+                } else {
+                    let mut found = None;
+                    for ext in &journal_blocks {
+                        if let Some(phys) = ext.map_block(mapping.journal_block as u32) {
+                            let mut buf = vec![0u8; block_size as usize];
+                            self.device.read_bytes(phys * block_size, &mut buf)?;
+                            found = Some(buf);
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(b) => b,
+                        None => {
+                            log::error!("[ext4::journal] no extent for journal block {}", mapping.journal_block);
+                            continue;
+                        }
+                    }
+                };
+
+                let mut data = jblock;
+
+                // If the block was escaped, restore the original JBD2 magic
+                if mapping.escaped {
+                    let magic_bytes = journal::JBD2_MAGIC.to_be_bytes();
+                    data[..4].copy_from_slice(&magic_bytes);
+                }
+
+                // Write to the final filesystem location
+                let fs_offset = mapping.fs_block * block_size;
+                self.device.write_bytes(fs_offset, &data)?;
+                log::trace!("[ext4::journal] replayed block -> fs_block={}", mapping.fs_block);
+            }
+            replayed += 1;
+        }
+
+        // Clear the INCOMPAT_RECOVER flag and reset journal log_start
+        self.sb.feature_incompat &= !INCOMPAT_RECOVER;
+        let sb_bytes = self.sb.to_bytes();
+        self.device.write_bytes(SUPERBLOCK_OFFSET, &sb_bytes)?;
+        self.device.flush()?;
+
+        log::info!("[ext4::journal] journal replay complete: {} transactions", replayed);
+        Ok(replayed)
     }
 
     /// Read a block from the device.
@@ -244,7 +453,7 @@ impl<D: BlockDevice> Ext4Fs<D> {
     /// all data blocks of the file.
     pub fn resolve_extents(&self, inode: &Inode) -> Result<Vec<ExtentLeaf>, Ext4Error> {
         if !inode.uses_extents() {
-            log::error!("[ext4::extent] inode does not use extents (legacy block map not yet supported)");
+            log::error!("[ext4::extent] inode does not use extents, use block_map instead");
             return Err(Ext4Error::UnsupportedFeature("legacy block map"));
         }
 
@@ -291,11 +500,22 @@ impl<D: BlockDevice> Ext4Fs<D> {
     /// Read all data blocks of an inode into a contiguous Vec.
     ///
     /// The returned Vec is truncated to the inode's actual file size.
+    /// Supports both extent-based and legacy block-map inodes.
+    /// Returns an error for encrypted inodes.
     pub fn read_inode_data(&self, inode: &Inode) -> Result<Vec<u8>, Ext4Error> {
+        // Check encryption before reading
+        encrypt::check_encryption(inode.flags)?;
+
         let file_size = inode.size();
         if file_size == 0 {
             log::trace!("[ext4::read] inode has zero size");
             return Ok(Vec::new());
+        }
+
+        // Use legacy block map if the inode doesn't have the extents flag
+        if !inode.uses_extents() {
+            log::debug!("[ext4::read] inode uses legacy block map, reading via indirect pointers");
+            return block_map::read_block_map_data(self, inode);
         }
 
         let extents = self.resolve_extents(inode)?;
@@ -378,19 +598,110 @@ impl<D: BlockDevice> Ext4Fs<D> {
 
     /// Search a directory inode for a name.
     ///
+    /// Uses HTree indexed lookup if the directory has the EXT4_INDEX_FL flag,
+    /// otherwise falls back to linear scan.
+    ///
     /// Returns the inode number and parsed Inode of the found entry.
     fn lookup_in_dir(&self, dir_inode: &Inode, name: &[u8]) -> Result<(u32, Inode), Ext4Error> {
-        let extents = self.resolve_extents(dir_inode)?;
+        // Check if this directory uses HTree indexing
+        if dir_inode.flags & htree::EXT4_INDEX_FL != 0 {
+            log::debug!("[ext4::lookup] directory uses HTree, attempting indexed lookup");
+            match self.htree_lookup_in_dir(dir_inode, name) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    log::warn!("[ext4::lookup] HTree lookup failed: {}, falling back to linear scan", e);
+                    // Fall through to linear scan
+                }
+            }
+        }
 
-        for ext in &extents {
-            for blk_offset in 0..ext.block_count() {
-                let phys = ext.physical_start() + blk_offset as u64;
-                let block_data = self.read_block(phys)?;
+        // Linear scan fallback
+        self.linear_lookup_in_dir(dir_inode, name)
+    }
 
-                if let Some((_offset, entry)) = dir::lookup_in_block(&block_data, name) {
-                    let ino = entry.inode;
-                    let inode = self.read_inode(ino)?;
-                    return Ok((ino, inode));
+    /// HTree-based directory lookup.
+    fn htree_lookup_in_dir(&self, dir_inode: &Inode, name: &[u8]) -> Result<(u32, Inode), Ext4Error> {
+        // Read the first block (dx_root) of the directory
+        let dir_data_blocks = self.resolve_dir_data_blocks(dir_inode)?;
+        if dir_data_blocks.is_empty() {
+            return Err(Ext4Error::NotFound);
+        }
+
+        let root_block_data = self.read_block(dir_data_blocks[0])?;
+
+        let entry = htree::htree_lookup(
+            &root_block_data,
+            name,
+            &self.hash_seed,
+            |block_num| {
+                // block_num is a logical block index within the directory
+                if (block_num as usize) < dir_data_blocks.len() {
+                    self.read_block(dir_data_blocks[block_num as usize]).ok()
+                } else {
+                    None
+                }
+            },
+        ).ok_or(Ext4Error::NotFound)?;
+
+        let ino = entry.inode;
+        let inode = self.read_inode(ino)?;
+        Ok((ino, inode))
+    }
+
+    /// Resolve all physical block numbers for a directory's data blocks.
+    fn resolve_dir_data_blocks(&self, dir_inode: &Inode) -> Result<Vec<u64>, Ext4Error> {
+        let mut blocks = Vec::new();
+
+        if dir_inode.uses_extents() {
+            let extents = self.resolve_extents(dir_inode)?;
+            for ext in &extents {
+                for offset in 0..ext.block_count() {
+                    blocks.push(ext.physical_start() + offset as u64);
+                }
+            }
+        } else {
+            // Legacy block map
+            let block_size = self.sb.block_size();
+            let total_blocks = (dir_inode.size() + block_size - 1) / block_size;
+            for i in 0..total_blocks {
+                match block_map::read_block_map(self, dir_inode, i)? {
+                    Some(phys) => blocks.push(phys),
+                    None => blocks.push(0), // hole
+                }
+            }
+        }
+
+        Ok(blocks)
+    }
+
+    /// Linear scan directory lookup (original implementation).
+    fn linear_lookup_in_dir(&self, dir_inode: &Inode, name: &[u8]) -> Result<(u32, Inode), Ext4Error> {
+        if dir_inode.uses_extents() {
+            let extents = self.resolve_extents(dir_inode)?;
+            for ext in &extents {
+                for blk_offset in 0..ext.block_count() {
+                    let phys = ext.physical_start() + blk_offset as u64;
+                    let block_data = self.read_block(phys)?;
+
+                    if let Some((_offset, entry)) = dir::lookup_in_block(&block_data, name) {
+                        let ino = entry.inode;
+                        let inode = self.read_inode(ino)?;
+                        return Ok((ino, inode));
+                    }
+                }
+            }
+        } else {
+            // Legacy block map
+            let block_size = self.sb.block_size();
+            let total_blocks = (dir_inode.size() + block_size - 1) / block_size;
+            for logical in 0..total_blocks {
+                if let Some(phys) = block_map::read_block_map(self, dir_inode, logical)? {
+                    let block_data = self.read_block(phys)?;
+                    if let Some((_offset, entry)) = dir::lookup_in_block(&block_data, name) {
+                        let ino = entry.inode;
+                        let inode = self.read_inode(ino)?;
+                        return Ok((ino, inode));
+                    }
                 }
             }
         }
@@ -431,17 +742,33 @@ impl<D: BlockDevice> Ext4Fs<D> {
             return Err(Ext4Error::IsNotADirectory);
         }
 
-        let extents = self.resolve_extents(&inode)?;
         let mut entries = Vec::new();
 
-        for ext in &extents {
-            for blk_offset in 0..ext.block_count() {
-                let phys = ext.physical_start() + blk_offset as u64;
-                let block_data = self.read_block(phys)?;
+        if inode.uses_extents() {
+            let extents = self.resolve_extents(&inode)?;
+            for ext in &extents {
+                for blk_offset in 0..ext.block_count() {
+                    let phys = ext.physical_start() + blk_offset as u64;
+                    let block_data = self.read_block(phys)?;
 
-                for (_offset, entry) in DirEntryIter::new(&block_data) {
-                    if !entry.is_deleted() {
-                        entries.push(entry);
+                    for (_offset, entry) in DirEntryIter::new(&block_data) {
+                        if !entry.is_deleted() {
+                            entries.push(entry);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Legacy block map
+            let block_size = self.sb.block_size();
+            let total_blocks = (inode.size() + block_size - 1) / block_size;
+            for logical in 0..total_blocks {
+                if let Some(phys) = block_map::read_block_map(self, &inode, logical)? {
+                    let block_data = self.read_block(phys)?;
+                    for (_offset, entry) in DirEntryIter::new(&block_data) {
+                        if !entry.is_deleted() {
+                            entries.push(entry);
+                        }
                     }
                 }
             }
@@ -633,49 +960,305 @@ impl<D: BlockDevice> Ext4Fs<D> {
 
     /// Append a new physical block to an inode's extent tree.
     ///
-    /// This is a simplified implementation that adds a new single-block extent.
-    /// A production implementation would merge with adjacent extents.
-    fn append_extent(&self, ino: u32, inode: &mut Inode, phys_block: u64) -> Result<(), Ext4Error> {
+    /// Supports extent tree splitting when the root node is full:
+    /// - Allocates a new block for leaf storage
+    /// - Moves existing extents to the new leaf block
+    /// - Converts root to an index node pointing to the leaf
+    /// - Adds the new extent to the leaf
+    fn append_extent(&mut self, ino: u32, inode: &mut Inode, phys_block: u64) -> Result<(), Ext4Error> {
         let header = inode.extent_header().ok_or(Ext4Error::Corrupt("no extent header"))?;
 
-        if !header.is_leaf() {
-            log::error!("[ext4::extent] cannot append to non-leaf root (multi-level trees not yet supported for append)");
-            return Err(Ext4Error::UnsupportedFeature("multi-level extent tree append"));
-        }
-
-        if header.entries >= header.max {
-            log::error!("[ext4::extent] root extent node is full ({}/{}), tree splitting not yet implemented",
-                header.entries, header.max);
-            return Err(Ext4Error::UnsupportedFeature("extent tree splitting"));
-        }
-
         // Calculate the next logical block number
-        let leaves = extent::parse_leaves(&inode.i_block);
-        let next_logical = leaves.iter()
-            .map(|l| l.block + l.block_count())
-            .max()
-            .unwrap_or(0);
+        let next_logical = if header.is_leaf() {
+            let leaves = extent::parse_leaves(&inode.i_block);
+            leaves.iter()
+                .map(|l| l.block + l.block_count())
+                .max()
+                .unwrap_or(0)
+        } else {
+            // For non-leaf root, we need to find the max across all leaves
+            match self.resolve_extents(inode) {
+                Ok(all_leaves) => all_leaves.iter()
+                    .map(|l| l.block + l.block_count())
+                    .max()
+                    .unwrap_or(0),
+                Err(_) => 0,
+            }
+        };
 
-        // Create new leaf extent
         let new_leaf = ExtentLeaf {
             block: next_logical,
             len: 1,
             start_hi: (phys_block >> 32) as u16,
             start_lo: phys_block as u32,
         };
-        let leaf_bytes = new_leaf.to_bytes();
 
-        // Write the new leaf after existing entries
-        let entry_offset = EXTENT_HEADER_SIZE + header.entries as usize * EXTENT_LEAF_SIZE;
-        inode.i_block[entry_offset..entry_offset + EXTENT_LEAF_SIZE].copy_from_slice(&leaf_bytes);
+        if header.is_leaf() {
+            if header.entries < header.max {
+                // Simple case: space in the root leaf node
+                let leaf_bytes = new_leaf.to_bytes();
+                let entry_offset = EXTENT_HEADER_SIZE + header.entries as usize * EXTENT_LEAF_SIZE;
+                inode.i_block[entry_offset..entry_offset + EXTENT_LEAF_SIZE].copy_from_slice(&leaf_bytes);
 
-        // Update header entries count
-        let new_entries = header.entries + 1;
-        inode.i_block[2] = new_entries as u8;
-        inode.i_block[3] = (new_entries >> 8) as u8;
+                // Update header entries count
+                let new_entries = header.entries + 1;
+                inode.i_block[2] = new_entries as u8;
+                inode.i_block[3] = (new_entries >> 8) as u8;
+
+                self.write_inode(ino, inode)?;
+                log::debug!("[ext4::extent] appended extent: logical={}, phys={}", next_logical, phys_block);
+                Ok(())
+            } else {
+                // Root leaf node is full: split into index node + leaf block
+                log::info!("[ext4::extent] root node full ({}/{}), splitting extent tree",
+                    header.entries, header.max);
+                self.split_root_extent_node(ino, inode, new_leaf)
+            }
+        } else {
+            // Root is already an index node: find the right leaf and insert there
+            self.insert_extent_into_tree(ino, inode, new_leaf)
+        }
+    }
+
+    /// Split the root extent node when it's full.
+    ///
+    /// 1. Allocate a new block for the leaf node
+    /// 2. Copy all existing leaf extents to the new block
+    /// 3. Add the new extent to the new block
+    /// 4. Convert the root to an index node with one entry pointing to the leaf
+    fn split_root_extent_node(&mut self, ino: u32, inode: &mut Inode, new_extent: ExtentLeaf) -> Result<(), Ext4Error> {
+        let block_size = self.sb.block_size() as usize;
+        let group = ((ino - 1) / self.sb.inodes_per_group) as usize;
+
+        // Parse existing leaves from root
+        let existing_leaves = extent::parse_leaves(&inode.i_block);
+
+        // Allocate a new block for the leaf node
+        let leaf_block = self.allocate_block(group)?;
+
+        // Build the new leaf block
+        let max_entries_in_block = ((block_size - EXTENT_HEADER_SIZE) / EXTENT_LEAF_SIZE) as u16;
+        let total_entries = existing_leaves.len() as u16 + 1;
+
+        let mut leaf_buf = vec![0u8; block_size];
+
+        // Write leaf header
+        let leaf_header = ExtentHeader {
+            magic: extent::EXT4_EXTENT_MAGIC,
+            entries: total_entries,
+            max: max_entries_in_block,
+            depth: 0,
+            generation: 0,
+        };
+        leaf_buf[..EXTENT_HEADER_SIZE].copy_from_slice(&leaf_header.to_bytes());
+
+        // Write existing extents
+        for (i, leaf) in existing_leaves.iter().enumerate() {
+            let off = EXTENT_HEADER_SIZE + i * EXTENT_LEAF_SIZE;
+            leaf_buf[off..off + EXTENT_LEAF_SIZE].copy_from_slice(&leaf.to_bytes());
+        }
+
+        // Write the new extent
+        let new_off = EXTENT_HEADER_SIZE + existing_leaves.len() * EXTENT_LEAF_SIZE;
+        leaf_buf[new_off..new_off + EXTENT_LEAF_SIZE].copy_from_slice(&new_extent.to_bytes());
+
+        // Write the leaf block to disk
+        self.write_block(leaf_block, &leaf_buf)?;
+
+        // Convert root to an index node with depth=1
+        let first_logical = if existing_leaves.is_empty() {
+            new_extent.block
+        } else {
+            existing_leaves[0].block
+        };
+
+        // Root index header: depth=1, entries=1, max stays at 4
+        let root_header = ExtentHeader {
+            magic: extent::EXT4_EXTENT_MAGIC,
+            entries: 1,
+            max: 4, // root can hold 4 index entries (60 - 12 = 48, / 12 = 4)
+            depth: 1,
+            generation: 0,
+        };
+
+        // Write root header
+        inode.i_block = [0u8; inode::I_BLOCK_SIZE];
+        inode.i_block[..EXTENT_HEADER_SIZE].copy_from_slice(&root_header.to_bytes());
+
+        // Write the single index entry pointing to our leaf block
+        let idx = ExtentIndex {
+            block: first_logical,
+            leaf_lo: leaf_block as u32,
+            leaf_hi: (leaf_block >> 32) as u16,
+            padding: 0,
+        };
+        inode.i_block[EXTENT_HEADER_SIZE..EXTENT_HEADER_SIZE + EXTENT_INDEX_SIZE]
+            .copy_from_slice(&idx.to_bytes());
 
         self.write_inode(ino, inode)?;
-        log::debug!("[ext4::extent] appended extent: logical={}, phys={}", next_logical, phys_block);
+
+        log::info!(
+            "[ext4::extent] split root: {} leaves moved to leaf block {}, root is now depth-1 index",
+            existing_leaves.len() + 1,
+            leaf_block
+        );
+        Ok(())
+    }
+
+    /// Insert an extent into an existing multi-level extent tree.
+    ///
+    /// Walks the tree to find the correct leaf, splits if necessary.
+    fn insert_extent_into_tree(&mut self, ino: u32, inode: &mut Inode, new_extent: ExtentLeaf) -> Result<(), Ext4Error> {
+        let header = inode.extent_header().ok_or(Ext4Error::Corrupt("no extent header"))?;
+
+        if header.depth == 0 {
+            // Should not happen here, but handle gracefully
+            return Err(Ext4Error::Corrupt("expected index node, found leaf"));
+        }
+
+        // Find the correct index entry for this logical block
+        let indices = extent::parse_indices(&inode.i_block);
+        if indices.is_empty() {
+            return Err(Ext4Error::Corrupt("empty index node"));
+        }
+
+        // Find the right child: largest index.block <= new_extent.block
+        let child_idx = {
+            let target = find_index_for_insert(&indices, new_extent.block);
+            if target < indices.len() { target } else { indices.len() - 1 }
+        };
+
+        let child_phys = indices[child_idx].physical_block();
+        let child_data = self.read_block(child_phys)?;
+        let child_header = ExtentHeader::from_bytes(&child_data)
+            .ok_or(Ext4Error::Corrupt("invalid child extent header"))?;
+
+        if child_header.is_leaf() {
+            // Try to insert into this leaf
+            if child_header.entries < child_header.max {
+                // Space available in the leaf
+                let mut modified = child_data;
+                let entry_off = EXTENT_HEADER_SIZE + child_header.entries as usize * EXTENT_LEAF_SIZE;
+                modified[entry_off..entry_off + EXTENT_LEAF_SIZE].copy_from_slice(&new_extent.to_bytes());
+
+                // Update entries count
+                let new_count = child_header.entries + 1;
+                modified[2] = new_count as u8;
+                modified[3] = (new_count >> 8) as u8;
+
+                self.write_block(child_phys, &modified)?;
+                log::debug!("[ext4::extent] inserted extent into existing leaf at block {}", child_phys);
+                Ok(())
+            } else {
+                // Leaf is full: split it
+                log::info!("[ext4::extent] leaf block {} full ({}/{}), splitting",
+                    child_phys, child_header.entries, child_header.max);
+                self.split_leaf_extent_node(ino, inode, child_phys, &child_data, new_extent)
+            }
+        } else {
+            // Multi-level tree: recurse deeper (simplified -- only handle 2 levels for now)
+            log::warn!("[ext4::extent] deep extent tree (depth>1) insertion not fully supported");
+            Err(Ext4Error::UnsupportedFeature("extent tree depth > 2 for insertion"))
+        }
+    }
+
+    /// Split a full leaf extent node.
+    ///
+    /// 1. Allocate a new block for the second leaf
+    /// 2. Move the upper half of extents to the new block
+    /// 3. Add the new extent to the appropriate half
+    /// 4. Add a new index entry in the parent (root) pointing to the new leaf
+    fn split_leaf_extent_node(
+        &mut self,
+        ino: u32,
+        inode: &mut Inode,
+        old_leaf_phys: u64,
+        old_leaf_data: &[u8],
+        new_extent: ExtentLeaf,
+    ) -> Result<(), Ext4Error> {
+        let block_size = self.sb.block_size() as usize;
+        let group = ((ino - 1) / self.sb.inodes_per_group) as usize;
+
+        // Parse all leaves from the old block
+        let mut all_leaves = extent::parse_leaves(old_leaf_data);
+        all_leaves.push(new_extent);
+        // Sort by logical block number
+        all_leaves.sort_by_key(|l| l.block);
+
+        let mid = all_leaves.len() / 2;
+        let left_leaves = &all_leaves[..mid];
+        let right_leaves = &all_leaves[mid..];
+
+        let max_entries = ((block_size - EXTENT_HEADER_SIZE) / EXTENT_LEAF_SIZE) as u16;
+
+        // Rewrite the old leaf block with left half
+        let mut left_buf = vec![0u8; block_size];
+        let left_header = ExtentHeader {
+            magic: extent::EXT4_EXTENT_MAGIC,
+            entries: left_leaves.len() as u16,
+            max: max_entries,
+            depth: 0,
+            generation: 0,
+        };
+        left_buf[..EXTENT_HEADER_SIZE].copy_from_slice(&left_header.to_bytes());
+        for (i, leaf) in left_leaves.iter().enumerate() {
+            let off = EXTENT_HEADER_SIZE + i * EXTENT_LEAF_SIZE;
+            left_buf[off..off + EXTENT_LEAF_SIZE].copy_from_slice(&leaf.to_bytes());
+        }
+        self.write_block(old_leaf_phys, &left_buf)?;
+
+        // Allocate new block for right half
+        let new_leaf_phys = self.allocate_block(group)?;
+        let mut right_buf = vec![0u8; block_size];
+        let right_header = ExtentHeader {
+            magic: extent::EXT4_EXTENT_MAGIC,
+            entries: right_leaves.len() as u16,
+            max: max_entries,
+            depth: 0,
+            generation: 0,
+        };
+        right_buf[..EXTENT_HEADER_SIZE].copy_from_slice(&right_header.to_bytes());
+        for (i, leaf) in right_leaves.iter().enumerate() {
+            let off = EXTENT_HEADER_SIZE + i * EXTENT_LEAF_SIZE;
+            right_buf[off..off + EXTENT_LEAF_SIZE].copy_from_slice(&leaf.to_bytes());
+        }
+        self.write_block(new_leaf_phys, &right_buf)?;
+
+        // Add a new index entry in the root pointing to the new leaf
+        let root_header = inode.extent_header().ok_or(Ext4Error::Corrupt("no extent header"))?;
+        if root_header.entries >= root_header.max {
+            log::error!("[ext4::extent] root index node is also full, cannot add new index entry");
+            return Err(Ext4Error::UnsupportedFeature("root index node overflow (3+ level tree)"));
+        }
+
+        // First logical block of the right half
+        let right_first_logical = right_leaves[0].block;
+
+        let new_idx = ExtentIndex {
+            block: right_first_logical,
+            leaf_lo: new_leaf_phys as u32,
+            leaf_hi: (new_leaf_phys >> 32) as u16,
+            padding: 0,
+        };
+
+        // Append the new index entry
+        let entry_off = EXTENT_HEADER_SIZE + root_header.entries as usize * EXTENT_INDEX_SIZE;
+        inode.i_block[entry_off..entry_off + EXTENT_INDEX_SIZE].copy_from_slice(&new_idx.to_bytes());
+
+        // Update root entries count
+        let new_count = root_header.entries + 1;
+        inode.i_block[2] = new_count as u8;
+        inode.i_block[3] = (new_count >> 8) as u8;
+
+        self.write_inode(ino, inode)?;
+
+        log::info!(
+            "[ext4::extent] split leaf: left={} extents at block {}, right={} extents at block {}",
+            left_leaves.len(),
+            old_leaf_phys,
+            right_leaves.len(),
+            new_leaf_phys
+        );
         Ok(())
     }
 
@@ -703,6 +1286,8 @@ impl<D: BlockDevice> Ext4Fs<D> {
                 if inode.is_dir() {
                     return Err(Ext4Error::IsADirectory);
                 }
+                // Check encryption
+                encrypt::check_encryption(inode.flags)?;
                 log::debug!("[ext4::write_file] overwriting existing file at inode {}", ino);
                 // TODO: free old blocks before rewriting
                 (ino, inode)
@@ -832,11 +1417,14 @@ impl<D: BlockDevice> Ext4Fs<D> {
     /// Write the superblock and block group descriptors back to disk.
     ///
     /// Call this after any metadata-modifying operation to persist the state.
-    pub fn sync_metadata(&self) -> Result<(), Ext4Error> {
+    pub fn sync_metadata(&mut self) -> Result<(), Ext4Error> {
         log::info!("[ext4::sync] writing superblock and block group descriptors to disk");
 
-        // Write superblock
-        let sb_bytes = self.sb.to_bytes();
+        // Write superblock (with checksum if enabled)
+        let mut sb_bytes = self.sb.to_bytes();
+        if self.has_metadata_csum {
+            crc32c::compute_superblock_checksum(&mut sb_bytes);
+        }
         self.device.write_bytes(SUPERBLOCK_OFFSET, &sb_bytes)?;
 
         // Write block group descriptor table
@@ -846,7 +1434,18 @@ impl<D: BlockDevice> Ext4Fs<D> {
 
         for (i, group) in self.groups.iter().enumerate() {
             let offset = gdt_offset + (i * desc_size) as u64;
-            let bytes = group.to_bytes(desc_size);
+            let mut bytes = group.to_bytes(desc_size);
+
+            // Compute and set bgd checksum if metadata checksums are enabled
+            if self.has_metadata_csum {
+                let csum = crc32c::compute_bgd_checksum(self.csum_seed, i as u32, &bytes);
+                // Write checksum at offset 0x1E
+                if bytes.len() >= 0x20 {
+                    bytes[0x1E] = csum as u8;
+                    bytes[0x1F] = (csum >> 8) as u8;
+                }
+            }
+
             self.device.write_bytes(offset, &bytes)?;
         }
 
@@ -854,6 +1453,21 @@ impl<D: BlockDevice> Ext4Fs<D> {
         log::info!("[ext4::sync] metadata sync complete");
         Ok(())
     }
+}
+
+/// Find the index entry position for inserting a new extent with the given logical block.
+fn find_index_for_insert(indices: &[ExtentIndex], logical_block: u32) -> usize {
+    let mut lo = 0usize;
+    let mut hi = indices.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if indices[mid].block <= logical_block {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 { 0 } else { lo - 1 }
 }
 
 /// Split an absolute path into (parent_directory, filename).

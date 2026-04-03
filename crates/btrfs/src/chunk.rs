@@ -279,11 +279,10 @@ impl ChunkMap {
         }
     }
 
-    /// Resolve a logical address to a physical (device, offset) pair.
+    /// Find the chunk map entry containing the given logical address.
     ///
-    /// Returns the physical byte offset on device stripe[0]. For RAID configurations,
-    /// the caller may need to consider additional stripes.
-    pub fn resolve(&self, logical: u64) -> Option<(u64, u64)> {
+    /// Returns a reference to the entry and the offset within the chunk.
+    fn find_entry(&self, logical: u64) -> Option<(&ChunkMapEntry, u64)> {
         // Binary search for the chunk containing this logical address
         let mut lo = 0usize;
         let mut hi = self.entries.len();
@@ -311,17 +310,47 @@ impl ChunkMap {
         }
 
         let offset_in_chunk = logical - entry.logical;
+        Some((entry, offset_in_chunk))
+    }
 
-        // For single/DUP/RAID1, use the first stripe directly
-        if let Some(stripe) = entry.chunk.stripes.first() {
-            let physical = stripe.offset + offset_in_chunk;
-            log::trace!("[btrfs::chunk] resolved logical 0x{:X} -> devid={}, physical=0x{:X} (chunk at 0x{:X})",
-                logical, stripe.devid, physical, entry.logical);
-            return Some((stripe.devid, physical));
+    /// Resolve a logical address to a physical (device, offset) pair for reading.
+    ///
+    /// RAID-aware resolution:
+    /// - **Single/DUP/RAID1/RAID1C3/RAID1C4**: read from first stripe (any mirror works).
+    /// - **RAID0**: calculate which stripe based on offset within chunk modulo stripe_len,
+    ///   then compute the physical offset on the correct device.
+    /// - **RAID10**: striped mirrors -- select mirror group via RAID0 logic, read from
+    ///   first sub-stripe within that group.
+    pub fn resolve(&self, logical: u64) -> Option<(u64, u64)> {
+        let (entry, offset_in_chunk) = self.find_entry(logical)?;
+        let chunk = &entry.chunk;
+
+        let result = resolve_for_chunk(chunk, offset_in_chunk);
+        if let Some((devid, physical)) = result {
+            log::trace!("[btrfs::chunk] resolved logical 0x{:X} -> devid={}, physical=0x{:X} (chunk at 0x{:X}, type=0x{:X})",
+                logical, devid, physical, entry.logical, chunk.chunk_type);
+        }
+        result
+    }
+
+    /// Resolve a logical address to ALL physical locations for writing.
+    ///
+    /// For mirrored profiles (RAID1, DUP, RAID1C3, RAID1C4), returns all copies
+    /// that must be written. For RAID0, returns the single stripe target.
+    /// For RAID10, returns all sub-stripes within the target stripe group.
+    pub fn resolve_write(&self, logical: u64) -> Option<Vec<(u64, u64)>> {
+        let (entry, offset_in_chunk) = self.find_entry(logical)?;
+        let chunk = &entry.chunk;
+
+        let results = resolve_write_for_chunk(chunk, offset_in_chunk);
+        if results.is_empty() {
+            log::error!("[btrfs::chunk] no write targets for logical 0x{:X}", logical);
+            return None;
         }
 
-        log::error!("[btrfs::chunk] chunk at logical 0x{:X} has no stripes", entry.logical);
-        None
+        log::trace!("[btrfs::chunk] resolved write logical 0x{:X} -> {} targets (type=0x{:X})",
+            logical, results.len(), chunk.chunk_type);
+        Some(results)
     }
 
     /// Parse the sys_chunk_array from the superblock to bootstrap chunk mappings.
@@ -395,6 +424,120 @@ impl fmt::Debug for ChunkMap {
             .field("entries", &self.entries.len())
             .finish()
     }
+}
+
+/// Resolve a read address within a chunk, handling all RAID profiles.
+///
+/// Returns (devid, physical_offset) for the target read location.
+fn resolve_for_chunk(chunk: &ChunkItem, offset_in_chunk: u64) -> Option<(u64, u64)> {
+    if chunk.stripes.is_empty() {
+        log::error!("[btrfs::chunk] chunk has no stripes");
+        return None;
+    }
+
+    let ct = chunk.chunk_type;
+    let stripe_len = if chunk.stripe_len > 0 { chunk.stripe_len } else { 65536 };
+
+    if ct & chunk_type::RAID0 != 0 {
+        // RAID0: data is striped across all devices.
+        // stripe_nr = offset / stripe_len
+        // stripe_index = stripe_nr % num_stripes
+        // stripe_offset = (stripe_nr / num_stripes) * stripe_len + (offset % stripe_len)
+        let num_stripes = chunk.num_stripes as u64;
+        if num_stripes == 0 {
+            return None;
+        }
+        let stripe_nr = offset_in_chunk / stripe_len;
+        let stripe_index = (stripe_nr % num_stripes) as usize;
+        let stripe_offset = (stripe_nr / num_stripes) * stripe_len + (offset_in_chunk % stripe_len);
+
+        let stripe = chunk.stripes.get(stripe_index)?;
+        let physical = stripe.offset + stripe_offset;
+        log::trace!("[btrfs::chunk] RAID0: stripe_nr={}, index={}, offset=0x{:X}", stripe_nr, stripe_index, stripe_offset);
+        Some((stripe.devid, physical))
+    } else if ct & chunk_type::RAID10 != 0 {
+        // RAID10: striped mirrors. sub_stripes copies per stripe group.
+        // Stripe across (num_stripes / sub_stripes) groups, each group has sub_stripes mirrors.
+        let sub_stripes = chunk.sub_stripes.max(1) as u64;
+        let num_groups = (chunk.num_stripes as u64) / sub_stripes;
+        if num_groups == 0 {
+            return None;
+        }
+        let stripe_nr = offset_in_chunk / stripe_len;
+        let group_index = stripe_nr % num_groups;
+        let stripe_offset = (stripe_nr / num_groups) * stripe_len + (offset_in_chunk % stripe_len);
+
+        // Read from first sub-stripe in the group
+        let stripe_index = (group_index * sub_stripes) as usize;
+        let stripe = chunk.stripes.get(stripe_index)?;
+        let physical = stripe.offset + stripe_offset;
+        log::trace!("[btrfs::chunk] RAID10: group={}, sub=0, offset=0x{:X}", group_index, stripe_offset);
+        Some((stripe.devid, physical))
+    } else {
+        // Single, DUP, RAID1, RAID1C3, RAID1C4: all stripes hold the same data.
+        // For reads, just use the first stripe.
+        let stripe = chunk.stripes.first()?;
+        let physical = stripe.offset + offset_in_chunk;
+        Some((stripe.devid, physical))
+    }
+}
+
+/// Resolve all write targets within a chunk, handling all RAID profiles.
+///
+/// Returns a list of (devid, physical_offset) pairs that must all be written.
+fn resolve_write_for_chunk(chunk: &ChunkItem, offset_in_chunk: u64) -> Vec<(u64, u64)> {
+    let mut targets = Vec::new();
+
+    if chunk.stripes.is_empty() {
+        return targets;
+    }
+
+    let ct = chunk.chunk_type;
+    let stripe_len = if chunk.stripe_len > 0 { chunk.stripe_len } else { 65536 };
+
+    if ct & chunk_type::RAID0 != 0 {
+        // RAID0: write to exactly one stripe (no redundancy).
+        let num_stripes = chunk.num_stripes as u64;
+        if num_stripes == 0 {
+            return targets;
+        }
+        let stripe_nr = offset_in_chunk / stripe_len;
+        let stripe_index = (stripe_nr % num_stripes) as usize;
+        let stripe_offset = (stripe_nr / num_stripes) * stripe_len + (offset_in_chunk % stripe_len);
+
+        if let Some(stripe) = chunk.stripes.get(stripe_index) {
+            targets.push((stripe.devid, stripe.offset + stripe_offset));
+        }
+    } else if ct & chunk_type::RAID10 != 0 {
+        // RAID10: write to all sub-stripes in the target group.
+        let sub_stripes = chunk.sub_stripes.max(1) as u64;
+        let num_groups = (chunk.num_stripes as u64) / sub_stripes;
+        if num_groups == 0 {
+            return targets;
+        }
+        let stripe_nr = offset_in_chunk / stripe_len;
+        let group_index = stripe_nr % num_groups;
+        let stripe_offset = (stripe_nr / num_groups) * stripe_len + (offset_in_chunk % stripe_len);
+
+        let base = (group_index * sub_stripes) as usize;
+        for i in 0..sub_stripes as usize {
+            if let Some(stripe) = chunk.stripes.get(base + i) {
+                targets.push((stripe.devid, stripe.offset + stripe_offset));
+            }
+        }
+    } else if ct & (chunk_type::RAID1 | chunk_type::DUP | chunk_type::RAID1C3 | chunk_type::RAID1C4) != 0 {
+        // Mirrored: write to ALL stripes (they hold identical data).
+        for stripe in &chunk.stripes {
+            targets.push((stripe.devid, stripe.offset + offset_in_chunk));
+        }
+    } else {
+        // Single stripe: write to the one stripe.
+        if let Some(stripe) = chunk.stripes.first() {
+            targets.push((stripe.devid, stripe.offset + offset_in_chunk));
+        }
+    }
+
+    targets
 }
 
 // --- Little-endian byte helpers ---

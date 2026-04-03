@@ -16,8 +16,10 @@ ml-kem = { version = "0.2", default-features = false }
 ml-dsa = { version = "0.1.0-rc.8", default-features = false }
 
 # Classical crypto
-x25519-dalek = { version = "2", default-features = false }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+
+# KEM traits (Encapsulate, Decapsulate) — re-exported via ml-kem
 
 # AEAD cipher
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }

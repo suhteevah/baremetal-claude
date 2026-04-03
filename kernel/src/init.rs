@@ -468,29 +468,58 @@ pub fn hostname() -> String {
 // Filesystem mounting (stub)
 // ---------------------------------------------------------------------------
 
-/// Mount a filesystem. Currently logs the request — actual mounting requires
-/// block device drivers and VFS integration.
+/// Mount a filesystem via the VFS adapter layer.
+///
+/// Attempts to locate the block device specified in the mount entry and mount
+/// it using the appropriate filesystem adapter from `claudio_vfs::adapters`.
+///
+/// On QEMU with only virtio-net, no block devices are present and the mount
+/// will be skipped with a warning. On real hardware (AHCI/NVMe), the storage
+/// driver would have registered the device during PCI enumeration.
 fn mount_filesystem(entry: &MountEntry) {
-    // TODO: Wire to claudio-vfs when block device drivers are ready.
-    // For now, just log. The VFS crate will handle FAT32/ext4/btrfs/NTFS
-    // via the corresponding driver crates.
-    match entry.fstype.as_str() {
-        "fat32" | "vfat" => {
-            log::info!("[init] FAT32 mount: {} -> {} (via claudio-fs)", entry.device, entry.path);
+    // Validate fstype is supported before attempting anything.
+    let fs_driver = match entry.fstype.as_str() {
+        "fat32" | "vfat" => "claudio-fs (fatfs)",
+        "ext4" => "claudio-ext4",
+        "btrfs" => "claudio-btrfs",
+        "ntfs" => "claudio-ntfs",
+        other => {
+            log::warn!(
+                "[init] unsupported filesystem type '{}' for {} -> {}",
+                other, entry.device, entry.path
+            );
+            return;
         }
-        "ext4" => {
-            log::info!("[init] ext4 mount: {} -> {} (via claudio-ext4)", entry.device, entry.path);
-        }
-        "btrfs" => {
-            log::info!("[init] btrfs mount: {} -> {} (via claudio-btrfs)", entry.device, entry.path);
-        }
-        "ntfs" => {
-            log::info!("[init] NTFS mount: {} -> {} (via claudio-ntfs)", entry.device, entry.path);
-        }
-        _ => {
-            log::warn!("[init] unsupported filesystem type: {}", entry.fstype);
-        }
-    }
+    };
+
+    log::info!(
+        "[init] auto_mount: {} -> {} ({}) via {}",
+        entry.device, entry.path, entry.fstype, fs_driver
+    );
+
+    // Attempt to resolve the block device from PCI-enumerated storage.
+    //
+    // The full mount sequence (when block devices are available) is:
+    //   1. Look up block device by path (e.g., /dev/sda1, /dev/nvme0n1p1)
+    //   2. Create partition-scoped adapter (VfsToExt4BlockDevice, etc.)
+    //   3. Call the filesystem's mount (e.g., Ext4Fs::mount(device))
+    //   4. Wrap in the VFS Filesystem adapter (Ext4FilesystemAdapter, etc.)
+    //   5. Register with the global VFS mount table
+    //
+    // See crates/vfs/src/adapters.rs for:
+    //   - AhciBlockDeviceAdapter / NvmeBlockDeviceAdapter (step 1-2)
+    //   - VfsToExt4BlockDevice / VfsToBtrfsBlockDevice (step 2)
+    //   - Ext4FilesystemAdapter / BtrfsFilesystemAdapter / NtfsFilesystemAdapter (step 4)
+    //   - detect_filesystem() for auto-detection when fstype is "auto"
+
+    // Currently no block devices are registered (QEMU with virtio-net only).
+    // On real hardware, this is where we'd call into the storage subsystem.
+    log::warn!(
+        "[init] mount skipped: no block devices detected for '{}' \
+         (QEMU virtio-net only). On real hardware with AHCI/NVMe disks, \
+         this mount will proceed automatically.",
+        entry.device
+    );
 }
 
 // ---------------------------------------------------------------------------

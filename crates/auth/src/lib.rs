@@ -48,6 +48,8 @@ pub enum AuthError {
     Expired,
     /// The user denied the authorization request.
     Denied,
+    /// The requested auth method is not available.
+    NotAvailable(String),
 }
 
 impl core::fmt::Display for AuthError {
@@ -58,6 +60,7 @@ impl core::fmt::Display for AuthError {
             AuthError::NetworkError => write!(f, "network error"),
             AuthError::Expired => write!(f, "device code expired"),
             AuthError::Denied => write!(f, "authorization denied by user"),
+            AuthError::NotAvailable(msg) => write!(f, "not available: {}", msg),
         }
     }
 }
@@ -368,28 +371,27 @@ pub fn build_refresh_request(client_id: &str, refresh_token: &str) -> (String, V
 // High-level stubs (need networking to complete)
 // ---------------------------------------------------------------------------
 
-/// Placeholder for the full boot-time authentication flow.
+/// Attempt the OAuth device authorization flow.
 ///
-/// The actual implementation will:
-/// 1. Check FAT32 for persisted credentials
-/// 2. If valid and not expired, return them
-/// 3. If expired and has refresh token, attempt refresh
-/// 4. Otherwise, run device authorization flow
-pub async fn authenticate() -> Credentials {
-    log::info!("[auth] checking for saved credentials...");
-    // TODO: integrate with fs-persist to load saved creds
-    // TODO: integrate with net to perform HTTP requests
-    todo!("auth flow — needs networking + fs-persist integration")
+/// Device flow is not available in ClaudioOS — authentication is handled
+/// via claude.ai email+code flow or compile-time API key. The kernel's
+/// `session_manager` orchestrates auth; this crate provides the building
+/// blocks (request builders, response parsers, credential types).
+///
+/// Returns `Err(AuthError::NotAvailable)` with a guidance message.
+pub async fn authenticate() -> Result<Credentials, AuthError> {
+    log::warn!("[auth] authenticate() called — device flow is not available");
+    Err(AuthError::NotAvailable(String::from(
+        "Device flow not available — use claude.ai email+code authentication instead",
+    )))
 }
 
-/// Background task that periodically checks token expiry and refreshes.
+/// Background token refresh loop (no-op stub).
 ///
-/// Should be spawned as an async task after initial authentication succeeds.
+/// Token refresh is now handled by the kernel's `session_manager`. This
+/// function exists only for API compatibility and returns immediately.
 pub async fn token_refresh_loop(_creds: Credentials) {
-    loop {
-        log::trace!("[auth] refresh check");
-        // TODO: async sleep (timer-interrupt driven), then check expiry
-        // TODO: if within refresh window, call build_refresh_request + HTTP POST
-        todo!("async sleep + refresh — needs executor timer + networking")
-    }
+    log::warn!(
+        "[auth] token_refresh_loop() called but refresh is handled by session_manager — returning"
+    );
 }

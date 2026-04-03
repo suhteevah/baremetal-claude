@@ -422,6 +422,146 @@ fn build_leaf_buf(
     Some(())
 }
 
+/// Insert an item into a node, splitting the internal node if needed.
+///
+/// Adds a new key_ptr into an internal node. If the node is full, splits it.
+/// Returns `Some((left_buf, right_buf, split_key, right_bytenr))` if a split occurred,
+/// or `None` if the insert succeeded in-place.
+///
+/// `node_buf` is modified in place on success without split.
+pub fn insert_into_node(
+    node_buf: &mut Vec<u8>,
+    nodesize: u32,
+    new_key: &BtrfsKey,
+    new_blockptr: u64,
+    generation: u64,
+) -> Option<()> {
+    use crate::item::{BtrfsKeyPtr, BTRFS_KEY_PTR_SIZE};
+
+    let header = BtrfsHeader::from_bytes(node_buf)?;
+    let nritems = header.nritems as usize;
+
+    // Find insertion point
+    let mut insert_idx = nritems;
+    for i in 0..nritems {
+        let ptr_off = BTRFS_HEADER_SIZE + i * BTRFS_KEY_PTR_SIZE;
+        if let Some(ptr) = BtrfsKeyPtr::from_bytes(&node_buf[ptr_off..]) {
+            if ptr.key >= *new_key {
+                insert_idx = i;
+                break;
+            }
+        }
+    }
+
+    // Check if there's enough space
+    let items_end = BTRFS_HEADER_SIZE + (nritems + 1) * BTRFS_KEY_PTR_SIZE;
+    if items_end > nodesize as usize {
+        log::warn!("[btrfs::tree] internal node full: need {} ptrs, max {}",
+            nritems + 1, (nodesize as usize - BTRFS_HEADER_SIZE) / BTRFS_KEY_PTR_SIZE);
+        return None;
+    }
+
+    // Shift existing key_ptrs after insert_idx to the right
+    if insert_idx < nritems {
+        let src_start = BTRFS_HEADER_SIZE + insert_idx * BTRFS_KEY_PTR_SIZE;
+        let src_end = BTRFS_HEADER_SIZE + nritems * BTRFS_KEY_PTR_SIZE;
+        let shift_len = src_end - src_start;
+        for i in (0..shift_len).rev() {
+            node_buf[src_start + BTRFS_KEY_PTR_SIZE + i] = node_buf[src_start + i];
+        }
+    }
+
+    // Write the new key_ptr
+    let new_ptr = BtrfsKeyPtr {
+        key: *new_key,
+        blockptr: new_blockptr,
+        generation,
+    };
+    let ptr_bytes = new_ptr.to_bytes();
+    let ptr_off = BTRFS_HEADER_SIZE + insert_idx * BTRFS_KEY_PTR_SIZE;
+    node_buf[ptr_off..ptr_off + BTRFS_KEY_PTR_SIZE].copy_from_slice(&ptr_bytes);
+
+    // Update header
+    let new_nritems = (nritems + 1) as u32;
+    write_u32(node_buf, 0x60, new_nritems);
+    write_u64(node_buf, 0x50, generation);
+
+    BtrfsHeader::update_csum(node_buf);
+
+    log::debug!("[btrfs::tree] inserted key_ptr at slot {} in internal node, nritems now {}", insert_idx, new_nritems);
+    Some(())
+}
+
+/// Split an internal node in half.
+///
+/// Returns `(left_buf, right_buf, split_key)` where split_key is the first key
+/// in the right node.
+pub fn split_node(
+    node_buf: &[u8],
+    nodesize: u32,
+    right_bytenr: u64,
+    generation: u64,
+) -> Option<(Vec<u8>, Vec<u8>, BtrfsKey)> {
+    use crate::item::{BtrfsKeyPtr, BTRFS_KEY_PTR_SIZE};
+
+    let header = BtrfsHeader::from_bytes(node_buf)?;
+    let nritems = header.nritems as usize;
+
+    if nritems < 2 {
+        return None;
+    }
+
+    let split_point = nritems / 2;
+
+    // Parse all key_ptrs
+    let mut ptrs = Vec::with_capacity(nritems);
+    for i in 0..nritems {
+        let off = BTRFS_HEADER_SIZE + i * BTRFS_KEY_PTR_SIZE;
+        if let Some(ptr) = BtrfsKeyPtr::from_bytes(&node_buf[off..]) {
+            ptrs.push(ptr);
+        }
+    }
+
+    let split_key = ptrs[split_point].key;
+
+    // Build left node
+    let mut left_buf = alloc::vec![0u8; nodesize as usize];
+    let left_header_bytes = {
+        let mut h = header.to_bytes();
+        write_u32(&mut h, 0x60, split_point as u32);
+        write_u64(&mut h, 0x50, generation);
+        h
+    };
+    left_buf[..BTRFS_HEADER_SIZE].copy_from_slice(&left_header_bytes);
+    for (i, ptr) in ptrs[..split_point].iter().enumerate() {
+        let off = BTRFS_HEADER_SIZE + i * BTRFS_KEY_PTR_SIZE;
+        left_buf[off..off + BTRFS_KEY_PTR_SIZE].copy_from_slice(&ptr.to_bytes());
+    }
+    BtrfsHeader::update_csum(&mut left_buf);
+
+    // Build right node
+    let mut right_buf = alloc::vec![0u8; nodesize as usize];
+    let right_count = nritems - split_point;
+    let right_header_bytes = {
+        let mut h = header.to_bytes();
+        write_u32(&mut h, 0x60, right_count as u32);
+        write_u64(&mut h, 0x50, generation);
+        write_u64(&mut h, 0x30, right_bytenr);
+        h
+    };
+    right_buf[..BTRFS_HEADER_SIZE].copy_from_slice(&right_header_bytes);
+    for (i, ptr) in ptrs[split_point..].iter().enumerate() {
+        let off = BTRFS_HEADER_SIZE + i * BTRFS_KEY_PTR_SIZE;
+        right_buf[off..off + BTRFS_KEY_PTR_SIZE].copy_from_slice(&ptr.to_bytes());
+    }
+    BtrfsHeader::update_csum(&mut right_buf);
+
+    log::info!("[btrfs::tree] split internal node: left={} ptrs, right={} ptrs, split_key={}",
+        split_point, right_count, split_key);
+
+    Some((left_buf, right_buf, split_key))
+}
+
 // --- Byte helpers ---
 
 #[inline]
@@ -432,4 +572,13 @@ fn write_u32(buf: &mut [u8], offset: usize, val: u32) {
 #[inline]
 fn write_u64(buf: &mut [u8], offset: usize, val: u64) {
     buf[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
+}
+
+#[inline]
+#[allow(dead_code)]
+fn read_u64(buf: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+        buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+    ])
 }

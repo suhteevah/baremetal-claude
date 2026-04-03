@@ -150,6 +150,60 @@ fn compile_handler(body: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// VFS + command tool handlers
+// ---------------------------------------------------------------------------
+
+/// Initialize the file_read, file_write, list_directory, and execute_command
+/// tool handlers. Called once during kernel init alongside `init_compile_handler`.
+///
+/// # Safety
+/// Must be called once from a single thread during init.
+pub unsafe fn init_tool_handlers() {
+    claudio_api::tools::set_file_read_handler(file_read_handler);
+    claudio_api::tools::set_file_write_handler(file_write_handler);
+    claudio_api::tools::set_list_directory_handler(list_directory_handler);
+    claudio_api::tools::set_execute_command_handler(execute_command_handler);
+    log::info!("[agent_loop] VFS + command tool handlers registered");
+}
+
+/// file_read handler — reads from the kernel's VFS (fs-persist).
+///
+/// Currently stubs with a log message since FAT32 is not yet mounted.
+fn file_read_handler(path: &str) -> Result<String, String> {
+    log::info!("[tool_handler] file_read: {}", path);
+    // TODO: delegate to fs-persist once FAT32 is mounted
+    Err(String::from("VFS not mounted — FAT32 filesystem not yet available"))
+}
+
+/// file_write handler — writes to the kernel's VFS (fs-persist).
+///
+/// Currently stubs with a log message since FAT32 is not yet mounted.
+fn file_write_handler(path: &str, content: &str) -> Result<(), String> {
+    log::info!("[tool_handler] file_write: {} ({} bytes)", path, content.len());
+    // TODO: delegate to fs-persist once FAT32 is mounted
+    Err(String::from("VFS not mounted — FAT32 filesystem not yet available"))
+}
+
+/// list_directory handler — lists directory contents from the kernel's VFS.
+///
+/// Currently stubs with a log message since FAT32 is not yet mounted.
+fn list_directory_handler(path: &str) -> Result<String, String> {
+    log::info!("[tool_handler] list_directory: {}", path);
+    // TODO: delegate to fs-persist once FAT32 is mounted
+    Err(String::from("VFS not mounted — FAT32 filesystem not yet available"))
+}
+
+/// execute_command handler — executes a command via the kernel's shell.
+///
+/// ClaudioOS has no POSIX shell. This handler interprets a limited set of
+/// built-in commands. Currently stubs with a log message.
+fn execute_command_handler(command: &str) -> Result<String, String> {
+    log::info!("[tool_handler] execute_command: {}", command);
+    // TODO: implement a minimal command interpreter for built-in ops
+    Err(String::from("shell not available — ClaudioOS has no process model yet"))
+}
+
+// ---------------------------------------------------------------------------
 // Public API: core tool-use loop (used by dashboard)
 // ---------------------------------------------------------------------------
 
