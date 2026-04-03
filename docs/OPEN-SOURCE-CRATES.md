@@ -1,6 +1,6 @@
 # ClaudioOS Open-Source Crates
 
-ClaudioOS has published 35 crates as standalone, reusable libraries. Each crate is
+ClaudioOS has 52 workspace crates across 35 published GitHub repos. Each crate is
 `#![no_std]` and can be used independently of ClaudioOS in any bare-metal or
 embedded Rust project.
 
@@ -41,8 +41,8 @@ embedded Rust project.
 
 | # | Crate | Lines | Description |
 |---|-------|-------|-------------|
-| 18 | **sshd-pqc** | 4,191 | Post-quantum SSH daemon: ML-KEM-768 + X25519 hybrid KEX, ML-DSA-65 + Ed25519 host keys, RFC 4253/4252/4254 |
-| 19 | **net-nostd** | 3,172 | Network stack: VirtIO-net driver, smoltcp TCP/IP, TLS 1.3, HTTP/SSE client |
+| 44 | **sshd-pqc** | 4,191 | Post-quantum SSH daemon: ML-KEM-768 + X25519 hybrid KEX, ML-DSA-65 + Ed25519 host keys, RFC 4253/4252/4254 |
+| 45 | **net-nostd** | 3,172 | Network stack: VirtIO-net driver, smoltcp TCP/IP, TLS 1.3, HTTP/SSE client |
 
 ### Language / Tool Crates
 
@@ -51,34 +51,42 @@ embedded Rust project.
 | 20 | **python-lite** | 2,388 | Minimal Python interpreter: tokenizer, parser, AST evaluator, variables, loops, functions (28 tests) |
 | 21 | **js-lite** | 5,229 | Minimal JavaScript evaluator for Cloudflare challenge solving: tokenizer, parser, eval |
 | 22 | **rustc-lite** | 142 | Bare-metal Rust compiler using Cranelift code generator backend |
-| 23 | **editor-nostd** | 534 | Nano-like text editor: insert/delete, line navigation, save/load (11 tests) |
-| 24 | **shell-nostd** | 2,884 | AI-native shell: 45+ builtins, pipes, environment variables, natural language mode |
-| 25 | **terminal-nostd** | 2,930 | Framebuffer terminal: split panes, ANSI/VTE parsing, font rendering, scroll |
-| 26 | **agent-nostd** | 501 | Agent session lifecycle: tool loop (20 rounds), conversation state management |
+| 23 | **go-lite** | -- | Go interpreter: goroutines, channels, interfaces, structs, slices, maps |
+| 24 | **cpp-lite** | -- | C++ interpreter: classes, templates, RAII, virtual dispatch, STL subset |
+| 25 | **lua-lite** | -- | Lua interpreter: tables, metatables, coroutines, closures, pattern matching |
+| 26 | **ts-lite** | -- | TypeScript interpreter: type checking, interfaces, generics, enums, modules |
+| 27 | **jvm-lite** | -- | JVM bytecode interpreter: class loading, garbage collector, threads, exceptions |
+| 28 | **wasm-runtime** | -- | WebAssembly runtime: module validation, execution engine, WASI subset |
+| 29 | **cc-lite** | -- | C interpreter: pointers, structs, unions, malloc/free, preprocessor macros |
+| 30 | **asm-x86** | -- | x86-64 assembler: Intel syntax, labels, relocations, ELF output |
+| 31 | **editor-nostd** | 534 | Nano-like text editor: insert/delete, line navigation, save/load (11 tests) |
+| 32 | **shell-nostd** | 2,884 | AI-native shell: 45+ builtins, pipes, environment variables, natural language mode |
+| 33 | **terminal-nostd** | 2,930 | Framebuffer terminal: split panes, ANSI/VTE parsing, font rendering, scroll |
+| 34 | **agent-nostd** | 501 | Agent session lifecycle: tool loop (20 rounds), conversation state management |
 
 ### Windows Compatibility Crates
 
 | # | Crate | Lines | Description |
 |---|-------|-------|-------------|
-| 27 | **pe-loader-nostd** | 1,497 | PE/COFF binary loader: parsing, section mapping, relocation, import resolution |
-| 28 | **win32-nostd** | 10,458 | Win32 API layer: kernel32, user32, gdi32, DirectWrite, Direct2D, WASAPI, XInput, WIC |
-| 29 | **dotnet-clr-nostd** | 5,179 | .NET Common Language Runtime: PE/CLI loader, IL interpreter, garbage collector, BCL |
-| 30 | **winrt-nostd** | 1,676 | Windows Runtime API projection: activation factories, metadata parsing, async patterns |
+| 35 | **pe-loader-nostd** | 1,497 | PE/COFF binary loader: parsing, section mapping, relocation, import resolution |
+| 36 | **win32-nostd** | 10,458 | Win32 API layer: kernel32, user32, gdi32, DirectWrite, Direct2D, WASAPI, XInput, WIC |
+| 37 | **dotnet-clr-nostd** | 5,179 | .NET Common Language Runtime: PE/CLI loader, IL interpreter, garbage collector, BCL |
+| 38 | **winrt-nostd** | 1,676 | Windows Runtime API projection: activation factories, metadata parsing, async patterns |
 
 ### Graphics Crates
 
 | # | Crate | Lines | Description |
 |---|-------|-------|-------------|
-| 31 | **vulkan-nostd** | 3,811 | Vulkan 1.3 GPU driver: instance, device, swapchain, command buffers, pipeline, shaders |
-| 32 | **dxvk-bridge-nostd** | 2,039 | DirectX 9/10/11 to Vulkan translation layer (DXVK-style), D3D device/context emulation |
+| 39 | **vulkan-nostd** | 3,811 | Vulkan 1.3 GPU driver: instance, device, swapchain, command buffers, pipeline, shaders |
+| 40 | **dxvk-bridge-nostd** | 2,039 | DirectX 9/10/11 to Vulkan translation layer (DXVK-style), D3D device/context emulation |
 
 ### Web / Browser Crates
 
 | # | Crate | Lines | Description |
 |---|-------|-------|-------------|
-| 33 | **wraith-dom** | 2,070 | no_std HTML parser with CSS selector matching and form field detection (32 tests) |
-| 34 | **wraith-render** | 1,225 | HTML document to text-mode character grid renderer (12 tests) |
-| 35 | **wraith-transport** | 572 | HTTP/HTTPS client over smoltcp TCP/IP stack |
+| 41 | **wraith-dom** | 2,070 | no_std HTML parser with CSS selector matching and form field detection (32 tests) |
+| 42 | **wraith-render** | 1,225 | HTML document to text-mode character grid renderer (12 tests) |
+| 43 | **wraith-transport** | 572 | HTTP/HTTPS client over smoltcp TCP/IP stack |
 
 ---
 

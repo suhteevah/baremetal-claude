@@ -4,7 +4,7 @@ A bare-metal Rust operating system purpose-built for running multiple AI coding 
 (Anthropic Claude) simultaneously. No Linux kernel, no POSIX, no JavaScript runtime --
 just Rust, UEFI, and direct HTTPS to Claude.
 
-**44 crates. 56 kernel modules. ~269,000 lines of Rust. 428 tests. Zero external OS dependencies.**
+**52 crates. 56 kernel modules. 563 source files. 294,710 lines of Rust. 12 languages. 0 lines of C.**
 
 ClaudioOS boots your machine into a split-pane terminal dashboard where each pane is an
 independent Claude agent session with tool use (text editor, Python interpreter, Rust
@@ -44,7 +44,7 @@ handshakes to SSE streaming -- is a single-address-space async Rust application.
 - **SMP multi-core** -- APIC-mode interrupt routing, AP core startup via SIPI, work-stealing scheduler
 - **Post-quantum SSH** -- ML-KEM-768 + X25519 hybrid KEX, ML-DSA-65 host keys, port 22
 - **Inter-agent IPC** -- message bus, named channels, shared memory, 8 IPC tools for Claude agents
-- **Dev tools** -- Python interpreter, JavaScript evaluator, Rust compiler (Cranelift JIT), nano-like editor
+- **12 native languages** -- Python, JavaScript, Rust (Cranelift JIT), Go, C++, Lua, TypeScript, JVM bytecode, WebAssembly, C, x86 assembly, plus nano-like editor
 - **Git client** -- native git clone, commit, push, pull, diff, log, branch, status over HTTPS
 - **Email client** -- SMTP send and IMAP receive, MIME parsing, in-kernel email composition
 - **Text-mode browser** -- HTML parser, CSS selectors, HTTP/HTTPS transport (wraith), link following
@@ -90,7 +90,7 @@ handshakes to SSE streaming -- is a single-address-space async Rust application.
 +=====================================================================+
 |  Shell (45+ builtins + AI) |  SSH Daemon (post-quantum, port 22)    |
 +============================+========================================+
-|  API Client (SSE) | Auth (OAuth/key) | Editor | Python | JS | Rust |
+|  API Client (SSE) | Auth (OAuth/key) | Editor | 12 Languages (native)  |
 |  Git Client | Email (SMTP/IMAP) | NTP | Notifications | Search     |
 |  IPC (msg bus + channels)  | Conversations | Session Refresh        |
 |  VectorDB + Agent Memory   | Model Select  | Streaming (backpres.) |
@@ -129,7 +129,7 @@ handshakes to SSE streaming -- is a single-address-space async Rust application.
 ### Build and Run
 
 ```bash
-# 1. Build the kernel (44 crates, ~269k lines)
+# 1. Build the kernel (52 crates, 294k lines)
 cargo build
 
 # 2. Create bootable disk image
@@ -171,12 +171,12 @@ setup, and troubleshooting.
 | [SHELL.md](docs/SHELL.md) | AI-native shell: 45+ builtins, pipes, env vars, scripting, network tools, themes |
 | [AGENTS.md](docs/AGENTS.md) | Multi-agent system: auth modes, dashboard, tool loop, IPC, session management |
 | [BUILDING.md](docs/building.md) | Build instructions, QEMU setup, run.ps1, troubleshooting |
-| [OPEN-SOURCE-CRATES.md](docs/OPEN-SOURCE-CRATES.md) | 35 published crates with usage examples |
+| [OPEN-SOURCE-CRATES.md](docs/OPEN-SOURCE-CRATES.md) | 35 published repos, 52 workspace crates with usage examples |
 | [ROADMAP.md](docs/ROADMAP.md) | Feature roadmap and TODO list |
 
 ---
 
-## Published Crates (35)
+## Published Crates (35 repos, 52 workspace crates)
 
 These crates are standalone `#![no_std]` libraries usable in any bare-metal or
 embedded Rust project:
@@ -193,7 +193,7 @@ embedded Rust project:
 | **Windows compat** | pe-loader-nostd, win32-nostd, dotnet-clr-nostd, winrt-nostd |
 | **Graphics** | vulkan-nostd, dxvk-bridge-nostd |
 | **Security** | sshd-pqc (post-quantum SSH) |
-| **Languages** | python-lite, js-lite, rustc-lite |
+| **Languages** | python-lite, js-lite, rustc-lite, go-lite, cpp-lite, lua-lite, ts-lite, jvm-lite, wasm-runtime, cc-lite, asm-x86 |
 | **Tools** | editor-nostd, shell-nostd, terminal-nostd, agent-nostd |
 | **Web** | wraith-dom, wraith-render, wraith-transport |
 
@@ -202,7 +202,7 @@ API documentation.
 
 ---
 
-## All 44 Crates
+## All 52 Crates
 
 | Crate | Lines | Description |
 |-------|-------|-------------|
@@ -235,6 +235,14 @@ API documentation.
 | python-lite | 2,388 | Python interpreter (28 tests) |
 | js-lite | 5,229 | JavaScript evaluator |
 | rustc-lite | 142 | Rust compiler via Cranelift |
+| go-lite | -- | Go interpreter: goroutines, channels, interfaces, structs |
+| cpp-lite | -- | C++ interpreter: classes, templates, RAII, STL subset |
+| lua-lite | -- | Lua interpreter: tables, metatables, coroutines |
+| ts-lite | -- | TypeScript interpreter: type checking, interfaces, generics |
+| jvm-lite | -- | JVM bytecode interpreter: class loading, GC, threads |
+| wasm-runtime | -- | WebAssembly runtime: validation, execution, WASI subset |
+| cc-lite | -- | C interpreter: pointers, structs, malloc/free, preprocessor |
+| asm-x86 | -- | x86-64 assembler: Intel syntax, labels, relocations |
 | wraith-dom | 2,070 | HTML parser, CSS selectors (32 tests) |
 | wraith-render | 1,225 | HTML to text-mode renderer (12 tests) |
 | wraith-transport | 572 | HTTP/HTTPS over smoltcp |
@@ -329,7 +337,7 @@ to the hardware and dashboard:
 ## License
 
 - **ClaudioOS** (kernel + integration): [AGPL-3.0-or-later](LICENSE)
-- **Published crates** (35 standalone libraries): MIT + Apache-2.0 dual license
+- **Published crates** (35 GitHub repos): MIT + Apache-2.0 dual license
 
 Copyright (c) [Ridge Cell Repair LLC](https://github.com/suhteevah)
 

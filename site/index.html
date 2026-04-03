@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClaudioOS — Bare Metal AI Agent OS</title>
-  <meta name="description" content="A bare-metal Rust operating system with 44 crates, 56 kernel modules, and ~269,000 lines of Rust: UEFI boot, SMP multi-core, Windows binary compatibility (PE loader + Win32 + .NET CLR + WinRT), Vulkan 1.3 + DXVK DirectX translation, Linux binary compatibility (ELF loader + syscall translation), NVMe/AHCI storage, WiFi, Bluetooth, USB storage, TLS 1.3, post-quantum SSH, firewall, disk encryption, vector store, git client, email, NTP, streaming, model selection, multi-agent Claude dashboard with 6 pane types, IPC, 3 language interpreters, and 35 published open-source crates. No Windows. No Linux kernel. Just Rust and Claude.">
+  <meta name="description" content="A bare-metal Rust operating system with 52 crates, 56 kernel modules, 563 source files, and 294,710 lines of Rust: UEFI boot, SMP multi-core, 12 native languages, Windows binary compatibility (PE loader + Win32 + .NET CLR + WinRT), Vulkan 1.3 + DXVK DirectX translation, Linux binary compatibility (ELF loader + syscall translation), NVMe/AHCI storage, WiFi, Bluetooth, USB storage, TLS 1.3, post-quantum SSH, firewall, disk encryption, vector store, git client, email, NTP, streaming, model selection, multi-agent Claude dashboard with 6 pane types, IPC, and 35 published GitHub repos. No Windows. No Linux kernel. Just Rust and Claude.">
   <meta property="og:title" content="ClaudioOS — Bare Metal AI Agent OS">
-  <meta property="og:description" content="44-crate bare-metal Rust OS with 56 kernel modules and ~269k lines for running AI coding agents. Windows binary compat (PE + Win32 + .NET CLR), Vulkan 1.3 + DXVK, Linux binary compat, vector store, git, email, WiFi, Bluetooth, firewall, encryption, post-quantum SSH, NVMe, ext4, btrfs, GPU compute, 6 pane types, IPC, streaming, model select. 35 open-source crates published.">
+  <meta property="og:description" content="52-crate bare-metal Rust OS with 56 kernel modules, 294,710 lines, and 12 native languages for running AI coding agents. Windows binary compat (PE + Win32 + .NET CLR), Vulkan 1.3 + DXVK, Linux binary compat, vector store, git, email, WiFi, Bluetooth, firewall, encryption, post-quantum SSH, NVMe, ext4, btrfs, GPU compute, 6 pane types, IPC, streaming, model select. 35 GitHub repos published.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://claudioos.vercel.app">
   <link rel="stylesheet" href="style.css">
@@ -31,7 +31,7 @@
 <!-- ======== HERO ======== -->
 <header class="hero">
   <div class="container">
-    <div class="hero-eyebrow">44 crates &middot; 56 kernel modules &middot; 35 published &middot; ~269k lines of Rust &middot; 0 lines of C</div>
+    <div class="hero-eyebrow">52 crates &middot; 56 kernel modules &middot; 12 languages &middot; 294,710 lines of Rust &middot; 35 GitHub repos &middot; 0 lines of C</div>
     <h1>ClaudioOS</h1>
     <p class="tagline">
       A bare-metal operating system for AI coding agents.<br>
@@ -47,7 +47,7 @@
       and persistent vector store for agent memory and RAG. Ships a native git client, email (SMTP/IMAP),
       NTP time sync, full-text search, notifications, post-quantum SSH daemon, stateful firewall, disk encryption,
       swap management, cron scheduler, virtual consoles, clipboard, power management (suspend/battery),
-      inter-agent IPC, three language interpreters, 9 color themes, a text-mode web browser, image viewer,
+      inter-agent IPC, 12 native language runtimes, 9 color themes, a text-mode web browser, image viewer,
       45+ shell commands, man pages, and a boot splash with chime.
       Everything is <code>#![no_std]</code> Rust.
     </p>
@@ -60,7 +60,7 @@
     </div>
     <div class="hero-actions">
       <a href="https://github.com/suhteevah/baremetal-claude" class="btn btn-primary">View Source</a>
-      <a href="#crates" class="btn btn-secondary">35 Open-Source Crates</a>
+      <a href="#crates" class="btn btn-secondary">35 Open-Source Repos</a>
     </div>
   </div>
 </header>
@@ -70,7 +70,7 @@
   <div class="container">
     <div class="stats-grid">
       <div class="stat">
-        <div class="stat-number">44</div>
+        <div class="stat-number">52</div>
         <div class="stat-label">Workspace Crates</div>
       </div>
       <div class="stat">
@@ -78,16 +78,16 @@
         <div class="stat-label">Kernel Modules</div>
       </div>
       <div class="stat">
-        <div class="stat-number">35</div>
-        <div class="stat-label">Published OSS Crates</div>
-      </div>
-      <div class="stat">
-        <div class="stat-number">~269k</div>
+        <div class="stat-number">294,710</div>
         <div class="stat-label">Lines of Rust</div>
       </div>
       <div class="stat">
-        <div class="stat-number">6</div>
-        <div class="stat-label">Pane Types</div>
+        <div class="stat-number">12</div>
+        <div class="stat-label">Languages</div>
+      </div>
+      <div class="stat">
+        <div class="stat-number">35</div>
+        <div class="stat-label">GitHub Repos</div>
       </div>
       <div class="stat">
         <div class="stat-number">0</div>
@@ -198,8 +198,8 @@
 
       <div class="feature-card">
         <div class="label">Languages</div>
-        <h3>Python + JavaScript + Rust</h3>
-        <p>Three interpreters/compilers running on bare metal. Python-lite (vars, loops, functions). JS-lite (ES5 core). Rust compiler via Cranelift JIT codegen. All <code>no_std</code>.</p>
+        <h3>12 Native Languages</h3>
+        <p>Full polyglot development environment on bare metal. Interpreters, compilers, and runtimes for 12 languages -- all <code>#![no_std]</code> Rust, no external dependencies.</p>
       </div>
 
       <div class="feature-card">
@@ -373,6 +373,62 @@
     </div>
   </section>
 
+  <!-- ======== LANGUAGE GRID ======== -->
+  <section id="languages">
+    <h2>// 12 Native Languages</h2>
+    <p class="section-intro">Every language runtime is written from scratch in <code>#![no_std]</code> Rust. No LLVM. No libc. No external toolchains.</p>
+    <div class="crate-grid">
+      <div class="crate-card">
+        <div class="crate-name">Python</div>
+        <div class="crate-desc">Interpreted -- vars, loops, functions, classes (python-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">JavaScript</div>
+        <div class="crate-desc">Interpreted -- ES5 core, closures, prototypes (js-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">Rust</div>
+        <div class="crate-desc">Compiled -- Cranelift JIT backend (rustc-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">Go</div>
+        <div class="crate-desc">Interpreted -- goroutines, channels, interfaces (go-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">C++</div>
+        <div class="crate-desc">Interpreted -- classes, templates, RAII, STL subset (cpp-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">Lua</div>
+        <div class="crate-desc">Interpreted -- tables, metatables, coroutines (lua-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">TypeScript</div>
+        <div class="crate-desc">Interpreted -- type checking, interfaces, generics (ts-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">JVM</div>
+        <div class="crate-desc">Bytecode -- class loading, GC, threads (jvm-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">WebAssembly</div>
+        <div class="crate-desc">Bytecode -- validation, execution, WASI subset (wasm-runtime)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">C</div>
+        <div class="crate-desc">Interpreted -- pointers, structs, malloc/free (cc-lite)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">x86 Assembly</div>
+        <div class="crate-desc">Assembled -- Intel syntax, labels, relocations (asm-x86)</div>
+      </div>
+      <div class="crate-card">
+        <div class="crate-name">Text Editor</div>
+        <div class="crate-desc">Nano-like -- buffer-gap, syntax awareness (editor-nostd)</div>
+      </div>
+    </div>
+  </section>
+
   <!-- ======== ARCHITECTURE ======== -->
   <section id="architecture">
     <h2>// Architecture</h2>
@@ -406,10 +462,11 @@
 +--------------+--------------+-------------+----------------------+
 |              Async Executor (interrupt-driven, SMP)               |
 +--------------+--------------+-------------+----------------------+
-| Interpreters | Editor       | Wraith      | Init System          |
-| python-lite  | nano-like    | DOM/render  | Users + Themes       |
-| js-lite      |              | transport   | Splash + Chime       |
-| rustc-lite   |              |             | Screensaver          |
+| 12 Languages | Editor       | Wraith      | Init System          |
+| py/js/rust   | nano-like    | DOM/render  | Users + Themes       |
+| go/c++/lua   |              | transport   | Splash + Chime       |
+| ts/jvm/wasm  |              |             | Screensaver          |
+| c/asm-x86    |              |             |                      |
 +--------------+--------------+-------------+----------------------+
 | Firewall     | Encryption   | Swap        | Cron + VConsoles     |
 | pkt filter   | LUKS-compat  | disk swap   | Clipboard + Power    |
@@ -440,7 +497,7 @@
 
   <!-- ======== OPEN SOURCE CRATES ======== -->
   <section id="crates">
-    <h2>// 35 Open-Source Crates</h2>
+    <h2>// 35 Open-Source Repos (52 Crates)</h2>
     <p class="section-intro">Every crate is <code>#![no_std]</code>, published individually, and usable in any bare-metal or embedded Rust project.</p>
 
     <h3 class="crate-category">Filesystems</h3>
@@ -543,11 +600,11 @@
       </a>
     </div>
 
-    <h3 class="crate-category">Language Interpreters</h3>
+    <h3 class="crate-category">Language Runtimes (12)</h3>
     <div class="crate-grid">
       <a href="https://github.com/suhteevah/python-lite" class="crate-card" target="_blank" rel="noopener">
         <div class="crate-name">python-lite</div>
-        <div class="crate-desc">Minimal Python interpreter (28 tests)</div>
+        <div class="crate-desc">Python interpreter (28 tests)</div>
       </a>
       <a href="https://github.com/suhteevah/js-lite" class="crate-card" target="_blank" rel="noopener">
         <div class="crate-name">js-lite</div>
@@ -556,6 +613,38 @@
       <a href="https://github.com/suhteevah/rustc-lite" class="crate-card" target="_blank" rel="noopener">
         <div class="crate-name">rustc-lite</div>
         <div class="crate-desc">Rust compiler via Cranelift JIT backend</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">go-lite</div>
+        <div class="crate-desc">Go interpreter: goroutines, channels, interfaces</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">cpp-lite</div>
+        <div class="crate-desc">C++ interpreter: classes, templates, RAII</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">lua-lite</div>
+        <div class="crate-desc">Lua interpreter: tables, metatables, coroutines</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">ts-lite</div>
+        <div class="crate-desc">TypeScript interpreter: types, interfaces, generics</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">jvm-lite</div>
+        <div class="crate-desc">JVM bytecode interpreter: class loading, GC</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">wasm-runtime</div>
+        <div class="crate-desc">WebAssembly runtime: validation, WASI subset</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">cc-lite</div>
+        <div class="crate-desc">C interpreter: pointers, structs, malloc/free</div>
+      </a>
+      <a href="https://github.com/suhteevah/baremetal-claude" class="crate-card" target="_blank" rel="noopener">
+        <div class="crate-name">asm-x86</div>
+        <div class="crate-desc">x86-64 assembler: Intel syntax, relocations</div>
       </a>
     </div>
 
@@ -638,8 +727,8 @@
       </p>
       <p>
         The development itself is recursive: Claude helps build the OS that runs Claude. The project
-        has grown from a simple UEFI bootloader to a 44-crate workspace with 56 kernel modules,
-        ~269,000 lines of Rust, and hardware drivers for NVMe, AHCI, Intel NICs, WiFi, Bluetooth,
+        has grown from a simple UEFI bootloader to a 52-crate workspace with 56 kernel modules,
+        294,710 lines of Rust, 12 native languages, and hardware drivers for NVMe, AHCI, Intel NICs, WiFi, Bluetooth,
         USB 3.0 (keyboard + mouse + storage + touchpad), HDA audio, and NVIDIA GPUs. It loads and
         runs Linux binaries via an ELF loader and syscall translation layer. It reads ext4,
         btrfs, and NTFS filesystems. It runs Windows .exe files via a PE loader, Win32 API layer,
@@ -653,7 +742,7 @@
         monitor, 9 color themes, 5 screensaver modes, man pages, and a boot splash with chime.
       </p>
       <p>
-        35 crates have been extracted and published as standalone open-source libraries, each usable
+        35 repos have been extracted and published as standalone open-source libraries, each usable
         in any <code>#![no_std]</code> Rust project. The goal isn't just an OS -- it's proving that
         AI-native systems programming is possible, practical, and productive.
       </p>
@@ -672,7 +761,7 @@
 rustup target add x86_64-unknown-none
 cargo install bootimage
 
-<span class="code-comment"># Build the kernel (44 crates, 56 kernel modules, ~269k lines)</span>
+<span class="code-comment"># Build the kernel (52 crates, 56 kernel modules, 294k lines)</span>
 cargo build
 
 <span class="code-comment"># Create bootable disk images</span>

@@ -32,10 +32,18 @@ type: project
 - [x] 6 pane types (Agent, Shell, Browser, FileManager, SysMonitor, Screensaver)
 - [x] Inter-agent IPC (message bus, named channels, shared memory, 8 agent tools)
 
-## DONE — Languages & Dev Tools
-- [x] Python interpreter (python-lite, 28 tests)
+## DONE — Languages & Dev Tools (12 Languages)
+- [x] Python interpreter (python-lite, full implementation, 28 tests)
 - [x] JavaScript interpreter (js-lite)
 - [x] Rust compiler (rustc-lite + Cranelift JIT)
+- [x] Go interpreter (go-lite: goroutines, channels, interfaces, structs)
+- [x] C++ interpreter (cpp-lite: classes, templates, RAII, STL subset)
+- [x] Lua interpreter (lua-lite: tables, metatables, coroutines)
+- [x] TypeScript interpreter (ts-lite: type checking, interfaces, generics)
+- [x] JVM bytecode interpreter (jvm-lite: class loading, GC, threads)
+- [x] WebAssembly runtime (wasm-runtime: validation, execution, WASI subset)
+- [x] C interpreter (cc-lite: pointers, structs, malloc/free, preprocessor)
+- [x] x86-64 assembler (asm-x86: Intel syntax, labels, relocations)
 - [x] Text editor (nano-like, 11 tests)
 - [x] Wraith browser (DOM parser, transport, text renderer)
 - [x] Cloudflare challenge solver
@@ -149,11 +157,17 @@ type: project
 - [ ] Boot from USB stick
 - [ ] PXE network boot
 
+## DONE — Documentation Pass
+- [x] README.md updated to final stats (52 crates, 294,710 lines, 12 languages)
+- [x] ROADMAP.md fully updated
+- [x] OPEN-SOURCE-CRATES.md updated with all 52 workspace crates
+- [x] Vercel site updated with final numbers and language grid
+
 ## TODO — Polish
 - [ ] Better font rendering (anti-aliased if GPU available)
 - [ ] Tab completion for file paths and command names
 
-## Published Open-Source Crates (35)
+## Published Open-Source Crates (35 repos, 52 workspace crates)
 1. ext4-rw
 2. btrfs-nostd
 3. ntfs-rw
@@ -189,3 +203,11 @@ type: project
 33. dxvk-bridge-nostd
 34. dotnet-clr-nostd
 35. winrt-nostd
+36. go-lite
+37. cpp-lite
+38. lua-lite
+39. ts-lite
+40. jvm-lite
+41. wasm-runtime
+42. cc-lite
+43. asm-x86
