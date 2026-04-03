@@ -794,7 +794,17 @@ impl<D: BlockDevice> Ext4Fs<D> {
         Ok(entries)
     }
 
-    // --- Write operations ---
+    // ========================================================================
+    // Write operations
+    //
+    // ext4 allocates blocks and inodes using per-block-group bitmaps.
+    // Each block group has:
+    //   - A block bitmap (1 bit per block in the group)
+    //   - An inode bitmap (1 bit per inode in the group)
+    //   - An inode table (contiguous array of inode structures)
+    // Allocation scans the bitmap for a free bit, sets it, and updates the
+    // free counters in both the block group descriptor and the superblock.
+    // ========================================================================
 
     /// Read the block bitmap for a block group.
     fn read_block_bitmap(&self, group: usize) -> Result<Vec<u8>, Ext4Error> {
@@ -981,6 +991,12 @@ impl<D: BlockDevice> Ext4Fs<D> {
     /// - Moves existing extents to the new leaf block
     /// - Converts root to an index node pointing to the leaf
     /// - Adds the new extent to the leaf
+    ///
+    /// The extent tree is a B-tree where the root node is stored inline in
+    /// the inode's i_block (60 bytes, room for 4 extents). When the root
+    /// is full, we "split": move existing extents to a newly allocated disk
+    /// block and convert the root to an index node pointing to that block.
+    /// Further growth adds more leaf blocks and potentially more index levels.
     fn append_extent(&mut self, ino: u32, inode: &mut Inode, phys_block: u64) -> Result<(), Ext4Error> {
         let header = inode.extent_header().ok_or(Ext4Error::Corrupt("no extent header"))?;
 
@@ -1038,10 +1054,17 @@ impl<D: BlockDevice> Ext4Fs<D> {
 
     /// Split the root extent node when it's full.
     ///
-    /// 1. Allocate a new block for the leaf node
-    /// 2. Copy all existing leaf extents to the new block
-    /// 3. Add the new extent to the new block
-    /// 4. Convert the root to an index node with one entry pointing to the leaf
+    /// This is the core extent tree growth operation. When the inline root
+    /// node (in the inode's i_block) is full (4 entries), we:
+    ///   1. Allocate a new disk block for a leaf node
+    ///   2. Copy all existing leaf extents from the root to the new block
+    ///   3. Append the new extent to the new leaf block
+    ///   4. Rewrite the root as an index node (depth=1) with a single entry
+    ///      pointing to the new leaf block
+    ///
+    /// After this, the extent tree has depth 1: root (index) -> leaf (on disk).
+    /// The root index node can hold up to 4 index entries, each pointing to
+    /// a leaf that can hold `(block_size - 12) / 12` extents.
     fn split_root_extent_node(&mut self, ino: u32, inode: &mut Inode, new_extent: ExtentLeaf) -> Result<(), Ext4Error> {
         let block_size = self.sb.block_size() as usize;
         let group = ((ino - 1) / self.sb.inodes_per_group) as usize;

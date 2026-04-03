@@ -4,6 +4,7 @@
 //! with Pratt-style precedence for expressions.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 
@@ -1342,8 +1343,8 @@ impl Parser {
             } else {
                 // Check for generator expression: func(x for x in ...)
                 if self.at(&Token::For) {
-                    let gen = self.parse_comp_tail(expr)?;
-                    args.push(gen);
+                    let gen_expr = self.parse_comp_tail(expr)?;
+                    args.push(gen_expr);
                 } else {
                     args.push(expr);
                 }
@@ -1429,9 +1430,9 @@ impl Parser {
                 let first = self.parse_expression()?;
                 // Generator expression
                 if self.at(&Token::For) {
-                    let gen = self.parse_comp_tail(first)?;
+                    let gen_expr = self.parse_comp_tail(first)?;
                     self.expect(&Token::RParen)?;
-                    return Ok(gen);
+                    return Ok(gen_expr);
                 }
                 // Tuple or parenthesized expression
                 if self.at(&Token::Comma) {

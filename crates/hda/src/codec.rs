@@ -336,7 +336,9 @@ impl CorbRirb {
         let wp = unsafe { read16(self.bar0, CORBWP) } as usize;
         let new_wp = (wp + 1) % self.corb_entries;
 
-        // Write verb to CORB buffer
+        // SAFETY: Write verb to CORB buffer at the computed entry address.
+        // The CORB buffer is heap-allocated and identity-mapped for DMA.
+        // Volatile write ensures the controller sees the verb when we advance CORBWP.
         unsafe {
             let entry_ptr = (self.corb_phys as usize + new_wp * CORB_ENTRY_SIZE) as *mut u32;
             ptr::write_volatile(entry_ptr, verb);
@@ -361,6 +363,8 @@ impl CorbRirb {
 
             if rirb_wp != self.rirb_rp {
                 // New response available
+                // SAFETY: Read the 64-bit RIRB entry (response + response_ex).
+                // Volatile read ensures we see the controller's DMA write.
                 let response_ptr =
                     (self.rirb_phys as usize + expected_rp * RIRB_ENTRY_SIZE) as *const u64;
                 let raw = unsafe { ptr::read_volatile(response_ptr) };

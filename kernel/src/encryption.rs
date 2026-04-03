@@ -75,10 +75,27 @@ impl fmt::Display for BlockError {
 
 // ── AES-256 implementation (using our existing AES from TLS stack) ───
 
-/// AES-256 block encryption (single 16-byte block).
-/// This is a minimal software AES-256 for use in XTS mode.
+/// Encrypt a single 16-byte block with AES-256 (FIPS 197).
+///
+/// This is a minimal software implementation of AES-256 for use in XTS mode.
+/// AES-256 uses 14 rounds and a 256-bit (32-byte) key.
+///
+/// # Parameters
+/// - `key`: The 32-byte AES-256 encryption key.
+/// - `block`: The 16-byte block to encrypt, modified in-place.
+///
+/// # Algorithm Overview
+/// 1. **Key Expansion**: The 32-byte key is expanded into 60 32-bit round keys.
+/// 2. **Initial AddRoundKey**: XOR the plaintext with round key 0.
+/// 3. **Rounds 1-13**: SubBytes -> ShiftRows -> MixColumns -> AddRoundKey.
+/// 4. **Final Round 14**: SubBytes -> ShiftRows -> AddRoundKey (no MixColumns).
+///
+/// The state is organized as a 4x4 column-major matrix of bytes.
 fn aes256_encrypt_block(key: &[u8; 32], block: &mut [u8; 16]) {
-    // Rijndael S-box
+    // Rijndael S-box: a fixed nonlinear substitution table that provides
+    // confusion (breaking the relationship between key and ciphertext).
+    // Each byte of state is replaced by SBOX[byte]. The S-box is derived
+    // from the multiplicative inverse in GF(2^8) followed by an affine transform.
     const SBOX: [u8; 256] = [
         0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
         0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -98,34 +115,43 @@ fn aes256_encrypt_block(key: &[u8; 32], block: &mut [u8; 16]) {
         0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
     ];
 
-    // Rcon for key expansion
+    // Round constants (Rcon): powers of 2 in GF(2^8), used in key expansion
+    // to break symmetry between rounds. Each value is x^(i-1) mod the AES
+    // polynomial. Values wrap around via GF reduction (0x80 -> 0x1b -> 0x36).
     const RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
 
-    // Key expansion: AES-256 uses 14 rounds = 15 round keys = 60 u32 words
+    // Key expansion: AES-256 uses 14 rounds, requiring 15 round keys.
+    // Each round key is 4 words (128 bits), so we need 15 * 4 = 60 words total.
+    // The first 8 words come directly from the 256-bit key.
     let mut rk = [0u32; 60];
     for i in 0..8 {
         rk[i] = u32::from_be_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
     }
+    // Generate remaining round keys from the initial 8 words.
+    // AES-256 key schedule applies RotWord + SubWord + Rcon every 8th word,
+    // and SubWord alone every 4th word (this extra SubWord step is unique
+    // to AES-256 and prevents related-key attacks).
     for i in 8..60 {
         let mut temp = rk[i - 1];
         if i % 8 == 0 {
-            // RotWord + SubWord + Rcon
+            // Every 8th word: RotWord (rotate bytes left by 1) + SubWord (S-box each byte) + Rcon
             temp = temp.rotate_left(8);
             let b = temp.to_be_bytes();
             temp = u32::from_be_bytes([SBOX[b[0] as usize], SBOX[b[1] as usize], SBOX[b[2] as usize], SBOX[b[3] as usize]]);
-            temp ^= (RCON[i / 8 - 1] as u32) << 24;
+            temp ^= (RCON[i / 8 - 1] as u32) << 24; // XOR Rcon into the high byte
         } else if i % 8 == 4 {
+            // Every 4th word (AES-256 only): SubWord without rotation
             let b = temp.to_be_bytes();
             temp = u32::from_be_bytes([SBOX[b[0] as usize], SBOX[b[1] as usize], SBOX[b[2] as usize], SBOX[b[3] as usize]]);
         }
         rk[i] = rk[i - 8] ^ temp;
     }
 
-    // State as 4x4 column-major
+    // Load the plaintext block into the 4x4 column-major state matrix
     let mut state = [0u8; 16];
     state.copy_from_slice(block);
 
-    // AddRoundKey (round 0)
+    // AddRoundKey (round 0): XOR the plaintext with the first round key
     for c in 0..4 {
         let k = rk[c].to_be_bytes();
         for r in 0..4 {
@@ -133,13 +159,14 @@ fn aes256_encrypt_block(key: &[u8; 32], block: &mut [u8; 16]) {
         }
     }
 
-    // Rounds 1..13 (full rounds)
+    // Rounds 1 through 13: full AES rounds (SubBytes, ShiftRows, MixColumns, AddRoundKey)
     for round in 1..14 {
-        // SubBytes
+        // SubBytes: Apply the S-box to every byte (nonlinear substitution)
         for b in state.iter_mut() {
             *b = SBOX[*b as usize];
         }
-        // ShiftRows
+        // ShiftRows: Cyclically shift each row of the state matrix left.
+        // Row 0: no shift, Row 1: shift 1, Row 2: shift 2, Row 3: shift 3.
         let tmp = state[1];
         state[1] = state[5];
         state[5] = state[9];
@@ -159,7 +186,10 @@ fn aes256_encrypt_block(key: &[u8; 32], block: &mut [u8; 16]) {
         state[7] = state[3];
         state[3] = tmp;
 
-        // MixColumns
+        // MixColumns: Mix bytes within each column using GF(2^8) arithmetic.
+        // Each column is treated as a polynomial over GF(2^8) and multiplied
+        // by the fixed polynomial {03}x^3 + {01}x^2 + {01}x + {02} modulo x^4 + 1.
+        // This provides diffusion (spreading influence of each input byte).
         for c in 0..4 {
             let s0 = state[4 * c];
             let s1 = state[4 * c + 1];
@@ -237,7 +267,15 @@ fn gf_mul3(x: u8) -> u8 {
 
 // ── AES-256 decryption ───────────────────────────────────────────────
 
-/// AES-256 block decryption (single 16-byte block).
+/// Decrypt a single 16-byte block with AES-256 (FIPS 197, inverse cipher).
+///
+/// Applies the AES rounds in reverse order using inverse operations:
+/// InvShiftRows, InvSubBytes (using the inverse S-box), AddRoundKey,
+/// and InvMixColumns. The key expansion is identical to encryption.
+///
+/// # Parameters
+/// - `key`: The 32-byte AES-256 key (same key used for encryption).
+/// - `block`: The 16-byte ciphertext block to decrypt, modified in-place.
 fn aes256_decrypt_block(key: &[u8; 32], block: &mut [u8; 16]) {
     const SBOX: [u8; 256] = [
         0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -394,29 +432,49 @@ fn aes256_decrypt_block(key: &[u8; 32], block: &mut [u8; 16]) {
 
 /// GF(2^8) general multiplication for InvMixColumns.
 ///
-/// Uses the Russian peasant multiplication algorithm (shift-and-add)
-/// with reduction modulo the AES polynomial 0x11B after each step.
+/// Computes `a * b` in GF(2^8) with the AES irreducible polynomial
+/// x^8 + x^4 + x^3 + x + 1 (represented as 0x11B).
+///
+/// Uses the "Russian peasant" (binary) multiplication algorithm:
+/// - If the low bit of `b` is set, XOR `a` into the result.
+/// - Shift `a` left by 1 (multiply by x in GF).
+/// - If `a` overflowed (high bit was set), reduce modulo 0x1B.
+/// - Shift `b` right by 1.
+/// - Repeat 8 times.
+///
+/// The constant 0x1B = 0b00011011 is the low byte of the reduction
+/// polynomial (x^4 + x^3 + x + 1), since the x^8 term is implicit.
 fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     let mut result: u8 = 0;
     for _ in 0..8 {
         if b & 1 != 0 {
-            result ^= a;
+            result ^= a; // Add (XOR) a into result if low bit of b is set
         }
-        let hi = a & 0x80;
-        a <<= 1;
+        let hi = a & 0x80; // Check if a will overflow on left shift
+        a <<= 1;           // Multiply a by x (shift left)
         if hi != 0 {
-            a ^= 0x1b;
+            a ^= 0x1b;     // Reduce modulo the AES polynomial if overflow
         }
-        b >>= 1;
+        b >>= 1;           // Move to next bit of b
     }
     result
 }
 
 // ── PBKDF2-SHA256 ────────────────────────────────────────────────────
 
-/// SHA-256 hash (minimal implementation for PBKDF2).
+/// SHA-256 hash (FIPS 180-4). Minimal implementation for PBKDF2 use.
+///
+/// Produces a 256-bit (32-byte) digest. This is the same SHA-256 used
+/// throughout the encryption module (PBKDF2, HMAC, key verification).
+///
+/// # Algorithm
+/// 1. Pad the message to a multiple of 512 bits (64 bytes).
+/// 2. Process each 512-bit block through 64 rounds of compression.
+/// 3. Output the final 8 x 32-bit hash state as big-endian bytes.
 fn sha256(data: &[u8]) -> [u8; 32] {
-    // SHA-256 constants
+    // SHA-256 round constants: first 32 bits of the fractional parts of the
+    // cube roots of the first 64 prime numbers. These provide "nothing up my
+    // sleeve" numbers that inject asymmetry into each round.
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -428,9 +486,17 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
     ];
 
+    // Initial hash values: first 32 bits of the fractional parts of the
+    // square roots of the first 8 primes (2, 3, 5, 7, 11, 13, 17, 19).
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, // sqrt(2)
+        0xbb67ae85, // sqrt(3)
+        0x3c6ef372, // sqrt(5)
+        0xa54ff53a, // sqrt(7)
+        0x510e527f, // sqrt(11)
+        0x9b05688c, // sqrt(13)
+        0x1f83d9ab, // sqrt(17)
+        0x5be0cd19, // sqrt(19)
     ];
 
     // Pre-processing: pad message
@@ -530,9 +596,29 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     sha256(&outer)
 }
 
-/// PBKDF2-SHA256 key derivation.
+/// PBKDF2-SHA256 key derivation (RFC 2898 / NIST SP 800-132).
 ///
-/// Derives `dk_len` bytes from `password` and `salt` using `iterations` rounds.
+/// Derives a cryptographic key of `dk_len` bytes from a user-provided
+/// password and a random salt. The `iterations` parameter controls the
+/// computational cost, making brute-force attacks expensive.
+///
+/// # How It Works
+/// For each 32-byte block of output:
+/// 1. Compute `U_1 = HMAC-SHA256(password, salt || block_index)`
+/// 2. For i = 2 to iterations: `U_i = HMAC-SHA256(password, U_{i-1})`
+/// 3. `block = U_1 XOR U_2 XOR ... XOR U_iterations`
+///
+/// Each iteration adds ~200ns of computation, so 100,000 iterations
+/// takes ~20ms on modern hardware, making offline password guessing slow.
+///
+/// # Parameters
+/// - `password`: The user's passphrase (arbitrary bytes).
+/// - `salt`: Random salt (should be at least 16 bytes, unique per key).
+/// - `iterations`: Number of HMAC rounds. Higher = slower but more secure.
+/// - `dk_len`: Desired output key length in bytes.
+///
+/// # Returns
+/// The derived key material of exactly `dk_len` bytes.
 pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -> Vec<u8> {
     let mut derived_key = Vec::with_capacity(dk_len);
     let blocks_needed = (dk_len + 31) / 32; // SHA-256 produces 32 bytes per block
@@ -584,19 +670,41 @@ fn gf128_mul_x(tweak: &mut [u8; 16]) {
     }
 }
 
-/// Encrypt a sector using AES-256-XTS.
+/// Encrypt a sector using AES-256-XTS (IEEE P1619).
 ///
-/// `key1` is used for the data encryption, `key2` for the tweak encryption.
-/// `sector_num` is used as the tweak value.
+/// XTS (XEX Tweakable Block cipher with ciphertext Stealing) mode is
+/// specifically designed for disk encryption. Unlike CBC or CTR mode,
+/// XTS uses a **tweak** value (the sector number) to ensure that identical
+/// plaintext blocks at different disk locations produce different ciphertext,
+/// without requiring a per-sector IV or nonce that must be stored separately.
+///
+/// # How XTS Works
+/// For each 16-byte block within the sector:
+/// 1. Compute the tweak: `T = AES_key2(sector_num) * alpha^block_index`
+///    where multiplication is in GF(2^128).
+/// 2. XOR the plaintext block with the tweak: `PP = P XOR T`
+/// 3. Encrypt: `CC = AES_key1(PP)`
+/// 4. XOR again: `C = CC XOR T`
+///
+/// The tweak advances via `gf128_mul_x` for each block within the sector.
+///
+/// # Parameters
+/// - `key1`: 32-byte AES-256 key for data encryption.
+/// - `key2`: 32-byte AES-256 key for tweak encryption.
+/// - `sector_num`: Sector index, used as the tweak value.
+/// - `data`: Sector data to encrypt in-place. Must be a multiple of 16 bytes.
 pub fn xts_encrypt_sector(key1: &[u8; 32], key2: &[u8; 32], sector_num: u64, data: &mut [u8]) {
     assert!(data.len() % 16 == 0, "XTS data must be a multiple of 16 bytes");
 
-    // Encrypt the sector number to get the initial tweak
+    // Encrypt the sector number with key2 to get the initial tweak value.
+    // The sector number is placed in the low 8 bytes (little-endian) with
+    // the high 8 bytes zeroed. The AES encryption of this makes the tweak
+    // unpredictable to an attacker who doesn't know key2.
     let mut tweak = [0u8; 16];
     tweak[..8].copy_from_slice(&sector_num.to_le_bytes());
     aes256_encrypt_block(key2, &mut tweak);
 
-    // Process each 16-byte block
+    // Process each 16-byte block within the sector
     for chunk in data.chunks_mut(16) {
         let mut block = [0u8; 16];
         block.copy_from_slice(chunk);
@@ -621,7 +729,17 @@ pub fn xts_encrypt_sector(key1: &[u8; 32], key2: &[u8; 32], sector_num: u64, dat
     }
 }
 
-/// Decrypt a sector using AES-256-XTS.
+/// Decrypt a sector using AES-256-XTS (IEEE P1619).
+///
+/// The inverse of `xts_encrypt_sector`. Uses AES-256 *decryption* for the
+/// data blocks but AES-256 *encryption* for the tweak (the tweak is always
+/// computed via encryption, never decryption).
+///
+/// # Parameters
+/// - `key1`: 32-byte AES-256 key for data decryption (same key as encryption).
+/// - `key2`: 32-byte AES-256 key for tweak computation (same key as encryption).
+/// - `sector_num`: Sector index (must match the value used for encryption).
+/// - `data`: Sector ciphertext to decrypt in-place. Must be a multiple of 16 bytes.
 pub fn xts_decrypt_sector(key1: &[u8; 32], key2: &[u8; 32], sector_num: u64, data: &mut [u8]) {
     assert!(data.len() % 16 == 0, "XTS data must be a multiple of 16 bytes");
 
@@ -651,17 +769,36 @@ pub fn xts_decrypt_sector(key1: &[u8; 32], key2: &[u8; 32], sector_num: u64, dat
 // ── Encryption header ────────────────────────────────────────────────
 
 /// On-disk header for an encrypted partition (stored in sector 0).
+///
+/// This header is inspired by LUKS (Linux Unified Key Setup) but simplified
+/// for ClaudioOS. It occupies exactly one 512-byte sector and contains all
+/// the metadata needed to derive and verify the encryption key.
+///
+/// # On-Disk Layout (offsets in bytes)
+/// ```text
+/// [0..8]    magic: "CLAUENC\0" (identifies this as an encrypted partition)
+/// [8..12]   version: u32 LE (currently 1)
+/// [12..44]  salt: 32 bytes (random, generated at format time)
+/// [44..48]  iterations: u32 LE (PBKDF2 iteration count)
+/// [48..80]  key_check: SHA-256(derived_key) (for passphrase verification)
+/// [80..512] reserved (zeros)
+/// ```
 #[derive(Clone)]
 pub struct EncryptionHeader {
-    /// Magic bytes: CLAUENC\0
+    /// Magic bytes identifying a ClaudioOS encrypted partition.
+    /// Must equal `CLAUENC\0` (8 bytes). Acts as a partition type marker.
     pub magic: [u8; 8],
-    /// Header version.
+    /// Header format version. Currently 1. Allows future format changes.
     pub version: u32,
-    /// PBKDF2 salt (32 bytes).
+    /// PBKDF2 salt (32 bytes). Generated randomly at format time.
+    /// Ensures that the same passphrase produces different keys on different devices.
     pub salt: [u8; 32],
-    /// PBKDF2 iteration count.
+    /// PBKDF2 iteration count. Controls the cost of key derivation.
+    /// Stored in the header so the unlock process knows how many rounds to run.
     pub iterations: u32,
-    /// SHA-256 hash of the derived key — used to verify correct passphrase.
+    /// SHA-256 hash of the full 64-byte derived key. Used to verify that the
+    /// user entered the correct passphrase BEFORE attempting decryption.
+    /// This is NOT the key itself -- it is a hash of the key.
     pub key_check: [u8; 32],
 }
 
@@ -784,7 +921,12 @@ impl<D: BlockDevice> EncryptedBlockDevice<D> {
         Ok(())
     }
 
-    /// Lock the device — zeroes out keys in memory.
+    /// Lock the device, zeroing the keys in memory.
+    ///
+    /// Overwrites both 32-byte keys with zeros to ensure they cannot be
+    /// recovered from a memory dump after the device is locked. This is
+    /// a critical security measure for devices that may be powered off
+    /// or whose memory may be inspected (cold boot attacks, DMA attacks).
     pub fn lock(&mut self) {
         self.key1 = [0u8; 32];
         self.key2 = [0u8; 32];
@@ -909,9 +1051,13 @@ pub fn generate_salt() -> [u8; 32] {
         let dt = crate::rtc::wall_clock();
         let ticks = crate::interrupts::tick_count();
         let seed = dt.to_unix_timestamp() as u64 ^ ticks;
-        // Simple PRNG mixing
+        // Simple LCG (Linear Congruential Generator) mixing.
+        // Constants are Knuth's recommended LCG parameters for 64-bit state.
+        // NOTE: This is NOT cryptographically secure -- it is a fallback
+        // only used when RDRAND is unavailable.
         let mut state = seed;
         for chunk in salt.chunks_mut(8) {
+            // Multiplier and increment from Knuth's MMIX LCG
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let bytes = state.to_le_bytes();
             let len = chunk.len().min(8);

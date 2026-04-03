@@ -492,7 +492,19 @@ impl<D: BlockDevice> NtfsFs<D> {
     // -----------------------------------------------------------------------
 
     /// Read all data for a non-resident attribute, following its data runs.
-    /// Handles LZNT1 decompression if the attribute is compressed.
+    ///
+    /// Non-resident attributes store their data in clusters scattered across
+    /// the volume, described by a compact "data runs" (mapping pairs) encoding.
+    /// Each data run specifies a (cluster_count, starting_LCN_delta) pair.
+    /// This function:
+    ///   1. Decodes the data runs into absolute LCN ranges
+    ///   2. Reads each cluster range from disk into a contiguous buffer
+    ///   3. Handles sparse runs (fill with zeros -- no disk read needed)
+    ///   4. If the attribute is LZNT1-compressed, decompresses the raw data
+    ///
+    /// For compressed attributes, we read `allocated_size` bytes (which
+    /// includes compressed data + sparse padding) then decompress to get
+    /// `data_size` bytes of output.
     fn read_non_resident_data(
         &self,
         entry: &MftEntry,

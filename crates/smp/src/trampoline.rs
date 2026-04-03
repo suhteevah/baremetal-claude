@@ -302,8 +302,13 @@ impl ApTrampoline {
 
     /// Install the trampoline code and GDT into low memory.
     ///
+    /// Copies the hand-assembled machine code, GDT descriptor, and GDT data
+    /// into the trampoline page. The page is zeroed first to ensure no stale
+    /// data could confuse an AP.
+    ///
     /// # Safety
-    /// The target physical page must be mapped writable and not in use.
+    /// The target physical page must be mapped writable and not in use by any
+    /// other code. The memory must be below 1 MiB for the SIPI vector to reach it.
     pub unsafe fn install(&self) {
         log::info!(
             "trampoline: installing trampoline code at phys {:#X} ({} bytes)",

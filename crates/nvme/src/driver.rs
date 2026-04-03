@@ -174,6 +174,9 @@ impl NvmeController {
         }
 
         // ---- Step 1: Disable controller (reset) ----
+        // Per NVMe spec 7.6.1: Set CC.EN = 0 to disable the controller.
+        // This causes the controller to complete or abort all outstanding commands
+        // and reset internal state. We must wait for CSTS.RDY = 0 before proceeding.
         log::info!("[nvme:driver] disabling controller for reset...");
         regs.disable_controller();
 
@@ -207,7 +210,13 @@ impl NvmeController {
         regs.write_acq(admin_queue.cq_phys_addr());
 
         // ---- Step 4: Configure CC and enable ----
-        // CC: EN=1, CSS=NVM(000), MPS=0(4KiB), AMS=RR, SHN=none, IOSQES=6(64B), IOCQES=4(16B)
+        // Configure the Controller Configuration register and set EN=1 to start:
+        // - CSS=NVM (000): Use the NVM Command Set
+        // - MPS=0: Memory Page Size = 2^(12+0) = 4 KiB
+        // - AMS=RR: Round Robin arbitration
+        // - SHN=none (00): No shutdown notification
+        // - IOSQES=6: I/O SQ Entry Size = 2^6 = 64 bytes
+        // - IOCQES=4: I/O CQ Entry Size = 2^4 = 16 bytes
         let cc = CC_EN_BIT | CC_CSS_NVM | CC_AMS_RR | CC_IOSQES_64 | CC_IOCQES_16;
         log::info!("[nvme:driver] writing CC={:#010x} (enable + configure)", cc);
         regs.write_cc(cc);
@@ -356,7 +365,9 @@ impl NvmeController {
             sector_size
         );
 
-        // NVMe NLB is 0-based (0 = 1 block)
+        // NVMe NLB (Number of Logical Blocks) is 0-based: a value of 0 means
+        // 1 block, a value of N means N+1 blocks. This is different from ATA/AHCI
+        // where the count field is 1-based.
         let nlb = (count - 1) as u16;
         io::read(&mut self.io_queue, &self.regs, nsid, lba, nlb, buf)
             .map_err(|(sct, sc)| NvmeError::ReadFailed(sct, sc))

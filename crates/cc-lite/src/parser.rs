@@ -698,11 +698,29 @@ impl<'a> Parser<'a> {
     }
 
     // === Expression parsing: precedence climbing ===
+    //
+    // C has 15 levels of operator precedence. Each level is implemented as a
+    // method that calls the next-higher-precedence method for its operands.
+    // This is the classic "recursive descent with precedence climbing" technique.
+    //
+    // Call chain (lowest to highest precedence):
+    //   parse_expr -> parse_assignment -> parse_ternary -> parse_log_or
+    //   -> parse_log_and -> parse_bit_or -> parse_bit_xor -> parse_bit_and
+    //   -> parse_equality -> parse_relational -> parse_shift -> parse_additive
+    //   -> parse_multiplicative -> parse_unary -> parse_postfix -> parse_primary
+    //
+    // Left-associative operators use `while` loops (e.g., `a + b + c`).
+    // Right-associative operators use recursion (e.g., `a = b = c`).
 
+    /// Entry point for expression parsing. Parses a full C expression.
     pub fn parse_expr(&mut self) -> Result<Expr, String> {
         self.parse_assignment()
     }
 
+    /// Parse assignment expressions (precedence level 1, right-associative).
+    ///
+    /// Handles `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`.
+    /// Right-associativity means `a = b = c` parses as `a = (b = c)`.
     fn parse_assignment(&mut self) -> Result<Expr, String> {
         let lhs = self.parse_ternary()?;
 

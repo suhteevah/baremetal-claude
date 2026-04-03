@@ -571,10 +571,17 @@ pub unsafe fn context_switch(old: &mut CpuContext, new: &CpuContext) {
         new.rip
     );
 
-    // Save callee-saved registers into old context, load from new context.
-    // This is the core context switch: we save the current state and restore
-    // the target state. The `ret` at the end of this block will return to
-    // new.rip because we set rsp to new.rsp which has new.rip on top.
+    // SAFETY: Both contexts must be valid with properly set up stacks.
+    // Interrupts must be disabled by the caller to prevent re-entrant switches.
+    //
+    // This is the core context switch: we save the current CPU state (callee-saved
+    // registers + rip + rflags) into the old context struct, then restore the new
+    // context's state. The saved rip is a label ("2:") within this asm block --
+    // when we eventually switch back to the old task, execution resumes right after
+    // the context switch. For new tasks, rip points to the entry function.
+    //
+    // The jmp to new.rip (rather than ret) is used because we may be jumping to
+    // a function that has never been called before (new task entry point).
     core::arch::asm!(
         // Save callee-saved registers
         "mov [{old} + 0x00], rsp",

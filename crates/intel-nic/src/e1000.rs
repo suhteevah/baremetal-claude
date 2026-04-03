@@ -290,12 +290,15 @@ impl E1000 {
         Ok(mac)
     }
 
-    /// Read MAC address from EEPROM using the EERD register.
+    /// Read MAC address from EEPROM using the EERD (EEPROM Read) register.
     ///
-    /// The MAC address is stored in EEPROM words 0, 1, 2 (6 bytes total).
-    /// The EERD access method differs between e1000 and e1000e/igc:
-    /// - e1000: address in bits [15:8], done bit is bit 4
-    /// - e1000e/igc: address in bits [15:2], done bit is bit 1
+    /// The MAC address is stored in EEPROM words 0, 1, 2 (6 bytes total, little-endian).
+    /// The EERD access method differs between NIC families:
+    /// - e1000 (82540): address in bits [15:8], start bit is bit 0, done bit is bit 4
+    /// - e1000e/igc (I219/I225/I226): address in bits [15:2], start bit is bit 0, done bit is bit 1
+    ///
+    /// The procedure for each word: write address + start bit to EERD, then poll
+    /// until the done bit is set, then read the 16-bit data from bits [31:16].
     fn read_mac_from_eeprom(bar0: *mut u8, variant: NicVariant) -> Result<[u8; 6], ()> {
         let mut mac = [0u8; 6];
 
@@ -360,6 +363,12 @@ impl E1000 {
     // RX Ring Setup
     // =====================================================================
 
+    /// Set up the RX descriptor ring.
+    ///
+    /// Each RX descriptor points to a pre-allocated DMA buffer where the NIC will
+    /// write received packet data. The ring base physical address is programmed into
+    /// RDBAL/RDBAH, the total byte length into RDLEN, and the initial Head=0 / Tail=N-1
+    /// tells the NIC it owns all descriptors and can start filling them with packets.
     fn setup_rx_ring(bar0: *mut u8, ring: &mut RxRing, virt_to_phys: VirtToPhysFn) {
         log::info!("[intel-nic] setting up RX descriptor ring ({} descriptors)", RING_SIZE);
 
@@ -426,6 +435,12 @@ impl E1000 {
     // TX Ring Setup
     // =====================================================================
 
+    /// Set up the TX descriptor ring.
+    ///
+    /// TX descriptors start zeroed with Head=0 and Tail=0 (ring empty -- the NIC
+    /// owns no descriptors initially). To transmit, the driver fills a descriptor
+    /// with a buffer pointer, length, and command bits, then advances Tail via TDT.
+    /// The NIC transmits from Head to Tail-1 and sets DD (Descriptor Done) on completion.
     fn setup_tx_ring(bar0: *mut u8, ring: &mut TxRing, virt_to_phys: VirtToPhysFn) {
         log::info!("[intel-nic] setting up TX descriptor ring ({} descriptors)", RING_SIZE);
 

@@ -1,5 +1,33 @@
-//! ClaudioOS native Rust compiler — cranelift backend, no LLVM.
+//! ClaudioOS native Rust compiler -- Cranelift backend, no LLVM.
+//!
 //! Compiles a subset of Rust to x86_64 machine code directly on bare metal.
+//! This crate proves that Cranelift (a code generator originally built for
+//! Firefox's WebAssembly engine) can run in a `no_std` environment with no
+//! operating system support.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Rust source -> (future: parser + type checker) -> Cranelift IR -> x86_64 machine code
+//! ```
+//!
+//! Currently this crate provides a JIT proof-of-concept that:
+//! 1. Constructs Cranelift IR programmatically (no parser yet)
+//! 2. Compiles IR to native x86_64 machine code via `cranelift-codegen`
+//! 3. Copies the machine code to heap memory (which is executable on bare metal
+//!    since we have no W^X page protection)
+//! 4. Casts the code pointer to a function pointer and calls it
+//!
+//! ## Cranelift JIT Pipeline
+//!
+//! 1. **ISA creation**: `isa::lookup_by_name("x86_64")` creates an x86_64 backend
+//!    with optimization level "speed"
+//! 2. **Signature**: Define the function's ABI (System V AMD64 calling convention)
+//! 3. **IR construction**: Use `FunctionBuilder` to create basic blocks, define
+//!    parameters as block params, emit instructions (`iadd`, `return_`)
+//! 4. **Compilation**: `Context::compile()` runs register allocation, instruction
+//!    selection, and machine code emission
+//! 5. **Execution**: Copy `code_buffer()` to executable memory and call via `transmute`
 
 #![no_std]
 extern crate alloc;
@@ -12,21 +40,30 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
+/// Smoke test: verify that Cranelift's settings builder can be created on bare metal.
+///
+/// This is the simplest possible test that the Cranelift crate links and
+/// initializes correctly in a `no_std` environment.
 pub fn test() -> bool {
-    // Proof that cranelift links on bare metal
     let _builder = cranelift_codegen::settings::builder();
     log::info!("[rustc-lite] cranelift codegen initialized on bare metal!");
     true
 }
 
-/// Full JIT proof-of-concept: build a function with Cranelift, compile it to
-/// x86_64 machine code, write it to executable memory, call it, and verify
-/// the result.
+/// Full JIT proof-of-concept: build, compile, and execute a function at runtime.
 ///
-/// Creates: `fn add(a: i64, b: i64) -> i64 { a + b }`
-/// Then calls `add(3, 4)` and asserts the result is 7.
+/// Constructs `fn add(a: i64, b: i64) -> i64 { a + b }` using Cranelift IR,
+/// compiles it to x86_64 machine code, copies the code to executable memory,
+/// calls `add(3, 4)`, and asserts the result is 7.
 ///
-/// Returns `true` on success.
+/// ## Why This Works on Bare Metal
+///
+/// ClaudioOS uses a simple identity-mapped page table with no W^X enforcement,
+/// so heap-allocated memory is executable. The compiled code is leaked
+/// (`core::mem::forget`) to prevent the allocator from freeing it while the
+/// CPU is executing it.
+///
+/// Returns `true` on success, `false` if any step fails.
 pub fn test_jit() -> bool {
     log::info!("[jit] ============================================");
     log::info!("[jit] CRANELIFT JIT PROOF-OF-CONCEPT");

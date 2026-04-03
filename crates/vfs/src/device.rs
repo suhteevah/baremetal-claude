@@ -356,6 +356,14 @@ pub fn parse_mbr(device: &dyn BlockDevice) -> Result<Vec<PartitionEntry>, Device
         return Err(DeviceError::IoError);
     }
 
+    // MBR partition table: 4 entries of 16 bytes each, starting at offset 446.
+    // Each entry layout:
+    //   Offset 0: boot indicator (0x80 = bootable, 0x00 = not)
+    //   Offset 1-3: CHS address of first sector (ignored, we use LBA)
+    //   Offset 4: partition type byte (0x07=NTFS, 0x83=Linux, 0x0C=FAT32, etc.)
+    //   Offset 5-7: CHS address of last sector (ignored)
+    //   Offset 8-11: LBA of first sector (u32 LE)
+    //   Offset 12-15: number of sectors (u32 LE)
     let mut partitions = Vec::new();
     for i in 0..4 {
         let base = 446 + i * 16;
@@ -400,9 +408,14 @@ pub fn parse_mbr(device: &dyn BlockDevice) -> Result<Vec<PartitionEntry>, Device
 }
 
 /// Map a GPT type GUID to a filesystem type hint.
+///
+/// GPT type GUIDs identify the partition type but not the specific filesystem.
+/// For example, `GPT_GUID_LINUX_FS` is used for both ext4 and btrfs. The
+/// caller should use `detect_filesystem()` (superblock probing) to determine
+/// the actual filesystem type. This function provides a "best guess" hint.
 fn gpt_guid_to_fs_type(guid: &[u8; 16]) -> FsType {
     if guid == &GPT_GUID_LINUX_FS {
-        // Could be ext4 or btrfs — caller must probe the superblock.
+        // Could be ext4 or btrfs -- caller must probe the superblock.
         FsType::Ext4
     } else if guid == &GPT_GUID_MICROSOFT_BASIC {
         // Could be NTFS or FAT32 — caller must probe the superblock.
@@ -425,6 +438,10 @@ fn mbr_type_to_fs_type(type_byte: u8) -> FsType {
 }
 
 /// Parse a UTF-16LE encoded name, stopping at the first null character.
+///
+/// GPT partition names are stored as up to 36 UTF-16LE code units (72 bytes)
+/// starting at offset 56 in each partition entry. This function decodes them
+/// to a Rust `String`, handling only BMP characters (no surrogate pair support).
 fn parse_utf16le_name(bytes: &[u8]) -> String {
     let mut name = String::new();
     let mut i = 0;

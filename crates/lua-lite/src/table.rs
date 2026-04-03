@@ -224,7 +224,13 @@ impl LuaTable {
     }
 }
 
-/// Compare two Lua values as keys (for table lookup).
+/// Compare two Lua values for equality as table keys.
+///
+/// Lua table keys use **raw equality** (not metamethods):
+/// - Integers and floats can match cross-type (e.g., `1` == `1.0` as keys)
+/// - Strings use byte-level comparison
+/// - Floats compare by bit pattern to correctly handle NaN (NaN != NaN)
+/// - Tables and functions would compare by identity (not implemented here)
 fn lua_key_eq(a: &LuaValue, b: &LuaValue) -> bool {
     match (a, b) {
         (LuaValue::Nil, LuaValue::Nil) => true,

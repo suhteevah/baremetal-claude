@@ -310,37 +310,51 @@ pub fn hccparams1_xecp(val: u32) -> u16 {
 
 /// Read a 32-bit register at the given MMIO address.
 ///
+/// Uses `ptr::read_volatile` to prevent the compiler from caching, reordering,
+/// or eliding the read. This is critical for hardware registers where the value
+/// can change between reads (e.g., status registers cleared on read).
+///
 /// # Safety
-/// `addr` must be a valid, mapped MMIO address.
+/// `addr` must be a valid, mapped MMIO address aligned to 4 bytes.
 #[inline]
 pub unsafe fn mmio_read32(addr: usize) -> u32 {
+    // SAFETY: Caller guarantees addr is a valid, aligned MMIO address.
     ptr::read_volatile(addr as *const u32)
 }
 
 /// Write a 32-bit register at the given MMIO address.
 ///
+/// Uses `ptr::write_volatile` to ensure the write reaches hardware immediately
+/// and in program order. Some registers have side effects on write (e.g.,
+/// doorbell registers trigger hardware actions, W1C registers clear bits).
+///
 /// # Safety
-/// `addr` must be a valid, mapped MMIO address.
+/// `addr` must be a valid, mapped MMIO address aligned to 4 bytes.
 #[inline]
 pub unsafe fn mmio_write32(addr: usize, val: u32) {
+    // SAFETY: Caller guarantees addr is a valid, aligned MMIO address.
     ptr::write_volatile(addr as *mut u32, val);
 }
 
 /// Read a 64-bit register at the given MMIO address.
 ///
 /// # Safety
-/// `addr` must be a valid, mapped MMIO address.
+/// `addr` must be a valid, mapped MMIO address aligned to 8 bytes.
+/// On some platforms, 64-bit MMIO reads may need to be split into two 32-bit
+/// reads, but x86_64 supports atomic 64-bit MMIO.
 #[inline]
 pub unsafe fn mmio_read64(addr: usize) -> u64 {
+    // SAFETY: Caller guarantees addr is a valid, aligned MMIO address.
     ptr::read_volatile(addr as *const u64)
 }
 
 /// Write a 64-bit register at the given MMIO address.
 ///
 /// # Safety
-/// `addr` must be a valid, mapped MMIO address.
+/// `addr` must be a valid, mapped MMIO address aligned to 8 bytes.
 #[inline]
 pub unsafe fn mmio_write64(addr: usize, val: u64) {
+    // SAFETY: Caller guarantees addr is a valid, aligned MMIO address.
     ptr::write_volatile(addr as *mut u64, val);
 }
 

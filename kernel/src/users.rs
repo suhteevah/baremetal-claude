@@ -21,8 +21,9 @@ use alloc::vec::Vec;
 /// Minimal SHA-256 for password hashing. We don't have ring or sha2 crate
 /// in-kernel, so this is a compact implementation for auth purposes.
 mod sha256 {
-    /// SHA-256 constants: first 32 bits of the fractional parts of the cube
-    /// roots of the first 64 primes.
+    /// SHA-256 round constants (K): the first 32 bits of the fractional parts
+    /// of the cube roots of the first 64 prime numbers (2, 3, 5, ..., 311).
+    /// These are "nothing up my sleeve" numbers that inject asymmetry.
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
         0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -42,18 +43,24 @@ mod sha256 {
         0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
     ];
 
-    /// Initial hash values: first 32 bits of the fractional parts of the
-    /// square roots of the first 8 primes.
+    /// Initial hash values (H0): the first 32 bits of the fractional parts
+    /// of the square roots of the first 8 primes (2, 3, 5, 7, 11, 13, 17, 19).
     const H0: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     ];
 
+    /// Choice function: if bit of x is 1, choose y; else choose z.
     fn ch(x: u32, y: u32, z: u32) -> u32 { (x & y) ^ (!x & z) }
+    /// Majority function: output bit is the majority of x, y, z bits.
     fn maj(x: u32, y: u32, z: u32) -> u32 { (x & y) ^ (x & z) ^ (y & z) }
+    /// Big sigma 0: rotation-based mixing for the compression function.
     fn sigma0(x: u32) -> u32 { x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22) }
+    /// Big sigma 1: rotation-based mixing for the compression function.
     fn sigma1(x: u32) -> u32 { x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25) }
+    /// Little sigma 0: used in message schedule expansion.
     fn lsigma0(x: u32) -> u32 { x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3) }
+    /// Little sigma 1: used in message schedule expansion.
     fn lsigma1(x: u32) -> u32 { x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10) }
 
     /// Compute SHA-256 hash of the input bytes. Returns 32-byte digest.
@@ -187,20 +194,34 @@ fn hex_digit(c: u8) -> Option<u8> {
 // Constant-time comparison (CRIT-04: timing-safe password verification)
 // ---------------------------------------------------------------------------
 
-/// Compare two byte slices in constant time to prevent timing attacks.
+/// Compare two byte slices in constant time to prevent timing side-channel attacks.
 ///
-/// Returns `true` if and only if both slices have the same length and
-/// identical contents. The comparison always examines every byte in both
-/// slices, regardless of where (or whether) they differ.
+/// # Why Constant-Time?
+/// A naive `==` comparison short-circuits on the first differing byte. An attacker
+/// can measure how long the comparison takes and deduce how many leading bytes
+/// matched. By iterating through the full password hash, we ensure the comparison
+/// time depends ONLY on the length, not on the content.
+///
+/// # Implementation
+/// We XOR each pair of bytes and OR the result into an accumulator (`diff`).
+/// If any byte differs, at least one bit in `diff` will be set. We only check
+/// `diff` at the very end.
+///
+/// # Parameters
+/// - `a`, `b`: The byte slices to compare.
+///
+/// # Returns
+/// `true` if and only if both slices have identical length and contents.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
+        // Length mismatch reveals nothing about content -- this early return is safe.
         return false;
     }
     let mut diff: u8 = 0;
     for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+        diff |= x ^ y; // Accumulate differences without branching
     }
-    diff == 0
+    diff == 0 // True only if all bytes matched (diff never got any bits set)
 }
 
 // ---------------------------------------------------------------------------
@@ -245,8 +266,15 @@ impl User {
 
     /// Set the user's password (stores salted SHA-256 hash, never plaintext).
     ///
-    /// Format: "salt_hex:hash_hex" where hash = SHA-256(salt || password).
-    /// Salt is 16 bytes (32 hex chars) generated from the CSPRNG.
+    /// # Password Storage Format
+    /// `"salt_hex:hash_hex"` where:
+    /// - `salt_hex`: 32 hex characters (16 random bytes from CSPRNG)
+    /// - `hash_hex`: 64 hex characters (SHA-256 digest)
+    /// - `hash = SHA-256(salt_bytes || password_bytes)`
+    ///
+    /// The salt ensures that identical passwords produce different hashes,
+    /// defeating rainbow table attacks. Each password change generates a
+    /// new random salt.
     pub fn set_password(&mut self, password: &str) {
         let mut salt = [0u8; 16];
         crate::csprng::random_bytes(&mut salt);
@@ -295,14 +323,25 @@ impl User {
     /// Check if a public key is in this user's authorized_keys.
     ///
     /// Uses constant-time comparison to prevent timing attacks on key matching.
+    /// Additionally, we iterate ALL keys even after finding a match, to prevent
+    /// leaking *which position* in the authorized_keys list matched (which
+    /// could help an attacker enumerate valid keys).
+    ///
+    /// # Parameters
+    /// - `key`: The public key string to check (e.g., "ssh-ed25519 AAAA...").
+    ///
+    /// # Returns
+    /// `true` if the key matches any entry in the user's authorized_keys.
     pub fn check_public_key(&self, key: &str) -> bool {
         let key_trimmed = key.trim();
         let key_bytes = key_trimmed.as_bytes();
-        // Iterate all keys to avoid leaking which position matched
+        // Iterate ALL keys -- do not short-circuit on match to avoid leaking
+        // information about which key position matched.
         let mut found = false;
         for ak in &self.authorized_keys {
             if constant_time_eq(ak.trim().as_bytes(), key_bytes) {
                 found = true;
+                // Do NOT return early -- continue checking remaining keys
             }
         }
         found

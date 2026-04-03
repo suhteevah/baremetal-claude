@@ -167,6 +167,12 @@ impl FreeSpaceTracker {
     }
 
     /// Initialize from block group items found in the extent tree.
+    ///
+    /// Each block group item in the extent tree describes a contiguous region
+    /// of logical address space with a type (DATA, METADATA, or SYSTEM) and
+    /// a usage counter. We use the `used` field to estimate free space:
+    /// `free = length - used`. A real implementation would also parse the
+    /// free space tree (or free space cache) for exact free extent locations.
     fn add_block_group(&mut self, logical: u64, length: u64, used: u64, flags: u64) {
         log::debug!("[btrfs::freespace] block group: logical=0x{:X}, len={}, used={}, flags=0x{:X}",
             logical, length, used, flags);
@@ -264,12 +270,20 @@ impl FreeSpaceTracker {
 // ============================================================================
 
 #[allow(dead_code)]
-/// Tracks a pending COW transaction.
+/// Tracks a pending COW (Copy-On-Write) transaction.
 ///
-/// btrfs uses copy-on-write for all tree modifications. When a leaf or node is
-/// modified, it is written to a new location, and parents are updated to point
-/// to the new location, propagating up to the root. The superblock is updated
-/// last with the new root pointer and generation.
+/// btrfs uses copy-on-write for ALL tree modifications -- nothing is ever
+/// modified in place. When a leaf or internal node needs updating:
+///   1. Read the old node from its current location
+///   2. Allocate a new disk location from free space
+///   3. Write the modified node to the new location
+///   4. Update the parent node's pointer to the new location (which itself
+///      triggers a COW of the parent, recursing up to the root)
+///   5. Update the superblock with the new root pointer and generation
+///
+/// This provides atomic transactions: if power is lost before the superblock
+/// is written, the old tree is still intact. The generation counter
+/// distinguishes old vs. new data during recovery.
 struct CowTransaction {
     /// The generation counter for this transaction.
     generation: u64,

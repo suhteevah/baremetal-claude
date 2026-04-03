@@ -107,11 +107,16 @@ impl Action {
 }
 
 /// An IPv4 address with optional CIDR prefix for matching.
+///
+/// CIDR (Classless Inter-Domain Routing) notation allows matching ranges
+/// of IP addresses. For example, `192.168.1.0/24` matches all addresses
+/// where the first 24 bits match (i.e., 192.168.1.0 through 192.168.1.255).
+/// A prefix length of 0 matches any address, and 32 matches exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IpMatch {
-    /// IPv4 address as 4 octets.
+    /// IPv4 address as 4 octets (e.g., [192, 168, 1, 0]).
     pub addr: [u8; 4],
-    /// CIDR prefix length (0-32). 0 means match any.
+    /// CIDR prefix length (0-32). 0 = match any address, 32 = exact match.
     pub prefix_len: u8,
 }
 
@@ -153,17 +158,32 @@ impl IpMatch {
         })
     }
 
-    /// Check if a given IPv4 address matches this rule.
+    /// Check if a given IPv4 address matches this CIDR rule.
+    ///
+    /// # How CIDR Matching Works
+    /// We create a bitmask with `prefix_len` leading 1-bits. For example,
+    /// /24 produces mask 0xFFFFFF00. Then we check if the rule's address
+    /// and the packet's address are identical in the masked bits.
+    ///
+    /// # Parameters
+    /// - `addr`: The IPv4 address to test as 4 octets.
+    ///
+    /// # Returns
+    /// `true` if the address falls within the CIDR range.
     pub fn matches(&self, addr: [u8; 4]) -> bool {
         if self.prefix_len == 0 {
-            return true; // 0.0.0.0/0 matches everything
+            return true; // 0.0.0.0/0 matches everything (wildcard)
         }
         if self.prefix_len == 32 {
-            return self.addr == addr;
+            return self.addr == addr; // Exact match (single host)
         }
+        // Convert both addresses to u32 for bitwise comparison
         let rule_u32 = u32::from_be_bytes(self.addr);
         let addr_u32 = u32::from_be_bytes(addr);
+        // Build a mask with `prefix_len` leading 1-bits.
+        // E.g., prefix_len=24: mask = 0xFFFFFF00 (top 24 bits are 1)
         let mask = !((1u32 << (32 - self.prefix_len)) - 1);
+        // Both addresses must agree in the masked (network) bits
         (rule_u32 & mask) == (addr_u32 & mask)
     }
 
@@ -210,29 +230,47 @@ impl FirewallRule {
 // Connection tracking (stateful firewall)
 // ---------------------------------------------------------------------------
 
-/// A tracked connection (simplified 5-tuple).
+/// A tracked connection entry (simplified 5-tuple).
+///
+/// Connection tracking enables **stateful firewalling**: once an outbound
+/// connection is allowed, the return traffic (inbound packets from the same
+/// remote endpoint) is automatically allowed without needing an explicit
+/// inbound rule. This is essential for TCP connections and UDP "sessions".
+///
+/// Entries expire after ~120 seconds of inactivity to prevent stale entries
+/// from accumulating. The table is capped at 1,024 entries.
 #[derive(Debug, Clone)]
 struct ConnTrack {
+    /// Protocol of this connection (TCP, UDP, or ICMP).
     protocol: Protocol,
+    /// Source IP of the original (outbound) packet.
     src_ip: [u8; 4],
+    /// Destination IP of the original (outbound) packet.
     dst_ip: [u8; 4],
+    /// Source port of the original (outbound) packet.
     src_port: u16,
+    /// Destination port of the original (outbound) packet.
     dst_port: u16,
-    /// Timestamp (PIT ticks) when this entry was created.
+    /// PIT tick count when this connection was first tracked.
     created_ticks: u64,
-    /// Timestamp of last packet seen on this connection.
+    /// PIT tick count of the most recent packet on this connection.
+    /// Used for timeout expiration.
     last_seen_ticks: u64,
 }
 
 impl ConnTrack {
-    /// Connection timeout: ~120 seconds at 18.2 Hz PIT.
-    const TIMEOUT_TICKS: u64 = 120 * 18;
+    /// Connection timeout in PIT ticks.
+    /// PIT fires at ~18.2 Hz, so 120 * 18 = 2,160 ticks ~ 120 seconds.
+    /// Connections with no traffic for this long are considered dead.
+    const TIMEOUT_TICKS: u64 = 120 * 18; // ~120 seconds
 
     fn is_expired(&self, now_ticks: u64) -> bool {
         now_ticks.saturating_sub(self.last_seen_ticks) > Self::TIMEOUT_TICKS
     }
 
-    /// Check if a packet is return traffic for this connection.
+    /// Check if a packet is return traffic for this tracked connection.
+    /// Return traffic has the source/destination IP and ports swapped
+    /// compared to the original outbound connection.
     fn is_return_traffic(
         &self,
         proto: Protocol,
@@ -253,15 +291,21 @@ impl ConnTrack {
 // Rate limiting
 // ---------------------------------------------------------------------------
 
-/// Per-IP rate limit tracker.
+/// Per-IP rate limit tracker using a ring buffer of timestamps.
+///
+/// Prevents a single IP from opening too many connections per second,
+/// which is a basic defense against SYN floods and brute-force attacks.
+/// Each IP gets its own tracker (up to 256 tracked IPs).
 #[derive(Debug, Clone)]
 struct RateLimitEntry {
+    /// The IPv4 address being tracked.
     ip: [u8; 4],
-    /// Ring buffer of connection timestamps (PIT ticks).
+    /// Ring buffer of the last 32 connection timestamps (PIT ticks).
+    /// Only the 32 most recent are stored; older ones are overwritten.
     timestamps: [u64; 32],
-    /// Next write index.
+    /// Next write position in the ring buffer (wraps at 32).
     idx: usize,
-    /// Total connections tracked in current window.
+    /// Number of valid entries (0..=32). Grows until the buffer is full.
     count: usize,
 }
 
@@ -300,11 +344,21 @@ impl RateLimitEntry {
 // RuleSet — the complete firewall state
 // ---------------------------------------------------------------------------
 
-/// The firewall rule set with connection tracking and rate limiting.
+/// The complete firewall state: rules, connection tracking, and rate limiting.
+///
+/// ## Rule Evaluation Order
+/// 1. **Stateful check**: If the packet is return traffic for a tracked
+///    outbound connection, ALLOW it immediately (no rules checked).
+/// 2. **Rate limiting**: If inbound and the source IP exceeds the rate
+///    limit, DENY immediately.
+/// 3. **Rule walk**: Iterate rules in order; **first match wins**.
+///    - `Log` rules do NOT terminate the walk -- they log and continue.
+///    - `Allow` and `Deny` rules terminate immediately.
+/// 4. **Default policy**: If no rule matched, apply the default action.
 pub struct RuleSet {
-    /// Ordered list of rules. First match wins.
+    /// Ordered list of firewall rules. Evaluated top-to-bottom; first match wins.
     pub rules: Vec<FirewallRule>,
-    /// Default policy when no rule matches.
+    /// Default policy when no rule matches (default: Allow).
     pub default_policy: Action,
     /// Connection tracking table.
     conn_table: Vec<ConnTrack>,
@@ -424,9 +478,10 @@ impl RuleSet {
     /// rate-limited (denied).
     fn check_rate_limit(&mut self, src: [u8; 4], now_ticks: u64) -> bool {
         if self.rate_limit_per_sec == 0 {
-            return false; // rate limiting disabled
+            return false; // rate limiting disabled (0 = unlimited)
         }
-        let window_ticks = 18u64; // ~1 second at 18.2 Hz PIT
+        // 1-second window in PIT ticks. PIT fires at ~18.2 Hz, so 18 ticks ~ 1 second.
+        let window_ticks = 18u64;
 
         for entry in &mut self.rate_limits {
             if entry.ip == src {
@@ -443,9 +498,24 @@ impl RuleSet {
         false
     }
 
-    /// Main packet check. Returns the action to take.
+    /// Main entry point: check a packet against the firewall and return the verdict.
     ///
-    /// `now_ticks` is the current PIT tick count for connection timeout tracking.
+    /// This implements the full evaluation pipeline:
+    /// 1. Periodic connection table cleanup (every ~10 seconds)
+    /// 2. Stateful return-traffic check (inbound only)
+    /// 3. Rate limiting check (inbound only)
+    /// 4. Sequential rule evaluation (first match wins)
+    /// 5. Default policy fallback
+    ///
+    /// # Parameters
+    /// - `direction`: Whether the packet is inbound or outbound.
+    /// - `protocol`: TCP, UDP, ICMP, or Any.
+    /// - `src`, `dst`: Source and destination IPv4 addresses.
+    /// - `sport`, `dport`: Source and destination ports.
+    /// - `now_ticks`: Current PIT tick count for timeout calculations.
+    ///
+    /// # Returns
+    /// `Action::Allow`, `Action::Deny`, or `Action::Log` (treated as Allow).
     pub fn check_packet(
         &mut self,
         direction: Direction,
@@ -456,7 +526,9 @@ impl RuleSet {
         dport: u16,
         now_ticks: u64,
     ) -> Action {
-        // Periodic cleanup.
+        // Periodic cleanup of expired connections (~every 10 seconds).
+        // 182 ticks at 18.2 Hz PIT = ~10 seconds between cleanups.
+        // Using modulo avoids the need for a separate timer.
         if now_ticks % 182 == 0 {
             self.expire_connections(now_ticks);
         }

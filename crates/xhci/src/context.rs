@@ -159,25 +159,36 @@ impl RawContext {
         self.dwords[lo_index + 1] = (val >> 32) as u32;
     }
 
-    /// Write this context to MMIO memory at the given address.
+    /// Write this context to DMA-accessible memory at the given address.
+    ///
+    /// Each DWORD is written with volatile semantics to ensure the xHCI controller
+    /// (which reads this memory via DMA) sees a consistent, fully-written context.
     ///
     /// # Safety
-    /// `addr` must be a valid, aligned destination for `ctx_size` bytes.
+    /// `addr` must be a valid, DWORD-aligned destination with at least `ctx_size` bytes.
+    /// The memory must be identity-mapped for DMA access by the xHCI controller.
     pub unsafe fn write_to(&self, addr: *mut u32) {
         let dword_count = self.ctx_size / 4;
         for i in 0..dword_count {
+            // SAFETY: addr + i is within the allocated context buffer.
+            // Volatile write ensures the controller sees each DWORD written.
             ptr::write_volatile(addr.add(i), self.dwords[i]);
         }
     }
 
-    /// Read this context from MMIO memory at the given address.
+    /// Read this context from DMA-accessible memory at the given address.
+    ///
+    /// Used to read device contexts that the xHCI controller has written (e.g.,
+    /// Slot Context with device address, Endpoint Context with current state).
     ///
     /// # Safety
-    /// `addr` must be a valid source for `ctx_size` bytes.
+    /// `addr` must be a valid, DWORD-aligned source with at least `ctx_size` bytes.
     pub unsafe fn read_from(addr: *const u32, ctx_size: usize) -> Self {
         let mut ctx = Self::new(ctx_size);
         let dword_count = ctx_size / 4;
         for i in 0..dword_count {
+            // SAFETY: addr + i is within the device context buffer.
+            // Volatile read ensures we see the controller's latest writes.
             ctx.dwords[i] = ptr::read_volatile(addr.add(i));
         }
         ctx
@@ -491,9 +502,17 @@ impl InputContext {
 // Device Context Base Address Array (DCBAA)
 // ---------------------------------------------------------------------------
 
-/// The DCBAA is an array of 64-bit physical pointers to Device Contexts.
-/// Entry 0 is the Scratchpad Buffer Array pointer (or 0 if no scratchpad).
-/// Entries 1..MaxSlots are device slot contexts.
+/// The Device Context Base Address Array (DCBAA).
+///
+/// This is an array of 64-bit physical pointers to Device Contexts, programmed
+/// into the controller via the DCBAAP register. The xHCI controller uses this
+/// array to locate the Device Context for each slot when processing commands.
+///
+/// - Entry 0: Scratchpad Buffer Array pointer (or 0 if no scratchpad buffers needed)
+/// - Entries 1..MaxSlots: pointers to per-slot Device Contexts
+///
+/// Each Device Context contains a Slot Context followed by 31 Endpoint Contexts.
+/// The controller reads/writes these contexts during device enumeration and I/O.
 pub struct Dcbaa {
     /// Backing memory for the array
     buffer: *mut u64,

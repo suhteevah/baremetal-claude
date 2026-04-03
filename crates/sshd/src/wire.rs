@@ -246,8 +246,15 @@ impl<'a> SshReader<'a> {
 // SSH Wire Format Writer
 // ---------------------------------------------------------------------------
 
-/// A buffer-based writer that appends SSH wire-format data.
+/// A buffer-based writer for serializing SSH wire-format data.
+///
+/// Appends SSH-encoded primitives (byte, boolean, uint32, string, mpint,
+/// name-list) to an internal Vec<u8>. Call `into_bytes()` to consume the
+/// writer and retrieve the serialized data.
+///
+/// All multi-byte integers are written big-endian per RFC 4251 section 5.
 pub struct SshWriter {
+    /// The internal buffer accumulating serialized bytes.
     buf: Vec<u8>,
 }
 
@@ -327,22 +334,33 @@ impl SshWriter {
         self.write_string_utf8(&joined);
     }
 
-    /// Write an mpint (RFC 4251 §5).
-    /// Input is unsigned big-endian bytes. Adds leading zero if high bit set.
+    /// Write an mpint (multi-precision integer, RFC 4251 section 5).
+    ///
+    /// SSH mpints are stored as a uint32 length prefix followed by big-endian
+    /// two's complement bytes. For positive values (which is all we deal with),
+    /// a leading zero byte MUST be prepended if the high bit of the first
+    /// byte is set -- otherwise the value would be misinterpreted as negative.
+    ///
+    /// Leading zero bytes in the input are stripped (except for the value zero
+    /// itself, which is encoded as length 0).
+    ///
+    /// # Parameters
+    /// - `data`: Unsigned big-endian bytes representing the integer.
     pub fn write_mpint(&mut self, data: &[u8]) {
-        // Strip leading zeros
+        // Strip leading zero bytes (mpint should be minimal encoding)
         let stripped = match data.iter().position(|&b| b != 0) {
             Some(pos) => &data[pos..],
-            None => &[0u8; 0], // value is zero
+            None => &[0u8; 0], // all zeros = the value zero
         };
 
         if stripped.is_empty() {
-            // Zero: length 0
+            // The integer zero is encoded as length 0 (no data bytes)
             self.write_uint32(0);
         } else if stripped[0] & 0x80 != 0 {
-            // High bit set: prepend zero byte for positive number
+            // High bit set: prepend a zero byte so the value reads as positive
+            // in two's complement. Without this, 0xFF would mean -1 instead of 255.
             self.write_uint32(stripped.len() as u32 + 1);
-            self.buf.push(0);
+            self.buf.push(0); // sign byte
             self.buf.extend_from_slice(stripped);
         } else {
             self.write_uint32(stripped.len() as u32);
@@ -362,10 +380,24 @@ impl SshWriter {
 
 /// Calculate the padding length for an SSH binary packet.
 ///
-/// RFC 4253 §6: `packet_length || padding_length || payload || padding`
-/// - `packet_length` = 4 bytes (not included in itself)
-/// - Total of (padding_length + payload + padding) must be multiple of block_size
-/// - Padding must be 4..=255 bytes
+/// Per RFC 4253 section 6, the total packet (including the 4-byte
+/// packet_length field) must be a multiple of the cipher block size
+/// (or 8, whichever is larger). Additionally, padding must be at
+/// least 4 bytes and at most 255 bytes.
+///
+/// # Formula
+/// ```text
+/// total = packet_length(4) + padding_length(1) + payload(N) + padding(P)
+/// total must be a multiple of block_size
+/// P >= 4
+/// ```
+///
+/// # Parameters
+/// - `payload_len`: Length of the SSH message payload in bytes.
+/// - `block_size`: The cipher's block size (or 8 for unencrypted).
+///
+/// # Returns
+/// The number of random padding bytes to append.
 pub fn compute_padding(payload_len: usize, block_size: usize) -> usize {
     let block = if block_size < UNENCRYPTED_BLOCK_SIZE {
         UNENCRYPTED_BLOCK_SIZE
