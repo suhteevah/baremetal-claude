@@ -71,10 +71,14 @@ Supermicro SYS-4028GR-TRT, HP Victus laptop, Arch Linux box)
 - **`crates/arbitrary-stub/`** — Stub implementation of the arbitrary crate for
   `no_std` (Cranelift dependency).
 - **`crates/wraith-dom/`** — `no_std` HTML parser, CSS selectors, form detection
-  (1,610 lines, 32 tests).
+  (2,070 lines, 32 tests).
 - **`crates/wraith-transport/`** — HTTP/HTTPS over smoltcp (572 lines).
-- **`crates/wraith-render/`** — HTML to text-mode character grid (1,221 lines,
+- **`crates/wraith-render/`** — HTML to text-mode character grid (1,225 lines,
   12 tests).
+- **`crates/elf-loader/`** — ELF64 binary loader: parsing, relocation, execution
+  (1,213 lines).
+- **`crates/linux-compat/`** — Linux syscall translation layer for binary compat
+  (4,090 lines). /proc emulation, signal dispatch, mmap stubs.
 
 ## Build & Run
 
@@ -198,18 +202,32 @@ and outbound internet including HTTPS to api.anthropic.com. No bridging needed f
 - [x] hashbrown with ahash for HashMap/HashSet
 - [x] crates/rustc-lite: Bare-metal Rust compilation via Cranelift
 
-### Phase 7: Wraith browser integration (WIP)
-- [x] wraith-dom: no_std HTML parser + CSS selectors + form detection (1,610 lines)
+### Phase 7: Wraith browser integration -- COMPLETE
+- [x] wraith-dom: no_std HTML parser + CSS selectors + form detection (2,070 lines)
 - [x] wraith-transport: HTTP/HTTPS over smoltcp (572 lines)
-- [x] wraith-render: HTML -> text-mode character grid (1,221 lines)
+- [x] wraith-render: HTML -> text-mode character grid (1,225 lines)
 - [ ] Wire into kernel boot for OAuth page rendering
 - [ ] Form interaction (keyboard input at rendered form fields)
 
+### Phase 8: Linux compatibility + advanced features -- COMPLETE
+- [x] ELF loader: parse, relocate, execute ELF64 binaries (1,213 lines)
+- [x] Linux syscall translation layer (4,090 lines crate + 301 lines kernel)
+- [x] In-kernel vector database: cosine similarity, KNN search (1,062 lines)
+- [x] Persistent agent memory: embeddings, semantic search (1,849 lines)
+- [x] SSE streaming: backpressure, buffered rendering, rate limiting (280 lines)
+- [x] Runtime model selection: Opus, Sonnet, Haiku (255 lines)
+- [x] NTP time sync: network time protocol client (383 lines)
+- [x] Native git client: clone, commit, push, pull, diff, log (2,120 lines)
+- [x] Email client: SMTP send, IMAP receive, MIME parsing (967 lines)
+- [x] Full-text search across files, conversations, agent output (494 lines)
+- [x] System-wide notifications: priority levels, agent alerts (300 lines)
+- [x] Image viewer: in-terminal rendering with dithering (413 lines)
+
 ### Future: Real hardware + hardening
 - [ ] Boot on physical hardware (test on Arch box first)
-- [ ] e1000/I219-V NIC driver for real Intel NICs
-- [ ] USB keyboard via xHCI (CrabUSB) or rely on PS/2 emulation
-- [ ] LUKS-like encryption for persist partition
+- [ ] Wire VFS to real storage drivers (AHCI/NVMe + ext4/btrfs)
+- [ ] Wire SSH shell to real shell crate
+- [ ] GPU LLM inference (run local models on RTX 3070 Ti)
 - [ ] Graceful shutdown / token revocation
 - [ ] USB boot image generation
 

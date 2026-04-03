@@ -22,7 +22,7 @@ single-address-space async Rust application manages all hardware.
 |  | (pane)  | | (pane)  | | (pane)   | | (pane)   | | saver     |   |
 |  +---------+ +---------+ +----------+ +----------+ +-----------+   |
 |  +-----------------------------------------------------------+     |
-|  | AI-Native Shell  (28 builtins + natural language -> Claude)|     |
+|  | AI-Native Shell  (45+ builtins + natural language -> Claude)|     |
 |  +-----------------------------------------------------------+     |
 +=====================================================================+
 |                      SESSION MANAGEMENT                             |
@@ -45,6 +45,23 @@ single-address-space async Rust application manages all hardware.
 |  | Rust Comp | | Wraith Browser (DOM + Transport + Render)         | |
 |  | Cranelift | +---------------------------------------------------+|
 |  +-----------+                                                      |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  | Git Client        | | Email (SMTP/IMAP) | | NTP Time Sync     |  |
+|  | clone/push/pull   | | send/receive/MIME | | drift correction  |  |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  | VectorDB + Agent  | | Streaming (SSE    | | Model Select      |  |
+|  | Memory (RAG)      | | backpressure)     | | Opus/Sonnet/Haiku |  |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  +-------------------+ +-------------------+ +-------------------+  |
+|  | Search (full-text)| | Notifications     | | Image Viewer      |  |
+|  +-------------------+ +-------------------+ +-------------------+  |
++=====================================================================+
+|                       LINUX COMPATIBILITY                           |
+|  +---------------------------------------------------------------+ |
+|  | ELF Loader (parse, relocate, execute ELF64 binaries)          | |
+|  | Linux Syscall Translation (4,090 lines, /proc, signals, mmap) | |
+|  +---------------------------------------------------------------+ |
 +=====================================================================+
 |                       FILESYSTEM LAYER                              |
 |  +---------------------------------------------------------------+ |
@@ -86,7 +103,7 @@ single-address-space async Rust application manages all hardware.
 |  +---------------------------------------------------------------+ |
 |  | Firewall | Encryption | Swap | Cron | VConsoles | Clipboard   | |
 |  +---------------------------------------------------------------+ |
-|  | Power Mgmt | Touchpad | ManPages | NetTools                    | |
+|  | Power Mgmt | Touchpad | ManPages | NetTools | Linux Compat      | |
 |  +---------------------------------------------------------------+ |
 |  | Async Executor (interrupt-driven, hlt when idle)              | |
 |  +---------------------------------------------------------------+ |
@@ -217,6 +234,8 @@ kernel
   |     +-- claudio-terminal (split-pane renderer)
   |     +-- claudio-net (VirtIO + smoltcp + TLS)
   +-- claudio-shell
+  +-- claudio-elf-loader
+  +-- claudio-linux-compat
   +-- claudio-vfs
   |     +-- (trait implemented by ext4, btrfs, ntfs)
   +-- claudio-ext4
@@ -246,7 +265,7 @@ kernel
   |     +-- cranelift-control-nostd
   |     +-- rustc-hash-nostd
   |     +-- arbitrary-stub
-  +-- kernel modules (42):
+  +-- kernel modules (53):
         acpi_init, smp_init, usb, intel_nic, ssh_server,
         rtc, mouse, ipc, init, users, sysmon, splash,
         boot_sound, themes, screensaver, browser, filemanager,
@@ -254,15 +273,17 @@ kernel
         firewall, nettools, touchpad, manpages, swap, cron,
         vconsole, clipboard, dashboard, agent_loop, executor,
         framebuffer, interrupts, keyboard, memory, pci,
-        serial, gdt, logger, terminal
+        serial, gdt, logger, terminal, git, agent_memory,
+        vectordb, email, search, image_viewer, ntp,
+        linux_compat, notifications, streaming, model_select
 ```
 
-## All 36 Crates + 42 Kernel Modules
+## All 38 Crates + 53 Kernel Modules
 
 | # | Crate | Path | Lines | Description |
 |---|-------|------|-------|-------------|
-| 1 | `claudio-os` | `kernel/` | 18,000+ | Kernel binary: boot, hardware init, async executor, dashboard, 42 modules |
-| 2 | `claudio-terminal` | `crates/terminal/` | 1,794 | Framebuffer terminal, split panes, ANSI/VTE, font rendering |
+| 1 | `claudio-os` | `kernel/` | 29,533 | Kernel binary: boot, hardware init, async executor, dashboard, 53 modules |
+| 2 | `claudio-terminal` | `crates/terminal/` | 2,930 | Framebuffer terminal, split panes, ANSI/VTE, font rendering |
 | 3 | `claudio-net` | `crates/net/` | 3,172 | VirtIO-net driver, smoltcp TCP/IP, TLS 1.3, HTTP/SSE |
 | 4 | `claudio-api` | `crates/api-client/` | 1,849 | Anthropic Messages API client, SSE streaming, tool use protocol |
 | 5 | `claudio-auth` | `crates/auth/` | 395 | OAuth 2.0 device flow (RFC 8628), API key fallback, token refresh |
@@ -272,8 +293,8 @@ kernel
 | 9 | `python-lite` | `crates/python-lite/` | 2,388 | Minimal Python interpreter (vars, loops, functions), 28 tests |
 | 10 | `js-lite` | `crates/js-lite/` | 5,229 | JavaScript evaluator for Cloudflare challenge solving |
 | 11 | `rustc-lite` | `crates/rustc-lite/` | 142 | Bare-metal Rust compiler via Cranelift backend |
-| 12 | `claudio-shell` | `crates/shell/` | 2,884 | AI-native shell: 28 builtins + natural language mode |
-| 13 | `claudio-vfs` | `crates/vfs/` | 1,930 | Virtual filesystem: mount table, GPT/MBR, POSIX file API |
+| 12 | `claudio-shell` | `crates/shell/` | 2,884 | AI-native shell: 45+ builtins + natural language mode |
+| 13 | `claudio-vfs` | `crates/vfs/` | 2,871 | Virtual filesystem: mount table, GPT/MBR, POSIX file API |
 | 14 | `claudio-ext4` | `crates/ext4/` | 3,013 | ext4 filesystem: superblock, inodes, extent trees, directories |
 | 15 | `claudio-btrfs` | `crates/btrfs/` | 4,006 | btrfs filesystem: B-trees, chunks, subvolumes, CRC32C, COW |
 | 16 | `claudio-ntfs` | `crates/ntfs/` | 3,561 | NTFS filesystem: MFT, data runs, B+ tree indexes |
@@ -289,22 +310,28 @@ kernel
 | 26 | `claudio-wifi` | `crates/wifi/` | 3,513 | WiFi: Intel AX201/AX200, WPA2/WPA3, scanning, association |
 | 27 | `claudio-bluetooth` | `crates/bluetooth/` | 3,075 | Bluetooth: HCI/L2CAP/GAP/GATT, USB transport, HID |
 | 28 | `claudio-usb-storage` | `crates/usb-storage/` | 1,357 | USB mass storage: BOT protocol, SCSI command set |
-| 29 | `wraith-dom` | `crates/wraith-dom/` | 2,070 | no_std HTML parser, CSS selectors, form detection |
-| 30 | `wraith-render` | `crates/wraith-render/` | 1,225 | HTML to text-mode character grid renderer |
-| 31 | `wraith-transport` | `crates/wraith-transport/` | 572 | HTTP/HTTPS client over smoltcp |
-| 32 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
-| 33 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
-| 34 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
-| 35 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
-| 36 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
+| 29 | `claudio-elf-loader` | `crates/elf-loader/` | 1,213 | ELF binary loader: parsing, relocation, execution |
+| 30 | `claudio-linux-compat` | `crates/linux-compat/` | 4,090 | Linux syscall translation layer for binary compatibility |
+| 31 | `wraith-dom` | `crates/wraith-dom/` | 2,070 | no_std HTML parser, CSS selectors, form detection |
+| 32 | `wraith-render` | `crates/wraith-render/` | 1,225 | HTML to text-mode character grid renderer |
+| 33 | `wraith-transport` | `crates/wraith-transport/` | 572 | HTTP/HTTPS client over smoltcp |
+| 34 | `cranelift-codegen-nostd` | `crates/cranelift-codegen-nostd/` | -- | Forked cranelift-codegen for no_std |
+| 35 | `cranelift-frontend-nostd` | `crates/cranelift-frontend-nostd/` | -- | Forked cranelift-frontend for no_std |
+| 36 | `cranelift-codegen-shared-nostd` | `crates/cranelift-codegen-shared-nostd/` | -- | Forked cranelift-codegen-shared for no_std |
+| 37 | `cranelift-control-nostd` | `crates/cranelift-control-nostd/` | -- | Forked cranelift-control for no_std |
+| 38 | `rustc-hash-nostd` | `crates/rustc-hash-nostd/` | -- | Forked rustc-hash for no_std |
 | -- | `arbitrary-stub` | `crates/arbitrary-stub/` | -- | no_std stub for arbitrary crate (Cranelift dep) |
 
-### Kernel Modules (42)
+### Kernel Modules (53)
 
 | Module | Path | Lines | Description |
 |--------|------|-------|-------------|
-| `dashboard` | `kernel/src/dashboard.rs` | 1,862 | Main dashboard loop, pane management, input dispatch, layout engine |
-| `main` | `kernel/src/main.rs` | 1,248 | Boot sequence, hardware init, stack switch, async entry point |
+| `git` | `kernel/src/git.rs` | 2,120 | Native git client: clone, commit, push, pull, diff, log, branch, status |
+| `dashboard` | `kernel/src/dashboard.rs` | 2,024 | Main dashboard loop, pane management, input dispatch, layout engine |
+| `agent_memory` | `kernel/src/agent_memory.rs` | 1,849 | Persistent agent memory: embeddings, semantic search, cross-session recall |
+| `main` | `kernel/src/main.rs` | 1,261 | Boot sequence, hardware init, stack switch, async entry point |
+| `vectordb` | `kernel/src/vectordb.rs` | 1,062 | In-kernel vector database: cosine similarity, KNN search, RAG support |
+| `email` | `kernel/src/email.rs` | 967 | Email client: SMTP send, IMAP receive, MIME parsing, composition |
 | `screensaver` | `kernel/src/screensaver.rs` | 951 | 5 modes: 3D starfield, matrix rain, bouncing logo, pipes, digital clock |
 | `power` | `kernel/src/power.rs` | 921 | ACPI S3/S5 suspend/resume, battery status monitoring, power profiles |
 | `encryption` | `kernel/src/encryption.rs` | 905 | LUKS-compatible disk encryption, key derivation, crypto layer |
@@ -312,7 +339,7 @@ kernel
 | `firewall` | `kernel/src/firewall.rs` | 788 | Stateful packet filtering, allow/deny rules, IP/port-based filtering |
 | `nettools` | `kernel/src/nettools.rs` | 787 | ping, wget, curl, netstat, ifconfig, dns, traceroute, nslookup |
 | `ipc` | `kernel/src/ipc.rs` | 783 | Message bus (per-agent inboxes), named channels (4K ring buffers), shared memory |
-| `agent_loop` | `kernel/src/agent_loop.rs` | 774 | Agent tool loop, SSE streaming, tool execution dispatch |
+| `agent_loop` | `kernel/src/agent_loop.rs` | 1,055 | Agent tool loop, SSE streaming, tool execution dispatch |
 | `touchpad` | `kernel/src/touchpad.rs` | 734 | PS/2 and USB touchpad driver, gesture recognition (tap, scroll, two-finger) |
 | `manpages` | `kernel/src/manpages.rs` | 674 | Built-in manual pages for all commands and subsystems |
 | `browser` | `kernel/src/browser.rs` | 659 | Text-mode web browser pane: wraith HTML/CSS, URL bar, link following |
@@ -321,18 +348,25 @@ kernel
 | `conversations` | `kernel/src/conversations.rs` | 517 | Conversation management: list/select/rename/delete via claude.ai REST API |
 | `init` | `kernel/src/init.rs` | 505 | fw_cfg config loading, hostname, log level, auto-mount, startup scripts |
 | `swap` | `kernel/src/swap.rs` | 499 | Virtual memory swap to disk, configurable swap partitions |
+| `search` | `kernel/src/search.rs` | 494 | Full-text search across files, conversations, and agent output |
 | `session_manager` | `kernel/src/session_manager.rs` | 487 | Session auto-refresh: JWT expiry parsing, periodic token refresh |
 | `intel_nic` | `kernel/src/intel_nic.rs` | 454 | Intel NIC -> smoltcp Device adapter, page-table virt-to-phys, DHCP |
 | `users` | `kernel/src/users.rs` | 440 | User database, SHA-256 password auth, SSH public key auth |
+| `image_viewer` | `kernel/src/image_viewer.rs` | 413 | In-terminal image rendering with dithering for framebuffer display |
 | `cron` | `kernel/src/cron.rs` | 410 | Periodic task scheduler, crontab-style time specifications |
 | `mouse` | `kernel/src/mouse.rs` | 402 | USB HID boot protocol mouse, XOR crosshair cursor, event queue |
 | `interrupts` | `kernel/src/interrupts.rs` | 387 | IDT setup, exception handlers, IRQ routing, interrupt stacks |
+| `ntp` | `kernel/src/ntp.rs` | 383 | NTP client: network time sync, drift correction, accurate wall clock |
 | `vconsole` | `kernel/src/vconsole.rs` | 372 | Virtual consoles, Ctrl+Alt+F1-F6 switching, independent sessions |
 | `themes` | `kernel/src/themes.rs` | 365 | 9 color themes: default, solarized-dark/light, monokai, dracula, nord, gruvbox, claudioos, templeos |
 | `sysmon` | `kernel/src/sysmon.rs` | 306 | System monitor pane: CPU/memory/network/agent stats, ANSI progress bars |
+| `linux_compat` | `kernel/src/linux_compat.rs` | 301 | Linux binary compat: syscall translation, /proc emulation, signal dispatch |
+| `notifications` | `kernel/src/notifications.rs` | 300 | System-wide notification framework: priority levels, agent alerts, toasts |
 | `rtc` | `kernel/src/rtc.rs` | 299 | CMOS RTC (MC146818), BCD/binary decode, 12h/24h, PIT-corrected wall clock |
 | `executor` | `kernel/src/executor.rs` | 287 | Interrupt-driven async executor, hlt when idle, task waker |
+| `streaming` | `kernel/src/streaming.rs` | 280 | SSE streaming: backpressure, buffered rendering, rate limiting |
 | `framebuffer` | `kernel/src/framebuffer.rs` | 263 | GOP framebuffer init, double-buffered, dirty region tracking |
+| `model_select` | `kernel/src/model_select.rs` | 255 | Runtime model switching: Opus, Sonnet, Haiku, per-agent config |
 | `pci` | `kernel/src/pci.rs` | 245 | PCI bus enumeration, BAR mapping, bus mastering, device discovery |
 | `smp_init` | `kernel/src/smp_init.rs` | 233 | Multi-core boot: MADT-driven AP startup, APIC mode, legacy PIC disable |
 | `splash` | `kernel/src/splash.rs` | 214 | Boot splash: ASCII art "CLAUDIOOS" logo, 4-stage progress bar |
@@ -382,3 +416,5 @@ claude.ai API / api.anthropic.com
 7. **Agent collaboration** -- IPC message bus, named channels, and shared memory let agents communicate and collaborate.
 8. **Daily-driver features** -- Firewall, disk encryption, swap, cron, virtual consoles, clipboard, power management, touchpad, and man pages make it usable as a real OS.
 9. **Full wireless stack** -- WiFi (WPA2/WPA3) and Bluetooth (HCI/L2CAP/GAP/GATT) with USB transport for untethered operation.
+10. **Linux binary compatibility** -- ELF loader + syscall translation layer runs unmodified Linux binaries on bare metal.
+11. **Semantic memory** -- In-kernel vector database with cosine similarity powers agent memory and RAG across sessions.

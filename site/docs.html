@@ -105,28 +105,33 @@ by hardware interrupts.</p>
 <p><strong>Source entry point:</strong> <code>kernel/src/main.rs</code></p>
 
 <pre><code class="language-plaintext">+-----------------------------------------------------+
-|                  Agent Dashboard                     |
-|  +----------+ +----------+ +----------+             |
-|  | Agent 1  | | Agent 2  | | Agent 3  |  ...       |
-|  | (pane)   | | (pane)   | | (pane)   |             |
-|  +----------+ +----------+ +----------+             |
+|          Agent Dashboard (6 pane types)              |
+|  +--------+ +--------+ +--------+ +------+ +------+ |
+|  | Agent  | | Shell  | |Browser | |SysMon| |Scrn- | |
+|  | (Claude| | (45+   | |(wraith | |(CPU/ | |saver | |
+|  |  +IPC) | |  cmds) | | + TLS) | | mem) | |(5x)  | |
+|  +--------+ +--------+ +--------+ +------+ +------+ |
 +-----------------------------------------------------+
-|              Agent Session Manager                   |
-|         (async tasks, one per agent)                 |
+|  Agent Manager | Session Refresh | SSH Daemon (PQ)   |
+|  Git | Email | VectorDB | Streaming | Model Select   |
+|  NTP | Search | Notifications | Image Viewer         |
 +--------------+--------------+-----------------------+
 |  API Client  |     Auth     |   Terminal Renderer   |
 |  (Messages   |  (OAuth      |   (framebuffer +      |
 |   API + SSE) |   device     |    ANSI + split       |
 |              |   flow)      |    panes)             |
 +--------------+--------------+-----------------------+
-|              Async Executor (interrupt-driven)       |
+|  Linux Compat (ELF loader + syscall translation)    |
++--------------+--------------+-----------------------+
+|              Async Executor (interrupt-driven, SMP)  |
 +-----------------------------------------------------+
-|     Net (smoltcp + TLS)    |    FS (FAT32 persist)  |
+|  Net (smoltcp + TLS 1.3)  | VFS (ext4/btrfs/NTFS)  |
 +----------------------------+------------------------+
-|   NIC Driver (virtio-net / e1000)  |  PS/2 Keyboard |
+|  Intel NIC | VirtIO-net | WiFi | AHCI | NVMe | xHCI|
+|  Bluetooth | USB Storage | HDA Audio | GPU | ACPI  |
 +------------------------------------+----------------+
-|              x86_64 Kernel Core                      |
-|   (paging, heap, GDT/IDT, interrupts, PCI)          |
+|              x86_64 Kernel Core (SMP)                |
+|   paging, 48MB heap, GDT/IDT, APIC, PCI, interrupts|
 +-----------------------------------------------------+
 |              UEFI Boot (bootloader crate v0.11)      |
 +-----------------------------------------------------+</code></pre>

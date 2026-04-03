@@ -101,6 +101,28 @@ type: project
 - [x] Web browser pane (wraith-based, URL bar, link following, history, scroll)
 - [x] File manager pane (directory listing, navigation, copy/move/rename/delete/search)
 - [x] System monitor pane (CPU/memory/network/agent stats, auto-refresh)
+- [x] Image viewer (in-terminal rendering with dithering)
+- [x] Unicode support (full UTF-8 rendering in terminal and editor)
+
+## DONE — Linux Compatibility & ELF Loading
+- [x] ELF loader (parse, relocate, execute ELF64 binaries, 1,213 lines)
+- [x] Linux syscall translation layer (4,090 lines crate + 301 lines kernel module)
+- [x] /proc emulation, signal dispatch, mmap stubs
+
+## DONE — Vector Store & Agent Memory
+- [x] In-kernel vector database (cosine similarity, KNN search, RAG support, 1,062 lines)
+- [x] Persistent agent memory (embeddings, semantic search, cross-session recall, 1,849 lines)
+
+## DONE — Streaming & Model Selection
+- [x] SSE streaming with backpressure, buffered rendering, rate limiting (280 lines)
+- [x] Runtime model selection (Opus, Sonnet, Haiku) with per-agent configuration (255 lines)
+
+## DONE — NTP, Git, Email, Search, Notifications
+- [x] NTP time sync (network time protocol client, drift correction, 383 lines)
+- [x] Native git client (clone, commit, push, pull, diff, log, branch, status, 2,120 lines)
+- [x] Email client (SMTP send, IMAP receive, MIME parsing, composition, 967 lines)
+- [x] Full-text search across files, conversations, and agent output (494 lines)
+- [x] System-wide notifications (priority levels, agent alerts, toasts, 300 lines)
 
 ## TODO — Hardware Integration
 - [ ] Wire VFS to real storage drivers (AHCI/NVMe + ext4/btrfs)
@@ -118,7 +140,7 @@ type: project
 - [ ] Better font rendering (anti-aliased if GPU available)
 - [ ] Tab completion for file paths and command names
 
-## Published Open-Source Crates (22)
+## Published Open-Source Crates (29)
 1. ext4-rw
 2. btrfs-nostd
 3. ntfs-rw
@@ -141,3 +163,10 @@ type: project
 20. wifi-nostd
 21. bluetooth-nostd
 22. usb-storage-nostd
+23. elf-loader-nostd
+24. linux-compat-nostd
+25. vfs-nostd
+26. shell-nostd
+27. terminal-nostd
+28. net-nostd
+29. agent-nostd
