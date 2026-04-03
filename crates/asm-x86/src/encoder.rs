@@ -1,4 +1,58 @@
 //! x86_64 instruction encoding: REX prefix, ModR/M, SIB, displacement, immediate.
+//!
+//! Encodes parsed x86_64 assembly instructions into raw machine code bytes.
+//! This is the final stage of the assembler pipeline: parser -> encoder -> linker.
+//!
+//! ## x86_64 Instruction Encoding
+//!
+//! x86_64 instructions have a variable-length encoding with up to 6 components:
+//!
+//! ```text
+//! [Legacy prefixes] [REX prefix] [Opcode] [ModR/M] [SIB] [Displacement] [Immediate]
+//!    0-4 bytes        0-1 byte    1-3 bytes  0-1     0-1     0/1/4          0/1/2/4/8
+//! ```
+//!
+//! ### REX Prefix (0x40-0x4F)
+//!
+//! Required for 64-bit operand size and to access registers R8-R15:
+//! ```text
+//!   0100 W R X B
+//!        | | | |
+//!        | | | +-- B: Extension of ModR/M r/m or SIB base (access R8-R15)
+//!        | | +---- X: Extension of SIB index (access R8-R15 as index)
+//!        | +------ R: Extension of ModR/M reg field (access R8-R15)
+//!        +-------- W: 64-bit operand size (REX.W=1 for 64-bit operations)
+//! ```
+//!
+//! ### ModR/M Byte
+//!
+//! Encodes register/memory operands: `[mod(2)][reg(3)][r/m(3)]`
+//! - `mod=11`: Register-register (both operands are registers)
+//! - `mod=00`: Memory, no displacement (except RBP/R13 which need disp8=0)
+//! - `mod=01`: Memory + 8-bit signed displacement
+//! - `mod=10`: Memory + 32-bit signed displacement
+//! - `r/m=100`: Signals that a SIB byte follows
+//! - `r/m=101` with `mod=00`: RIP-relative addressing
+//!
+//! ### SIB Byte (Scale-Index-Base)
+//!
+//! Used for complex addressing modes like `[base + index*scale + disp]`:
+//! ```text
+//!   [scale(2)][index(3)][base(3)]
+//!   scale: 00=1, 01=2, 10=4, 11=8
+//!   index=100: No index register (just base+disp)
+//!   base=101 with mod=00: No base register (absolute addressing)
+//! ```
+//!
+//! ## Supported Instructions
+//!
+//! Arithmetic: `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`, `neg`, `not`, `mul`, `imul`, `div`, `idiv`
+//! Data movement: `mov`, `movzx`, `movsx`, `lea`, `xchg`, `push`, `pop`
+//! Shifts: `shl`, `shr`, `sar`
+//! Control flow: `jmp`, `je/jz`, `jne/jnz`, `jg`, `jge`, `jl`, `jle`, `ja`, `jae`, `jb`, `jbe`, `call`, `ret`
+//! Conditional: `sete`, `setne`, `cmove`, `cmovne`, etc.
+//! SSE: `movsd`, `addsd`, `subsd`, `mulsd`, `divsd`, `movss`, `addss`, etc.
+//! System: `syscall`, `sysret`, `int`, `hlt`, `nop`, `cdq`, `cqo`
 
 use alloc::string::String;
 use alloc::vec;
@@ -7,7 +61,10 @@ use alloc::vec::Vec;
 use crate::parser::{Instruction, MemOperand, Operand, RegKind, RegSize, Register};
 use crate::relocations::Fixup;
 
-/// Encoded instruction bytes with optional fixups for label references.
+/// Result of encoding a single instruction: raw bytes plus relocation fixups.
+///
+/// Fixups are needed for label references that cannot be resolved until all
+/// instructions have been laid out (forward references, absolute addresses).
 pub struct EncodedInst {
     pub bytes: Vec<u8>,
     pub fixups: Vec<Fixup>,
@@ -121,7 +178,13 @@ fn simple(bytes: Vec<u8>) -> EncodedInst {
 
 // === REX prefix helpers ===
 
-/// Build REX prefix byte.  Returns None if not needed.
+/// Build a REX prefix byte (0x40-0x4F). Returns `None` if no REX bits are set.
+///
+/// The REX prefix is required when:
+/// - `w=true`: 64-bit operand size (REX.W)
+/// - `reg_ext=true`: ModR/M reg field addresses R8-R15 (REX.R)
+/// - `index_ext=true`: SIB index field addresses R8-R15 (REX.X)
+/// - `rm_ext=true`: ModR/M r/m field addresses R8-R15 (REX.B)
 fn rex(w: bool, reg_ext: bool, index_ext: bool, rm_ext: bool) -> Option<u8> {
     let val = 0x40
         | if w { 0x08 } else { 0 }

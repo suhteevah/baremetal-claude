@@ -1,9 +1,22 @@
-//! x86_64 code generation via Cranelift for Go.
+//! x86_64 code generation for go-lite via Cranelift.
 //!
-//! Maps Go types to Cranelift IR types, generates function bodies,
-//! handles goroutine stacks (simplified cooperative), channels, defer stack,
-//! multiple return values, slices (ptr, len, cap), strings (ptr, len),
-//! interfaces (type_id, data_ptr).
+//! Translates Go AST to Cranelift IR and compiles to native x86_64 machine code.
+//! This module handles Go-specific features that differ from C:
+//!
+//! - **Multiple return values**: Go functions can return multiple values. Each
+//!   return type becomes a separate `AbiParam` in the Cranelift signature.
+//! - **Fat types as pointers**: Slices (`ptr, len, cap`), strings (`ptr, len`),
+//!   maps, channels, and interfaces are all represented as `I64` pointers to
+//!   their runtime structures.
+//! - **Short variable declarations** (`:=`): Create new Cranelift variables
+//!   on-the-fly without explicit type annotations.
+//! - **Go-specific statements**: `i++`/`i--` are statements (not expressions),
+//!   compiled as load-add/sub-store sequences.
+//! - **For loops with init/post**: Go's `for init; cond; post { body }` maps
+//!   to the same header/body/post/exit block pattern as C's `for`.
+//! - **If with init statement**: `if x := f(); x > 0 { ... }` compiles the
+//!   init statement before the condition check.
+//! - **`&^` (and-not)**: Go's bit-clear operator, compiled as `band(l, bnot(r))`.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -131,11 +144,7 @@ impl CodeGen {
             sig.returns.push(AbiParam::new(I64));
         }
 
-        let mut ir_func = Function::with_name_signature(
-            UserFuncName::testcase_name_length(&func.name)
-                .unwrap_or(UserFuncName::default()),
-            sig,
-        );
+        let mut ir_func = Function::with_name_signature(UserFuncName::default(), sig);
 
         let mut func_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ir_func, &mut func_ctx);
@@ -176,7 +185,7 @@ impl CodeGen {
         let mut ctx = Context::for_function(ir_func);
         let code = ctx
             .compile(&*isa, &mut Default::default())
-            .map_err(|e| alloc::format!("codegen error: {}", e))?;
+            .map_err(|e| alloc::format!("codegen error: {:?}", e))?;
 
         let code_bytes = code.code_buffer().to_vec();
         log::debug!("[go] compiled {}: {} bytes", func.name, code_bytes.len());
@@ -230,7 +239,7 @@ impl CodeGen {
             }
             Stmt::Assign { op, lhs, rhs } => {
                 for (i, target) in lhs.iter().enumerate() {
-                    if let Expr::Ident(ref name) = target {
+                    if let Expr::Ident(name) = target {
                         if let Some(&(var, clif_ty)) = self.var_map.get(name) {
                             let rval = if let Some(rv) = rhs.get(i) {
                                 self.compile_expr(builder, rv)?
@@ -381,7 +390,7 @@ impl CodeGen {
                 Ok(())
             }
             Stmt::Inc(expr) => {
-                if let Expr::Ident(ref name) = expr {
+                if let Expr::Ident(name) = expr {
                     if let Some(&(var, clif_ty)) = self.var_map.get(name) {
                         let val = builder.use_var(var);
                         let one = builder.ins().iconst(clif_ty, 1);
@@ -392,7 +401,7 @@ impl CodeGen {
                 Ok(())
             }
             Stmt::Dec(expr) => {
-                if let Expr::Ident(ref name) = expr {
+                if let Expr::Ident(name) = expr {
                     if let Some(&(var, clif_ty)) = self.var_map.get(name) {
                         let val = builder.use_var(var);
                         let one = builder.ins().iconst(clif_ty, 1);

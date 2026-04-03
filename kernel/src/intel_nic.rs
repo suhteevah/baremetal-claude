@@ -116,10 +116,21 @@ pub unsafe fn init_e1000(pci_dev: &PciDevice, variant: NicVariant) -> Result<E10
 // Virtual-to-physical address translation
 // ---------------------------------------------------------------------------
 
-/// Translate a virtual address to a physical address by walking the page table.
+/// Translate a virtual address to a physical address by walking the 4-level
+/// x86_64 page table hierarchy (PML4 -> PDPT -> PD -> PT).
 ///
 /// This is the `VirtToPhysFn` callback provided to the E1000 driver for DMA
-/// descriptor ring and buffer address translation.
+/// descriptor ring and buffer address translation.  The NIC hardware operates
+/// on physical addresses (DMA), but our kernel code uses virtual addresses.
+/// Every DMA buffer address that goes into a TX/RX descriptor must be translated.
+///
+/// The walk handles three page sizes:
+/// - 1 GiB huge pages (PDPT level, offset mask 0x3FFF_FFFF)
+/// - 2 MiB huge pages (PD level, offset mask 0x1F_FFFF)
+/// - 4 KiB regular pages (PT level, offset mask 0xFFF)
+///
+/// Panics if any page table entry is unused (unmapped memory), which should
+/// never happen for heap-allocated DMA buffers.
 fn virt_to_phys(virt_addr: usize) -> u64 {
     let phys_mem_offset = crate::PHYS_MEM_OFFSET.load(Ordering::Relaxed);
     let virt = x86_64::VirtAddr::new(virt_addr as u64);

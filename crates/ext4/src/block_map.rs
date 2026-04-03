@@ -20,7 +20,15 @@ use alloc::vec::Vec;
 use crate::inode::{Inode, DIRECT_BLOCKS};
 use crate::readwrite::{BlockDevice, Ext4Error, Ext4Fs};
 
-/// Number of 32-bit block pointers that fit in one block.
+/// Number of 32-bit block pointers that fit in one indirect block.
+///
+/// Each indirect block is one filesystem block filled entirely with 32-bit
+/// (4-byte) little-endian block numbers. For a 4 KiB block size, this is
+/// 1024 pointers. This value determines the fan-out at each level of
+/// indirection and thus the maximum file size:
+///   - Single indirect: `ppb` blocks = 4 MiB
+///   - Double indirect: `ppb^2` blocks = 4 GiB
+///   - Triple indirect: `ppb^3` blocks = 4 TiB
 #[inline]
 fn ptrs_per_block(block_size: u64) -> u64 {
     block_size / 4

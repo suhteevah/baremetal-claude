@@ -203,7 +203,17 @@ impl IndexNodeHeader {
         Some(hdr)
     }
 
-    /// Apply fixup array to a raw INDX buffer (same algorithm as MFT entries).
+    /// Apply the Update Sequence Array (fixup) to a raw INDX buffer.
+    ///
+    /// NTFS uses fixup arrays (also called Update Sequence Arrays / USAs) to
+    /// detect torn writes at 512-byte sector boundaries. The last 2 bytes of
+    /// each 512-byte sector are overwritten with a "check value" when the
+    /// record is written to disk. The original bytes are saved in the USA.
+    /// On read, we verify the check values match, then restore the originals.
+    /// This detects the case where a power failure caused only some sectors
+    /// of a multi-sector record to be written.
+    ///
+    /// This is the same algorithm used for MFT entries.
     pub fn apply_fixup(buf: &mut [u8]) -> bool {
         if buf.len() < Self::MIN_SIZE {
             return false;
@@ -426,7 +436,13 @@ pub fn parse_index_entries(buf: &[u8]) -> Vec<IndexEntry> {
 /// Search for a filename in a list of index entries (case-insensitive).
 ///
 /// Returns the matching entry if found. This is a linear scan suitable for
-/// small directories; for large directories, use the B+ tree traversal.
+/// small directories (those whose index fits entirely in the $INDEX_ROOT
+/// attribute). For large directories with $INDEX_ALLOCATION overflow nodes,
+/// use the B+ tree traversal instead (walk sub-node VCNs).
+///
+/// Note: This uses a simplified ASCII-only case fold (A-Z to a-z). The full
+/// NTFS comparison uses the $UpCase table for Unicode case-insensitive
+/// matching. See `UpCaseTable` for the proper implementation.
 pub fn find_entry_by_name<'a>(entries: &'a [IndexEntry], name: &str) -> Option<&'a IndexEntry> {
     let name_lower: Vec<u16> = name.encode_utf16()
         .map(|c| if c >= b'A' as u16 && c <= b'Z' as u16 { c + 32 } else { c })

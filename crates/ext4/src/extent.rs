@@ -28,7 +28,12 @@ pub const EXTENT_INDEX_SIZE: usize = 12;
 pub const EXTENT_LEAF_SIZE: usize = 12;
 
 /// Maximum number of extents that fit in the inode's i_block root node.
-/// (60 bytes - 12 header) / 12 per entry = 4 entries.
+///
+/// The inode's `i_block` field is 60 bytes (15 x u32). The first 12 bytes are
+/// occupied by the `ExtentHeader`, leaving 48 bytes for entries. Each extent
+/// entry (leaf or index) is 12 bytes, so at most 4 entries fit: (60 - 12) / 12 = 4.
+/// When more than 4 extents are needed, the tree grows deeper with internal
+/// nodes stored in separate disk blocks (which can hold many more entries).
 pub const ROOT_MAX_ENTRIES: u16 = 4;
 
 /// Extent tree header. Present at the start of every extent tree node.
@@ -166,8 +171,12 @@ impl fmt::Debug for ExtentIndex {
 pub struct ExtentLeaf {
     /// First logical block number that this extent covers.
     pub block: u32,
-    /// Number of blocks covered by this extent.
-    /// If the high bit (0x8000) is set, the extent is uninitialized (pre-allocated but unwritten).
+    /// Number of blocks covered by this extent (packed with uninitialized flag).
+    ///
+    /// Bits 0-14: block count (1 to 32768). Bit 15 (0x8000): if set, the extent
+    /// is "uninitialized" (pre-allocated but not yet written). Reading an
+    /// uninitialized extent should return zeros. Use `block_count()` and
+    /// `is_uninitialized()` to access the two fields independently.
     pub len: u16,
     /// Starting physical block number (high 16 bits).
     pub start_hi: u16,

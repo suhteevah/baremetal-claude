@@ -1,10 +1,24 @@
-//! Command submission via PFIFO — GPU command channels and push buffers.
+//! Command submission via PFIFO -- GPU command channels and push buffers.
 //!
 //! NVIDIA GPUs execute commands through a FIFO (First In, First Out) engine.
 //! The host CPU constructs commands in a "push buffer" in memory, then notifies
 //! the GPU via a doorbell mechanism. The GPU's PFIFO scheduler reads commands
 //! from multiple channels according to a "runlist" and dispatches them to the
 //! appropriate engines (PGRAPH for compute, CE for copies, etc.).
+//!
+//! ## GPFIFO (Gather Push FIFO) Command Submission
+//!
+//! Rather than having the GPU read the push buffer directly, an indirect layer
+//! called the GPFIFO is used. The GPFIFO is a ring buffer of 8-byte entries,
+//! each pointing to a segment of the push buffer (GPU VA + length in dwords).
+//! This allows non-contiguous command submission and reduces doorbell traffic.
+//!
+//! Submission flow:
+//! 1. Write GPU method commands to the push buffer (method header + data dwords)
+//! 2. Write a GPFIFO entry pointing to the new push buffer segment
+//! 3. Ring the channel's doorbell (MMIO write) with the new GPFIFO put index
+//! 4. The GPU's PBDMA (Push Buffer DMA) engine fetches the GPFIFO entry,
+//!    then fetches and executes the push buffer commands
 //!
 //! ## Architecture (Ampere / GA104)
 //!
@@ -43,13 +57,22 @@ use crate::memory::{GpuAllocation, VramAllocator};
 // ===========================================================================
 
 /// Encode a non-incrementing method command header.
-/// Bits [28:29] = 0b01 (non-incrementing), [12:0] = method, [28:16] = count
+///
+/// In non-incrementing mode, all `count` data dwords that follow this header
+/// are written to the same method address (useful for FIFO data ports).
+///
+/// Encoding: `[29:28]=0b10 (non-incr) | [28:16]=count | [15:13]=subchannel | [12:0]=method>>2`
 pub fn gpu_method_nonincr(subchannel: u32, method: u32, count: u32) -> u32 {
     (0x2 << 28) | ((count & 0x1FFF) << 16) | ((subchannel & 0x7) << 13) | (method >> 2)
 }
 
 /// Encode an incrementing method command header.
-/// Each subsequent data word goes to method+4, method+8, etc.
+///
+/// In incrementing mode, the first data dword is written to `method`, the second
+/// to `method+4`, and so on. This is the standard mode for programming
+/// consecutive GPU registers.
+///
+/// Encoding: `[29:28]=0b01 (incr) | [28:16]=count | [15:13]=subchannel | [12:0]=method>>2`
 pub fn gpu_method_incr(subchannel: u32, method: u32, count: u32) -> u32 {
     (0x1 << 28) | ((count & 0x1FFF) << 16) | ((subchannel & 0x7) << 13) | (method >> 2)
 }

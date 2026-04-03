@@ -243,6 +243,12 @@ fn read_unsigned(buf: &[u8]) -> u64 {
 }
 
 /// Read a signed integer of 1-8 bytes in little-endian (sign-extended).
+///
+/// The offset field in NTFS data runs is a signed delta relative to the
+/// previous run's LCN. Positive deltas move forward on disk, negative
+/// deltas move backward. The value is stored in the minimum number of bytes
+/// needed, so we must sign-extend: if the most significant bit of the last
+/// byte is set (negative), we fill all higher bits with 1s.
 fn read_signed(buf: &[u8]) -> i64 {
     let mut val = 0u64;
     for (i, &byte) in buf.iter().enumerate() {

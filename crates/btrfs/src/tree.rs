@@ -250,7 +250,10 @@ pub fn insert_into_leaf(
     log::debug!("[btrfs::tree] inserting key={} ({} bytes data) into leaf at 0x{:X} (nritems={})",
         key, data.len(), header.bytenr, nritems);
 
-    // Find insertion point
+    // Find the insertion point by scanning items in key order.
+    // btrfs leaves store items sorted by key, so we find the first item
+    // whose key is >= the new key. If an exact match is found, the insert
+    // is rejected (duplicate keys are not allowed in btrfs B-trees).
     let mut insert_idx = nritems;
     for i in 0..nritems {
         let item_off = BTRFS_HEADER_SIZE + i * BTRFS_ITEM_SIZE;
@@ -266,7 +269,10 @@ pub fn insert_into_leaf(
         }
     }
 
-    // Calculate space needed
+    // Calculate space needed. btrfs leaf layout:
+    //   [header | item_desc_0 | item_desc_1 | ... | free space | ... | data_1 | data_0]
+    // Item descriptors grow upward from the header; item data grows downward
+    // from the end of the node. We must ensure the two regions don't overlap.
     let items_end = BTRFS_HEADER_SIZE + (nritems + 1) * BTRFS_ITEM_SIZE;
     let data_size = data.len() as u32;
 
@@ -316,7 +322,9 @@ pub fn insert_into_leaf(
     leaf_buf[new_data_offset as usize..new_data_offset as usize + data.len()]
         .copy_from_slice(data);
 
-    // Update header: increment nritems, update generation
+    // Update header: increment nritems, update generation.
+    // Offset 0x60 = nritems field in the btrfs header (number of items in this node).
+    // Offset 0x50 = generation field (transaction ID that last modified this node).
     let new_nritems = (nritems + 1) as u32;
     write_u32(leaf_buf, 0x60, new_nritems);
     write_u64(leaf_buf, 0x50, generation);
@@ -562,7 +570,9 @@ pub fn split_node(
     Some((left_buf, right_buf, split_key))
 }
 
-// --- Byte helpers ---
+// --- Byte helpers for in-place header field updates ---
+// These write little-endian values at known offsets within btrfs node headers.
+// Used to update nritems (0x60), generation (0x50), and bytenr (0x30) fields.
 
 #[inline]
 fn write_u32(buf: &mut [u8], offset: usize, val: u32) {

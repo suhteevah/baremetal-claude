@@ -23,6 +23,12 @@ use claudio_terminal::render::{render_char, fill_rect, Color, FONT_WIDTH, FONT_H
 // XorShift64 PRNG — seeded from PIT ticks
 // ---------------------------------------------------------------------------
 
+/// XorShift64 pseudo-random number generator.
+///
+/// Seeded from PIT tick count at screensaver activation time.  Not
+/// cryptographically secure -- only used for animation randomness
+/// (star positions, matrix column speeds, pipe directions, bounce colors).
+/// Period is 2^64 - 1, which is more than enough for visual effects.
 struct Rng {
     state: u64,
 }
@@ -108,16 +114,24 @@ impl Mode {
 // Star (for starfield mode)
 // ---------------------------------------------------------------------------
 
+/// Number of stars in the starfield. 256 is a good balance between visual
+/// density and rendering cost (each star is one or more put_pixel calls).
 const NUM_STARS: usize = 256;
 
+/// A single star in the 3D starfield.
+///
+/// Stars exist in a 3D space and are projected onto the 2D screen using
+/// perspective division: `screen_x = center_x + (star.x * 256) / star.z`.
+/// As z decreases (star moves closer), the projected position moves further
+/// from center, creating the classic "flying through space" parallax effect.
 struct Star {
-    /// X position in fixed-point: [-16384, 16384] mapped to screen
+    /// X position in 3D space: [-16384, 16384], centered on screen center
     x: i32,
-    /// Y position in fixed-point
+    /// Y position in 3D space: [-16384, 16384], centered on screen center
     y: i32,
-    /// Z depth: 1 (close) to 1024 (far)
+    /// Z depth: 1 (very close, bright, large) to 1024 (far, dim, small)
     z: i32,
-    /// Speed multiplier (1-3)
+    /// Speed multiplier (1-3): how fast this star approaches the camera
     speed: i32,
 }
 

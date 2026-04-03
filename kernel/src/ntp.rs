@@ -25,6 +25,18 @@ use claudio_net::{Instant, NetworkStack};
 ///
 /// We only need the transmit timestamp from the response, so the struct is
 /// kept minimal. All multi-byte fields are big-endian on the wire.
+///
+/// Wire format (offsets in bytes):
+/// ```text
+///  0: LI|VN|Mode  1: Stratum  2: Poll  3: Precision
+///  4-7: Root Delay (32-bit fixed-point)
+///  8-11: Root Dispersion (32-bit fixed-point)
+///  12-15: Reference ID
+///  16-23: Reference Timestamp (64-bit NTP timestamp)
+///  24-31: Originate Timestamp
+///  32-39: Receive Timestamp
+///  40-47: Transmit Timestamp  <-- this is what we extract from the response
+/// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct NtpPacket {

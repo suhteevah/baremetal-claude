@@ -4,8 +4,28 @@
 //! the x86 CPU page tables. GPU virtual addresses must be translated through
 //! these page tables before accessing VRAM or system memory via DMA.
 //!
-//! The BAR1 aperture provides a window for the CPU to access VRAM — but it's
-//! usually smaller than total VRAM, so we must manage which regions are mapped.
+//! ## GPU Page Table Structure (Ampere / GA104)
+//!
+//! NVIDIA GPUs use a 4-level page table hierarchy:
+//! - **PD3** (Page Directory level 3) — top level, 512 entries
+//! - **PD2** — second level
+//! - **PD1** — third level (small page) or large page (2 MiB) entry
+//! - **PD0/PT** — final level, 4 KiB pages
+//!
+//! Each PTE contains: Valid bit, Aperture (VRAM=0, SysMem coherent=2, SysMem
+//! non-coherent=4), and the physical address (4K-aligned in bits [63:12]).
+//!
+//! ## VRAM Allocation
+//!
+//! The current allocator is a simple first-fit bump allocator. The first 1 MiB
+//! of VRAM is reserved for GPU internal use (page tables, firmware structures).
+//! GPU virtual addresses start at 0x0001_0000_0000 to avoid collisions.
+//!
+//! ## BAR1 CPU Mapping
+//!
+//! The BAR1 aperture is a PCI BAR that provides a window for the CPU to
+//! read/write VRAM. BAR1 has its own page table in VRAM. Currently, we assume
+//! an identity mapping where BAR1 maps the first `bar1_size` bytes of VRAM.
 //!
 //! Reference:
 //! - envytools VM: https://envytools.readthedocs.io/en/latest/hw/memory/vm.html

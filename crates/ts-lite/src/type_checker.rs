@@ -1,11 +1,47 @@
-//! TypeScript type system and type checker.
+//! TypeScript type system and type checker for ts-lite.
 //!
-//! Supports: primitive types (string, number, boolean, void, null, undefined,
-//! never, any, unknown), union types (A | B), intersection types (A & B),
-//! generic types, interface types, enum types, array types, tuple types,
-//! literal types, type narrowing (typeof, instanceof, in), type assertions.
+//! Implements TypeScript's structural type system as a set of assignability rules.
+//! Type checking is **advisory** (produces warnings, not hard errors), matching
+//! TypeScript's "gradual typing" philosophy: programs run even with type errors.
 //!
-//! Type checking is advisory (warnings, not errors) for gradual typing.
+//! ## Type Hierarchy
+//!
+//! ```text
+//!          unknown          (top type: everything is assignable to unknown)
+//!           / | \
+//!    string number boolean  object  function  ...
+//!           \ | /
+//!           never           (bottom type: assignable to everything)
+//!
+//!    any  ← → everything   (escape hatch: bypasses all checking)
+//! ```
+//!
+//! ## Assignability Rules
+//!
+//! `is_assignable(from, to)` returns true if a value of type `from` can be
+//! assigned to a variable of type `to`. Key rules:
+//!
+//! 1. `any` is assignable to/from everything (the escape hatch)
+//! 2. `unknown` accepts everything (but you cannot use it without narrowing)
+//! 3. `never` is assignable to everything (bottom type)
+//! 4. Same type is always assignable
+//! 5. `null`/`undefined` are assignable to `void`
+//! 6. **Union types**: `A` is assignable to `A | B`; `A | B` is assignable to `C`
+//!    only if both `A` and `B` are assignable to `C`
+//! 7. **Literal types**: `"hello"` is assignable to `string`, `42` to `number`
+//! 8. **Structural typing**: Object types use duck typing -- `{x, y}` is assignable
+//!    to `{x}` because it has all required fields
+//!
+//! ## Type Narrowing
+//!
+//! `typeof` checks narrow union types: in a `typeof x === "string"` guard,
+//! `x` is narrowed to `string` within the branch. This is implemented by
+//! `narrow_typeof`, which maps the typeof string to the corresponding type.
+//!
+//! ## Declaration Merging
+//!
+//! Interfaces with the same name are merged (their members are combined),
+//! matching TypeScript's declaration merging behavior.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;

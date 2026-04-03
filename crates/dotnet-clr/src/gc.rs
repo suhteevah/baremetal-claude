@@ -1,8 +1,38 @@
-//! Simple mark-and-sweep garbage collector for the .NET managed heap.
+//! Mark-and-sweep garbage collector for the .NET managed heap.
 //!
-//! Manages object allocation and collection. Objects are allocated on a flat
-//! heap with handles (u64 IDs). GC roots include the evaluation stack, locals,
-//! args, and static fields.
+//! Implements a simplified version of .NET's garbage collection. The real .NET GC
+//! uses generational collection (Gen 0/1/2) with compaction; this implementation
+//! uses a simpler mark-and-sweep approach suitable for bare-metal execution.
+//!
+//! ## Object Handles
+//!
+//! Every managed object and array is identified by a `u64` handle (analogous to
+//! a .NET object reference). Handles are allocated from a monotonically increasing
+//! counter, ensuring uniqueness. Objects and arrays are stored in separate `BTreeMap`s.
+//!
+//! ## GC Roots
+//!
+//! Roots that keep objects alive include:
+//! - **Evaluation stack**: Values currently on the CIL operand stack
+//! - **Local variables**: Method local variable slots
+//! - **Arguments**: Method parameters
+//! - **Static fields**: Type-level static fields (persisted across method calls)
+//!
+//! ## Collection Algorithm
+//!
+//! 1. **Clear marks**: Set `gc_marked = false` on all objects and arrays
+//! 2. **Mark from roots**: Worklist-based traversal starting from root handles;
+//!    for each reachable object, mark it and enqueue handles found in its fields
+//! 3. **Mark from statics**: Also trace handles reachable from static fields
+//! 4. **Sweep**: Remove all unmarked objects/arrays from their maps
+//! 5. **Threshold adaptation**: If more than half the threshold was still live,
+//!    double the threshold to reduce future collection frequency
+//!
+//! ## Global Heap
+//!
+//! The managed heap is stored in a global `spin::Mutex<Option<ManagedHeap>>`,
+//! accessed via `with_heap` / `with_heap_mut` helper functions. This matches
+//! .NET's single managed heap model.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

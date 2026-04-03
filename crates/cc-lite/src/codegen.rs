@@ -1,7 +1,32 @@
-//! x86_64 code generation via Cranelift.
+//! x86_64 code generation for cc-lite via Cranelift.
 //!
-//! Maps C types to Cranelift IR types, generates function bodies,
-//! handles the System V AMD64 ABI, and produces executable machine code.
+//! Translates the C AST into Cranelift IR, which is then compiled to native
+//! x86_64 machine code. This module handles:
+//!
+//! - **Type mapping**: C types to Cranelift IR types (e.g., `int` -> `I32`,
+//!   `long` -> `I64`, all pointers -> `I64` on x86_64)
+//! - **ABI**: System V AMD64 calling convention (parameters in registers
+//!   RDI, RSI, RDX, RCX, R8, R9; return value in RAX)
+//! - **Variable management**: Each C variable becomes a Cranelift `Variable`
+//!   with SSA-based definition tracking
+//! - **Control flow**: `if/else`, `while`, `do-while`, `for` loops, `break`,
+//!   `continue` all map to Cranelift basic blocks with explicit jumps
+//! - **Expressions**: Binary ops map to Cranelift arithmetic/comparison instructions;
+//!   assignments update variables; function calls are placeholder (external linking TODO)
+//!
+//! ## Compilation Pipeline
+//!
+//! 1. Create a Cranelift ISA for x86_64 with `opt_level=speed`
+//! 2. Build a `Signature` from the C function's parameter/return types
+//! 3. Create an entry `Block`, bind parameters to Cranelift `Variable`s
+//! 4. Walk the AST, emitting IR instructions for each statement/expression
+//! 5. Seal all blocks, finalize the function, compile to machine code bytes
+//!
+//! ## Control Flow Lowering
+//!
+//! Loops use a header/body/exit block pattern. `break` jumps to the exit block;
+//! `continue` jumps to the loop header (for `while`) or increment block (for `for`).
+//! These targets are tracked on `break_targets` / `continue_targets` stacks.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -63,9 +88,16 @@ impl<'a> CodeGen<'a> {
     }
 
     /// Map a C type to a Cranelift IR type.
+    ///
+    /// Follows the System V AMD64 ABI type sizes:
+    /// - `bool`/`char` -> I8, `short` -> I16, `int`/`enum` -> I32
+    /// - `long`/`long long`/pointers -> I64 (64-bit target)
+    /// - `float` -> F32, `double` -> F64
+    /// - Structs/unions are passed by pointer (I64)
+    /// - `void` returns are represented as I64 by convention (Cranelift requires a type)
     pub fn ctype_to_clif(ty: &CType) -> ClifType {
         match ty {
-            CType::Void => I64, // void returns use i64 (convention)
+            CType::Void => I64, // Cranelift needs a concrete type; void uses i64 placeholder
             CType::Bool | CType::Char | CType::UChar => I8,
             CType::Short | CType::UShort => I16,
             CType::Int | CType::UInt | CType::Enum(_) => I32,

@@ -1,10 +1,26 @@
-//! Transfer Request Block (TRB) Rings
+//! Transfer Request Block (TRB) Rings for xHCI host controller communication.
 //!
 //! xHCI uses ring buffers of 16-byte TRBs for communication between software and
 //! the host controller. There are three types:
 //! - **Command Ring**: Software enqueues commands, HC dequeues and posts completion events
 //! - **Event Ring**: HC enqueues events, software dequeues
 //! - **Transfer Ring**: Software enqueues transfer TRBs for data movement on endpoints
+//!
+//! ## Cycle Bit Mechanism
+//!
+//! Each TRB has a "cycle bit" (bit 0 of the control DWORD). The producer and consumer
+//! maintain a "Producer Cycle State" (PCS) / "Consumer Cycle State" (CCS). When
+//! the ring wraps (via a Link TRB with Toggle Cycle set), the cycle state flips.
+//! This allows the consumer to distinguish new TRBs from stale ones without an
+//! explicit head/tail pointer exchange -- if the cycle bit matches expectations,
+//! the TRB is new.
+//!
+//! ## Link TRBs
+//!
+//! The last TRB in a ring segment is a Link TRB that points back to the start of
+//! the segment. When the producer reaches the Link TRB slot, it updates the Link
+//! TRB's cycle bit, wraps its enqueue index to 0, and toggles its cycle state.
+//! The controller follows the Link TRB to continue reading from the ring start.
 
 use alloc::alloc::{alloc_zeroed, Layout};
 use core::ptr;
@@ -445,6 +461,12 @@ impl CommandRing {
     }
 
     /// Advance the enqueue pointer, wrapping at the Link TRB.
+    ///
+    /// When we reach the last slot (reserved for the Link TRB), we:
+    /// 1. Update the Link TRB's cycle bit to match our current PCS so the HC follows it
+    /// 2. Reset the enqueue index to 0 (wrap around to ring start)
+    /// 3. Toggle our Producer Cycle State -- the next generation of TRBs will have
+    ///    the opposite cycle bit, letting the HC distinguish new from old
     fn advance_enqueue(&mut self) {
         self.enqueue_idx += 1;
 
@@ -600,7 +622,18 @@ impl EventRing {
 
     /// Try to dequeue an event TRB. Returns `Some(trb)` if an event is pending,
     /// `None` if the ring is empty (cycle bit mismatch).
+    ///
+    /// The Event Ring is consumer-side: the host controller writes TRBs with a cycle
+    /// bit matching its internal Producer Cycle State. Software maintains a Consumer
+    /// Cycle State (CCS). If the TRB at our dequeue index has a cycle bit matching
+    /// our CCS, it's a new event from the controller. Otherwise, the ring is empty.
+    ///
+    /// After dequeuing, the caller must update ERDP (Event Ring Dequeue Pointer)
+    /// to inform the controller that entries have been consumed.
     pub fn dequeue(&mut self) -> Option<Trb> {
+        // SAFETY: ring_va is a valid allocation and dequeue_idx < segment_len.
+        // We use volatile read because the controller may write to this memory via DMA
+        // at any time, and we need to see the latest value.
         let trb = unsafe {
             ptr::read_volatile(self.ring_va.add(self.dequeue_idx))
         };
@@ -731,8 +764,15 @@ impl TransferRing {
         phys
     }
 
-    /// Enqueue a control transfer (Setup + optional Data + Status).
-    /// Returns the physical address of the Status Stage TRB.
+    /// Enqueue a complete USB control transfer as three TRBs: Setup + optional Data + Status.
+    ///
+    /// A USB control transfer always begins with an 8-byte Setup packet (encoded in a
+    /// Setup Stage TRB with Immediate Data). If the transfer has a data phase, a Data
+    /// Stage TRB follows, pointing to the DMA buffer. Finally, a Status Stage TRB
+    /// completes the handshake. The Status Stage direction is opposite to the Data Stage
+    /// (or IN if there is no data phase).
+    ///
+    /// Returns the physical address of the Status Stage TRB (used for event correlation).
     pub fn enqueue_control_transfer(
         &mut self,
         request_type: u8,

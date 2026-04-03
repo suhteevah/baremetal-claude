@@ -38,15 +38,30 @@ use x86_64::VirtAddr;
 
 static FB: Mutex<Option<FrameBufferState>> = Mutex::new(None);
 
+/// Core state for the double-buffered framebuffer.
+///
+/// # Memory layout
+///
+/// For a 1280x800x4bpp display:
+/// - `front`: 4,096,000 bytes of MMIO-mapped video memory (writes are visible)
+/// - `back`:  4,096,000 bytes of heap memory (writes are invisible until blit)
+///
+/// All rendering writes to `back`. When a frame is complete, dirty regions are
+/// copied from `back` to `front` via `blit_rows()` or `blit_full()`.
 pub struct FrameBufferState {
-    /// Hardware framebuffer (front buffer) — memory-mapped, written via
-    /// `write_volatile` / `copy_nonoverlapping`.
+    /// Hardware framebuffer (front buffer) — memory-mapped via the bootloader's
+    /// physical memory offset.  Writes to this are immediately visible on screen.
     pub front: &'static mut [u8],
-    /// Off-screen back buffer — heap-allocated, all rendering targets this.
+    /// Off-screen back buffer — heap-allocated.  All rendering targets this
+    /// to avoid tearing and reduce mutex contention.
     pub back: Vec<u8>,
+    /// Display width in pixels.
     pub width: usize,
+    /// Display height in pixels.
     pub height: usize,
+    /// Stride in pixels (may be > width due to GPU alignment requirements).
     pub stride: usize,
+    /// Bytes per pixel (typically 4 for BGR32 UEFI GOP format).
     pub bytes_per_pixel: usize,
 }
 

@@ -1,22 +1,59 @@
-//! C tokenizer: keywords, operators, literals, preprocessor directives.
+//! C tokenizer (lexer) for cc-lite.
+//!
+//! Converts C source code into a stream of [`Token`]s following C11 lexical rules.
+//! The tokenizer operates as a single-pass, byte-oriented scanner that tracks
+//! line/column for error reporting. It handles:
+//!
+//! - **Keywords**: All C11 keywords (`int`, `if`, `return`, `struct`, etc.)
+//! - **Identifiers**: `[a-zA-Z_][a-zA-Z0-9_]*`
+//! - **Numeric literals**: Decimal, hex (`0x`), octal (`0`-prefix), binary (`0b`),
+//!   and floating-point with optional exponent and suffix
+//! - **String literals**: Double-quoted with full escape sequence support
+//!   (`\n`, `\t`, `\xHH`, `\\`, `\"`, etc.)
+//! - **Character literals**: Single-quoted with escape support
+//! - **Operators**: All C operators including compound assignment (`+=`, `<<=`)
+//!   and multi-character tokens (`->`, `++`, `&&`, `||`)
+//! - **Preprocessor directives**: `#include`, `#define`, `#ifdef`, etc.
+//!   (simplified: captures the directive and its argument as a single token)
+//! - **Comments**: Both line (`//`) and block (`/* */`) comments are stripped
+//!
+//! The tokenizer uses a maximal munch strategy: at each position it tries to
+//! match the longest possible token. For multi-character operators like `<<=`,
+//! it peeks ahead to distinguish `<` from `<<` from `<<=`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Source location for error reporting.
+///
+/// Tracks the 1-based line and column where a token begins in the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
+    /// 1-based line number.
     pub line: u32,
+    /// 1-based column number.
     pub col: u32,
 }
 
 /// A C token with its source location.
+///
+/// Each token carries both its [`TokenKind`] (what it is) and its [`Span`]
+/// (where it appeared in the source).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
 }
 
+/// All possible C token types produced by the lexer.
+///
+/// Organized into categories:
+/// - **Keywords**: Reserved words in C11 (`int`, `if`, `struct`, ...)
+/// - **Identifiers & Literals**: Names, numbers, strings, characters
+/// - **Operators**: Arithmetic, bitwise, logical, comparison, assignment
+/// - **Delimiters**: Parentheses, braces, brackets, semicolons, commas
+/// - **Preprocessor**: `#include`, `#define`, conditional compilation
+/// - **Special**: Built-in macros (`__FILE__`, `__LINE__`, `__func__`)
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // === Keywords ===
@@ -103,11 +140,26 @@ pub enum TokenKind {
     Eof,
 }
 
-/// Tokenize C source code.
+/// Tokenize C source code into a vector of tokens.
+///
+/// Scans the input byte-by-byte, maintaining a cursor position (`i`), current
+/// line number, and column number. At each iteration of the main loop, the
+/// scanner inspects the current byte and dispatches to the appropriate handler:
+///
+/// 1. **Whitespace / newlines**: Consumed silently, updating line/col.
+/// 2. **Comments**: `//` skips to end-of-line; `/* */` skips to closing `*/`.
+/// 3. **Preprocessor**: `#` reads the directive name and rest-of-line argument.
+/// 4. **String/char literals**: Scans until closing quote, interpreting escapes.
+/// 5. **Numbers**: Delegates to [`lex_number`] for integer/float parsing.
+/// 6. **Identifiers/keywords**: Scans `[a-zA-Z_][a-zA-Z0-9_]*`, then checks
+///    against the keyword table. Unknown words become `Ident` tokens.
+/// 7. **Operators**: Uses lookahead to resolve multi-character operators.
+///
+/// Returns `Err` if an unexpected byte is encountered.
 pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
-    let mut i = 0;
+    let mut i = 0;       // byte cursor into the source
     let mut line: u32 = 1;
     let mut col: u32 = 1;
 
@@ -116,7 +168,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
         let start_col = col;
 
         match bytes[i] {
-            // Whitespace
+            // Whitespace: spaces and tabs advance the column
             b' ' | b'\t' => {
                 col += 1;
                 i += 1;
@@ -540,6 +592,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
+/// Convert an ASCII hex digit to its numeric value (0-15).
+///
+/// Returns 0 for non-hex characters (caller ensures valid input).
 fn hex_digit(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
@@ -549,11 +604,23 @@ fn hex_digit(b: u8) -> u8 {
     }
 }
 
+/// Lex a numeric literal starting at the given byte slice.
+///
+/// Returns `(token_kind, bytes_consumed)`. Handles all C numeric literal forms:
+///
+/// - **Hex**: `0x` or `0X` prefix, digits `[0-9a-fA-F]`, plus optional `U`/`L` suffix
+/// - **Binary**: `0b` or `0B` prefix, digits `[01]` (GCC extension)
+/// - **Octal**: Leading `0` followed by `[0-7]`
+/// - **Decimal integer**: `[0-9]+` with optional `U`/`L`/`LL` suffix
+/// - **Floating-point**: Digits with `.` and/or `[eE][+-]?[0-9]+`, optional `f`/`F`/`l`/`L` suffix
+///
+/// Integer values are accumulated using `wrapping_mul`/`wrapping_add` to handle
+/// overflow gracefully (matching C's unsigned wrapping semantics).
 fn lex_number(bytes: &[u8]) -> (TokenKind, usize) {
     let mut i = 0;
     let mut is_float = false;
 
-    // Hex, octal, binary
+    // Check for hex (0x), binary (0b), or octal (0nnn) prefix
     if bytes.len() >= 2 && bytes[0] == b'0' {
         match bytes[1] {
             b'x' | b'X' => {
@@ -645,8 +712,13 @@ fn lex_number(bytes: &[u8]) -> (TokenKind, usize) {
     }
 }
 
+/// Minimal floating-point parser for `no_std` environments.
+///
+/// Parses a decimal float string like `"3.14"`, `"1e10"`, or `"2.5E-3"`.
+/// Processes three phases: integer part, fractional part, exponent.
+/// Not IEEE-754 bit-exact for all inputs, but sufficient for C constant expressions.
 fn parse_float(s: &str) -> f64 {
-    // Minimal float parser for no_std
+    // Hand-rolled parser since we have no std::str::parse
     let mut result: f64 = 0.0;
     let mut frac: f64 = 0.0;
     let mut frac_div: f64 = 1.0;
@@ -695,6 +767,10 @@ fn parse_float(s: &str) -> f64 {
     result
 }
 
+/// Split a `#define` directive's argument into (name, value).
+///
+/// Given `"FOO 42"`, returns `("FOO", "42")`.
+/// Given `"BAR"` (no value), returns `("BAR", "")`.
 fn split_define(rest: &str) -> (String, String) {
     let trimmed = rest.trim();
     if let Some(pos) = trimmed.find(|c: char| c == ' ' || c == '\t') {

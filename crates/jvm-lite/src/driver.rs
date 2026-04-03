@@ -1,6 +1,6 @@
 //! Top-level JVM runtime API.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::classfile::{self, ClassFile};

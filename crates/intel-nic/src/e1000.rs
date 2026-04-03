@@ -1,15 +1,29 @@
-//! Core e1000/e1000e/igc driver.
+//! Core e1000/e1000e/igc driver for Intel Ethernet NICs.
 //!
 //! The [`E1000`] struct manages a single Intel Ethernet NIC. It handles:
 //! - Hardware reset and initialization
 //! - MAC address reading (from EEPROM or RAL/RAH registers)
-//! - RX/TX descriptor ring setup
+//! - PHY initialization and auto-negotiation
+//! - RX/TX descriptor ring setup with DMA buffers
 //! - Frame transmission and reception
-//! - Interrupt handling
+//! - Interrupt handling (link status, RX/TX events)
 //!
 //! The same struct is used for all three families (e1000, e1000e/I219, igc/I225).
 //! Family-specific quirks are handled via the [`NicVariant`] field and the
 //! [`I225Quirks`](crate::i225::I225Quirks) module.
+//!
+//! ## Initialization Sequence
+//!
+//! 1. Software reset (CTRL.RST) and post-reset delay
+//! 2. Disable interrupts during setup (IMC = 0xFFFFFFFF)
+//! 3. Read MAC address from EEPROM (words 0-2) or RAL0/RAH0 fallback
+//! 4. Clear Multicast Table Array (MTA)
+//! 5. Initialize PHY, detect PHY ID, apply I225-specific quirks if needed
+//! 6. Start PHY auto-negotiation for speed/duplex detection
+//! 7. Allocate and configure RX descriptor ring (RDBAL/RDLEN/RDH/RDT)
+//! 8. Allocate and configure TX descriptor ring (TDBAL/TDLEN/TDH/TDT)
+//! 9. Configure CTRL register (SLU, ASDE, clear resets)
+//! 10. Enable interrupts (IMS) and enable RX/TX engines (RCTL/TCTL)
 
 extern crate alloc;
 

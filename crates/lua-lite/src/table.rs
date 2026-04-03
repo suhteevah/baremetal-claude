@@ -1,4 +1,38 @@
-//! Lua table: hybrid array + hash map, metatable support.
+//! Lua table: the universal data structure combining array and hash map.
+//!
+//! A Lua table is the **only** compound data structure in the language. It serves
+//! as arrays, dictionaries, objects, modules, and namespaces. Internally it uses
+//! a **hybrid representation**:
+//!
+//! ## Array Part
+//!
+//! Integer keys from 1 to N (where N = `array.len()`) are stored in a contiguous
+//! `Vec<LuaValue>`. This provides O(1) indexed access for array-like usage.
+//! Note: Lua arrays are **1-indexed** (stored as 0-indexed internally).
+//!
+//! ## Hash Part
+//!
+//! All other keys (strings, floats, non-contiguous integers) are stored in a
+//! linear-probed `Vec<(key, value)>`. This is simpler than a real hash map but
+//! sufficient for small tables. Production Lua uses open-addressing with power-of-2
+//! sized hash tables.
+//!
+//! ## Key Resolution
+//!
+//! When getting/setting a value:
+//! 1. If the key is an integer in range `[1, array.len()]`, use the array part
+//! 2. If the key is a float that equals an integer, convert and try the array part
+//! 3. Otherwise, search the hash part by key equality
+//!
+//! ## Length Operator
+//!
+//! `#table` returns `array.len()`, matching Lua's definition: the length of the
+//! sequence (contiguous integer keys starting at 1).
+//!
+//! ## Iteration
+//!
+//! `next(table, key)` returns the next key-value pair, iterating array elements
+//! first (in index order), then hash entries (in insertion order).
 
 use alloc::string::String;
 use alloc::vec::Vec;

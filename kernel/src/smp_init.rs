@@ -123,10 +123,17 @@ pub fn init() {
     );
 }
 
-/// Disable the legacy 8259 PIC by masking all IRQs.
+/// Disable the legacy 8259 PIC by masking all IRQs on both the master
+/// and slave PIC chips.
 ///
-/// This is necessary before enabling the Local APIC and I/O APIC, as
-/// both interrupt controllers must not be active simultaneously.
+/// This is necessary before enabling the Local APIC and I/O APIC because
+/// having two interrupt controllers active simultaneously causes double-delivery
+/// of IRQs (the same keyboard interrupt would fire twice, for example).
+///
+/// The PIC was initialized in `interrupts::init()` for the single-core boot
+/// phase.  Now that we're switching to APIC mode for multi-core operation,
+/// we mask all PIC IRQs by writing 0xFF to the data ports (0x21 = master,
+/// 0xA1 = slave).  The I/O APIC takes over interrupt routing from here.
 fn disable_legacy_pic() {
     log::info!("[smp] disabling legacy 8259 PIC");
     unsafe {

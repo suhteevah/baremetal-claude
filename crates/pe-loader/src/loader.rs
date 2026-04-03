@@ -55,7 +55,15 @@ impl fmt::Display for PeError {
 /// Thread Environment Block (TEB) layout for Win64.
 ///
 /// Located via the GS segment register (GS:[0x30] = self pointer).
-/// We allocate this on the heap and set GS base to point to it.
+/// We allocate this on the heap and set GS base via the IA32_GS_BASE MSR.
+///
+/// Windows PE binaries access the TEB via `gs:[offset]` for:
+/// - Stack bounds checking (stack_base, stack_limit at offsets 0x08, 0x10)
+/// - GetLastError/SetLastError (last_error_value at offset 0x68)
+/// - Thread-local storage slots (tls_slots at offset 0xe10)
+///
+/// The `teb_self` field at offset 0x30 must point back to the TEB itself --
+/// this is how `NtCurrentTeb()` works (it reads GS:[0x30]).
 #[derive(Debug)]
 #[repr(C)]
 pub struct Teb {

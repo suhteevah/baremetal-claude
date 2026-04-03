@@ -117,10 +117,17 @@ fn unix_to_datetime(ts: i64) -> DateTime {
 
 // ── CMOS register access ─────────────────────────────────────────────
 
-/// Read a CMOS register. NMI is left enabled (bit 7 of port 0x70 = 0).
+/// Read a CMOS register via the standard MC146818 two-port interface.
+///
+/// Port 0x70 is the address/control register. Bit 7 controls NMI masking:
+/// 0 = NMI enabled (normal operation), 1 = NMI disabled. We always leave
+/// NMI enabled (bit 7 = 0) by ANDing with 0x7F.
+///
+/// Port 0x71 is the data register -- reading it returns the value of the
+/// CMOS register selected by the last write to port 0x70.
 ///
 /// # Safety
-/// Accesses I/O ports 0x70 and 0x71.
+/// Accesses I/O ports 0x70 and 0x71. Must be called from ring 0.
 unsafe fn cmos_read(reg: u8) -> u8 {
     unsafe {
         let mut addr_port: Port<u8> = Port::new(0x70);
@@ -135,7 +142,11 @@ unsafe fn update_in_progress() -> bool {
     unsafe { (cmos_read(0x0A) & 0x80) != 0 }
 }
 
-/// Convert a BCD byte to binary.
+/// Convert a BCD (Binary-Coded Decimal) byte to binary.
+///
+/// BCD encodes each decimal digit in 4 bits: the byte 0x59 means decimal 59.
+/// High nibble (val >> 4) is the tens digit, low nibble (val & 0x0F) is the
+/// ones digit. Most CMOS RTCs default to BCD mode (status register B bit 2 = 0).
 fn bcd_to_bin(val: u8) -> u8 {
     (val >> 4) * 10 + (val & 0x0F)
 }

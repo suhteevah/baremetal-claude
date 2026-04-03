@@ -4,9 +4,20 @@
 //! commands and a Completion Queue (CQ) where the controller posts results.
 //! Queue memory must be physically contiguous and page-aligned.
 //!
+//! ## Phase Bit Mechanism
+//!
 //! The phase bit in CQEs flips each time the controller wraps around the CQ,
 //! allowing the host to distinguish new completions from stale entries without
-//! an explicit interrupt.
+//! an explicit interrupt. Initially, the phase is 1. When the controller writes
+//! CQEs and wraps past the end of the queue, it toggles the phase bit. The host
+//! maintains an expected phase -- if a CQE's phase matches, it's a new completion.
+//!
+//! ## Doorbell Protocol
+//!
+//! After writing one or more SQEs to the SQ buffer, the host writes the new SQ
+//! tail index to the SQ Tail Doorbell register. This notifies the controller that
+//! new commands are available. Similarly, after consuming CQEs, the host writes
+//! the new CQ head index to the CQ Head Doorbell register to release entries.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -310,7 +321,12 @@ impl QueuePair {
 
     /// Submit a command to the Submission Queue and ring the doorbell.
     ///
-    /// Returns the command ID assigned to this submission.
+    /// This writes the SQE into the ring buffer at the current tail position,
+    /// advances the tail with wrap-around, and writes the new tail index to the
+    /// SQ Tail Doorbell register (which triggers the controller to fetch the command).
+    ///
+    /// Returns the command ID assigned to this submission, which will appear in
+    /// the corresponding CQE when the command completes.
     pub fn submit(&mut self, mut sqe: SubmissionQueueEntry, regs: &NvmeRegisters) -> u16 {
         let cid = self.alloc_cid();
         // Encode CID into CDW0 (preserve opcode in bits 7:0)
@@ -325,7 +341,9 @@ impl QueuePair {
             sqe.cdw0 & 0xFF
         );
 
-        // Write the SQE into the ring buffer
+        // SAFETY: Write the SQE into the ring buffer using volatile to ensure the
+        // controller sees the complete entry. The controller will DMA-read from this
+        // address after we ring the doorbell.
         unsafe {
             ptr::write_volatile(
                 &mut self.sq_entries[idx] as *mut SubmissionQueueEntry,
@@ -365,7 +383,9 @@ impl QueuePair {
         for spin in 0..max_spins {
             let idx = self.cq_head as usize;
 
-            // Read the CQE with volatile to see controller writes
+            // SAFETY: Read the CQE with volatile because the controller writes to this
+            // memory via DMA. Without volatile, the compiler might cache an old value
+            // and never see the controller's update.
             let cqe = unsafe {
                 ptr::read_volatile(&self.cq_entries[idx] as *const CompletionQueueEntry)
             };

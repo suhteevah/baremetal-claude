@@ -2,6 +2,26 @@
 //!
 //! The FADT (signature "FACP") contains fixed hardware register addresses and
 //! values needed for power management, sleep states, and system control.
+//!
+//! ## Power Management Registers
+//!
+//! The FADT provides I/O port addresses for the ACPI PM register blocks:
+//!
+//! - **PM1a/PM1b Event Block**: Status and enable registers for PM events
+//!   (power button, sleep button, timer overflow, etc.)
+//! - **PM1a/PM1b Control Block**: Controls sleep state entry (SLP_TYP + SLP_EN)
+//! - **PM2 Control Block**: Arbiter disable control
+//! - **PM Timer Block**: 24-bit or 32-bit free-running timer at 3.579545 MHz
+//! - **GPE0/GPE1 Blocks**: General Purpose Events (wake, thermal, etc.)
+//!
+//! ACPI 2.0+ added 64-bit `X_*` fields using Generic Address Structures (GAS)
+//! that override the legacy 32-bit I/O port fields when non-zero.
+//!
+//! ## Key Flags
+//!
+//! - Bit 8: PM timer is 32-bit (vs 24-bit)
+//! - Bit 10: Reset register is supported (FADT provides reset method)
+//! - SMI_CMD port + ACPI_ENABLE value = transition from legacy to ACPI mode
 
 use crate::sdt::{SdtHeader, SDT_HEADER_SIZE};
 use crate::AcpiError;

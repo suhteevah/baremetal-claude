@@ -87,8 +87,13 @@ impl core::fmt::Display for GitError {
 /// Minimal SHA-1 implementation for git object IDs.
 ///
 /// Git uses SHA-1 for content addressing. We need it for:
-/// - Computing object hashes (blob, tree, commit)
-/// - Verifying packfile checksums
+/// - Computing object hashes: `sha1("blob <size>\0<data>")` -> 20 bytes
+/// - Verifying packfile checksums (trailing 20-byte SHA-1)
+///
+/// This is a textbook implementation of FIPS 180-4: 80 rounds of mixing
+/// with four different round functions (Ch, Parity, Maj, Parity) and
+/// four different constants.  Not optimized for speed -- git object hashing
+/// is not a bottleneck compared to network I/O.
 struct Sha1 {
     state: [u32; 5],
     count: u64,
@@ -249,8 +254,14 @@ fn hex_nibble(b: u8) -> Result<u8, GitError> {
 ///
 /// Git objects are zlib-compressed (RFC 1950: 2-byte header + DEFLATE + 4-byte
 /// checksum). We skip the zlib header/trailer and inflate the raw DEFLATE
-/// stream.  This only handles the subset used by git: stored blocks, fixed
-/// Huffman, and dynamic Huffman.
+/// stream.  This handles all three DEFLATE block types:
+/// - Type 0 (stored): uncompressed data with length prefix
+/// - Type 1 (fixed Huffman): predefined code tables per RFC 1951
+/// - Type 2 (dynamic Huffman): code tables encoded in the stream itself
+///
+/// We implement the full Huffman decoding (code length alphabet, literal/length
+/// codes, distance codes, extra bits) which is needed because git packfiles
+/// typically use dynamic Huffman for best compression.
 fn zlib_decompress(data: &[u8], max_output: usize) -> Result<Vec<u8>, GitError> {
     if data.len() < 6 {
         return Err(GitError::Corrupt(String::from("zlib data too short")));

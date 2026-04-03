@@ -19,13 +19,20 @@ use crate::wire::*;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default initial window size (2 MiB).
+/// Default initial window size (2 MiB = 2,097,152 bytes).
+/// This is the number of bytes the remote side is allowed to send us before
+/// we need to send a WINDOW_ADJUST message to replenish the window.
+/// 2 MiB provides good throughput for bulk transfers without excessive memory use.
 pub const DEFAULT_WINDOW_SIZE: u32 = 2 * 1024 * 1024;
 
-/// Default maximum packet size for channel data.
+/// Default maximum packet size for a single channel data message (32 KiB).
+/// This limits how large a single SSH_MSG_CHANNEL_DATA payload can be,
+/// keeping per-message memory allocation bounded.
 pub const DEFAULT_MAX_PACKET_SIZE: u32 = 32768;
 
-/// Maximum number of simultaneous channels per connection.
+/// Maximum number of simultaneous channels per SSH connection.
+/// Each channel corresponds to a shell session, exec command, or forwarding
+/// stream. 16 is generous for our use case (running Claude agents).
 pub const MAX_CHANNELS: usize = 16;
 
 // ---------------------------------------------------------------------------
@@ -50,15 +57,30 @@ pub struct PtyRequest {
 }
 
 /// State of a single SSH channel.
+///
+/// SSH channels provide multiplexed, flow-controlled byte streams over a
+/// single encrypted TCP connection (RFC 4254). Each channel has:
+/// - Independent IDs on each side (local_id and remote_id may differ)
+/// - Independent flow control windows for each direction
+/// - Its own EOF/close state
+///
+/// ## Flow Control (Window Management)
+/// SSH uses a sliding window mechanism to prevent a fast sender from
+/// overwhelming a slow receiver. Each side advertises how many bytes it
+/// is willing to receive (`recv_window`). The sender must not send more
+/// than the receiver's window allows (`send_window`). When the receiver
+/// processes data, it sends WINDOW_ADJUST to replenish the sender's quota.
 #[derive(Debug)]
 pub struct Channel {
-    /// Our (server) channel ID.
+    /// Our (server-side) channel ID. Used by the client to address us.
     pub local_id: u32,
-    /// Client's channel ID.
+    /// The client's channel ID. We use this when sending messages to the client.
     pub remote_id: u32,
-    /// Our send window (how many bytes we can send to the client).
+    /// Send window: how many bytes we are still allowed to send to the client.
+    /// Decremented as we send data; replenished by client's WINDOW_ADJUST messages.
     pub send_window: u32,
-    /// Our receive window (how many bytes the client can send to us).
+    /// Receive window: how many bytes the client is still allowed to send to us.
+    /// Decremented as we receive data; we send WINDOW_ADJUST to replenish.
     pub recv_window: u32,
     /// Maximum packet size the client accepts.
     pub remote_max_packet: u32,
@@ -106,10 +128,16 @@ impl Channel {
 // ---------------------------------------------------------------------------
 
 /// Manages all channels for a single SSH connection.
+///
+/// Handles channel lifecycle (open/close), flow control (window adjust),
+/// and data routing. Each SSH connection has one `ChannelManager`.
+///
+/// Channel IDs are allocated sequentially and wrapped via `wrapping_add`.
+/// The BTreeMap ensures O(log n) lookup by local channel ID.
 pub struct ChannelManager {
-    /// Map of local channel ID -> Channel.
+    /// Map of local channel ID -> Channel state.
     channels: BTreeMap<u32, Channel>,
-    /// Next channel ID to allocate.
+    /// Next channel ID to allocate. Increments monotonically and wraps.
     next_id: u32,
 }
 
@@ -533,7 +561,9 @@ impl ChannelManager {
         Ok(w.into_bytes())
     }
 
-    /// Check if any channel needs a window adjust (recv_window < half of default).
+    /// Check if any channel's receive window is running low and needs replenishment.
+    /// Returns channel IDs where recv_window has dropped below half of the default.
+    /// This prevents the client from stalling due to an exhausted send window.
     pub fn channels_needing_window_adjust(&self) -> Vec<u32> {
         self.channels
             .iter()

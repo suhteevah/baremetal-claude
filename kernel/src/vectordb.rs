@@ -515,8 +515,14 @@ fn is_stopword(word: &str) -> bool {
 
 /// Approximate natural logarithm for f32.
 ///
-/// Uses the identity: ln(x) = 2 * atanh((x-1)/(x+1)) with a polynomial
-/// approximation. Accurate enough for TF-IDF weighting.
+/// We cannot use `libm` or `std::f32::ln()` in the no_std kernel, so we
+/// implement a software approximation.  The approach:
+/// 1. Decompose x into mantissa m in [1,2) and exponent e via IEEE 754 bit tricks
+/// 2. Compute ln(m) using a 5th-degree polynomial (Taylor series of ln(1+t))
+/// 3. Combine: ln(x) = e * ln(2) + ln(m)
+///
+/// Accuracy: ~4 decimal digits for x > 0.  This is more than sufficient for
+/// TF-IDF weighting where we only need relative ordering, not exact values.
 fn ln_f32(x: f32) -> f32 {
     if x <= 0.0 {
         return f32::NEG_INFINITY;
@@ -543,7 +549,10 @@ fn ln_f32(x: f32) -> f32 {
 
 /// Approximate square root for f32.
 ///
-/// Uses the "fast inverse square root" trick followed by Newton-Raphson refinement.
+/// Uses a bit-manipulation initial guess (exploiting IEEE 754 float layout:
+/// halving the exponent bits gives an approximation of sqrt) followed by two
+/// Newton-Raphson iterations for convergence.  Two iterations give ~6 digits
+/// of accuracy, which is the limit of f32 precision anyway.
 fn sqrt_f32(x: f32) -> f32 {
     if x <= 0.0 {
         return 0.0;
@@ -893,7 +902,13 @@ fn parse_quoted_string(
 
 /// Global vector store instance.
 ///
-/// SAFETY: Single-threaded kernel — no concurrent access.
+/// # Safety
+///
+/// Uses `static mut` rather than `Mutex` for performance -- vector search
+/// is called on every agent API request for RAG context injection, and the
+/// mutex overhead is unnecessary in our cooperative single-threaded executor.
+/// All access is through `global_store()` which is only called from the
+/// async executor's single thread (never from interrupt handlers).
 static mut VECTOR_STORE: Option<VectorStore> = None;
 
 /// Get or initialize the global vector store.

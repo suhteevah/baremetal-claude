@@ -1,28 +1,69 @@
-//! Virtual function table generation and dynamic dispatch.
+//! Virtual function table (vtable) generation and dynamic dispatch for C++.
+//!
+//! In C++, virtual methods are dispatched at runtime through vtables. Each class
+//! with virtual methods has a vtable: a flat array of function pointers, one per
+//! virtual method. Objects of that class contain a hidden pointer (the "vptr")
+//! to their class's vtable.
+//!
+//! ## Vtable Layout
+//!
+//! ```text
+//! VTable for class Derived (inherits from Base):
+//! +---------+-----------------------------------+
+//! | Index 0 | &Derived::foo  (overrides Base)   |
+//! | Index 1 | &Base::bar     (inherited as-is)  |
+//! | Index 2 | &Derived::baz  (new virtual)      |
+//! +---------+-----------------------------------+
+//! ```
+//!
+//! ## Inheritance
+//!
+//! When a derived class is created, its vtable starts as a clone of the base
+//! class's vtable. Overridden methods replace entries at the same index
+//! (preserving ABI compatibility). New virtual methods are appended.
+//!
+//! ## Pure Virtual (Abstract Classes)
+//!
+//! A pure virtual slot has `is_pure = true` and no implementation. A class
+//! with any pure virtual slots is abstract and cannot be instantiated.
+//!
+//! ## Dynamic Dispatch
+//!
+//! To call a virtual method: `obj->vptr[vtable_index](obj, args...)`.
+//! The vtable index is resolved at compile time from the method name.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// A virtual function table entry.
+/// A single entry in a virtual function table.
+///
+/// Each entry corresponds to one virtual method and records the mangled name
+/// of the implementation that should be called for this class.
 #[derive(Debug, Clone)]
 pub struct VTableEntry {
-    /// Mangled function name.
+    /// Mangled name of the function implementation (e.g., `_ZN7Derived3fooEv`).
+    /// Used as the symbol to link against when generating dispatch code.
     pub mangled_name: String,
-    /// Index in the vtable.
+    /// Position of this method in the vtable array.
     pub index: usize,
-    /// Whether this is a pure virtual slot.
+    /// True if this is a pure virtual slot (`= 0` in C++).
+    /// Pure virtual entries have no valid implementation; calling them is UB.
     pub is_pure: bool,
 }
 
-/// Virtual function table for a class.
+/// Complete virtual function table for a single class.
+///
+/// The `entries` vector is the vtable itself: an ordered list of function
+/// pointers. The `method_index` map provides O(log n) lookup from method
+/// name to vtable slot index.
 #[derive(Debug, Clone)]
 pub struct VTable {
-    /// Class this vtable belongs to.
+    /// The class this vtable belongs to.
     pub class_name: String,
-    /// Ordered entries: index -> entry.
+    /// Ordered vtable entries (index 0 is the first virtual method).
     pub entries: Vec<VTableEntry>,
-    /// Lookup: method_name -> vtable index.
+    /// Fast lookup from unmangled method name to vtable index.
     pub method_index: BTreeMap<String, usize>,
 }
 
@@ -83,7 +124,7 @@ impl VTableBuilder {
 
     /// Create a vtable for a class, inheriting from an optional base.
     pub fn create_vtable(&mut self, class_name: &str, base_name: Option<&str>) -> &mut VTable {
-        let mut vtable = if let Some(base) = base_name {
+        let vtable = if let Some(base) = base_name {
             // Clone the base vtable
             if let Some(base_vt) = self.vtables.get(base) {
                 let mut vt = base_vt.clone();

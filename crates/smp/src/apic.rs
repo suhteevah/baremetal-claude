@@ -1,7 +1,30 @@
-//! Local APIC driver for ClaudioOS.
+//! Local APIC (Advanced Programmable Interrupt Controller) driver for ClaudioOS.
 //!
 //! Implements memory-mapped xAPIC and MSR-based x2APIC access per
 //! Intel SDM Volume 3, Chapter 10 (APIC).
+//!
+//! ## APIC Register Access Modes
+//!
+//! - **xAPIC** (legacy): Registers are memory-mapped at a 4 KiB page (default
+//!   0xFEE0_0000). Each register is at a 16-byte aligned offset. Reads/writes
+//!   use volatile MMIO.
+//!
+//! - **x2APIC**: Registers are accessed via MSRs at 0x800 + (offset >> 4).
+//!   Requires CPUID.01H:ECX[21] support. ICR write is a single 64-bit MSR
+//!   write (self-synchronizing, no delivery status polling needed).
+//!
+//! ## IPI (Inter-Processor Interrupt) Sending
+//!
+//! IPIs are sent via the ICR (Interrupt Command Register). The procedure is:
+//! 1. Wait for ICR delivery status bit (bit 12) to clear (xAPIC only)
+//! 2. Write destination APIC ID to ICR high (bits 24..31 in xAPIC, full 32-bit in x2APIC)
+//! 3. Write delivery mode, level, trigger, shorthand, and vector to ICR low
+//!
+//! The INIT-SIPI-SIPI sequence for AP boot:
+//! 1. Send INIT IPI (level-assert) to target AP
+//! 2. Wait 10ms
+//! 3. Send STARTUP IPI with trampoline page vector
+//! 4. Wait 200us, send second STARTUP IPI if needed
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -259,24 +282,44 @@ impl LocalApic {
     // -----------------------------------------------------------------------
 
     /// Read a 32-bit local APIC register.
+    ///
+    /// In xAPIC mode, performs a volatile MMIO read from `base_addr + offset`.
+    /// In x2APIC mode, reads the MSR at `0x800 + (offset >> 4)`.
+    ///
+    /// # Safety (internal)
+    /// xAPIC mode: `base_addr + offset` must be within the mapped APIC MMIO page.
+    /// x2APIC mode: the computed MSR index must be a valid APIC register.
     #[inline]
     fn read_reg(&self, offset: u32) -> u32 {
         if self.x2apic {
-            // x2APIC: register offset / 16 + MSR base
+            // x2APIC: register offset / 16 + MSR base 0x800
             let msr = X2APIC_MSR_BASE + (offset >> 4);
+            // SAFETY: MSR is a valid x2APIC register (caller ensures valid offset).
             unsafe { Self::rdmsr(msr) as u32 }
         } else {
+            // SAFETY: base_addr is the identity-mapped APIC MMIO page (typically 0xFEE00000).
+            // Volatile read ensures we see hardware-updated register values.
             unsafe { ptr::read_volatile((self.base_addr + offset as u64) as *const u32) }
         }
     }
 
     /// Write a 32-bit local APIC register.
+    ///
+    /// In xAPIC mode, performs a volatile MMIO write to `base_addr + offset`.
+    /// In x2APIC mode, writes the MSR at `0x800 + (offset >> 4)`.
+    ///
+    /// # Safety (internal)
+    /// Some registers are write-only (e.g., EOI) or have side effects on write.
+    /// The caller must understand the register semantics.
     #[inline]
     fn write_reg(&self, offset: u32, value: u32) {
         if self.x2apic {
             let msr = X2APIC_MSR_BASE + (offset >> 4);
+            // SAFETY: MSR is a valid x2APIC register.
             unsafe { Self::wrmsr(msr, value as u64) };
         } else {
+            // SAFETY: base_addr + offset is within the APIC MMIO page.
+            // Volatile write ensures the hardware receives this store.
             unsafe {
                 ptr::write_volatile((self.base_addr + offset as u64) as *mut u32, value);
             }

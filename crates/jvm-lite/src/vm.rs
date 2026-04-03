@@ -1,10 +1,41 @@
-//! Stack-based JVM interpreter.
+//! Stack-based JVM bytecode interpreter (JVM spec, Ch. 6).
 //!
-//! Frame stack, operand stack, local variables, constant pool resolution,
-//! method dispatch, exception handling via exception table.
+//! Implements the core execution engine of a Java Virtual Machine. The JVM is a
+//! **stack machine**: instructions push/pop values on an operand stack rather than
+//! naming registers.
+//!
+//! ## Execution Model
+//!
+//! - **Frame stack**: Each method invocation creates a [`Frame`] containing:
+//!   - `locals[]` — local variable array (params + declared locals)
+//!   - `stack[]` — operand stack (bounded by `max_stack` from the Code attribute)
+//!   - `pc` — program counter (byte offset into the method's bytecode)
+//! - **Dispatch loop**: `execute_frames()` reads one opcode per iteration,
+//!   decodes it via `Opcode::from_byte`, and dispatches to the handler.
+//! - **Method calls**: `invokevirtual`/`invokestatic` resolve the target method
+//!   via the constant pool (Methodref -> Class + NameAndType -> UTF8 strings),
+//!   then either push a new frame or delegate to stdlib handlers.
+//!
+//! ## Bytecode Encoding
+//!
+//! JVM bytecodes are 1 byte for the opcode, followed by 0-4 bytes of operands.
+//! Branch offsets are signed 16-bit relative to the start of the branch instruction
+//! (hence the `-3` adjustment: 1 byte opcode + 2 bytes offset).
+//!
+//! ## Key Opcodes Implemented
+//!
+//! | Category | Opcodes |
+//! |----------|---------|
+//! | Constants | `iconst_*`, `lconst_*`, `bipush`, `sipush` |
+//! | Loads | `iload`, `iload_0..3`, `aload`, `aload_0..3` |
+//! | Stores | `istore`, `istore_0..3`, `astore_0..3` |
+//! | Arithmetic | `iadd`, `isub`, `imul`, `idiv`, `irem`, `ineg`, shifts, bitwise |
+//! | Stack | `pop`, `pop2`, `dup`, `swap` |
+//! | Control | `ifeq`, `ifne`, `if_icmpeq`, `goto`, `ireturn`, `return` |
+//! | Objects | `new`, `getstatic`, `invokevirtual`, `invokespecial`, `invokestatic` |
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::bytecode::Opcode;
@@ -388,16 +419,29 @@ impl Vm {
 
                 Opcode::Invokevirtual | Opcode::Invokespecial | Opcode::Invokestatic => {
                     let idx = frame.read_u16();
-                    // Delegate to stdlib handler
                     let class_name = frame.class_name.clone();
-                    if let Some(class) = self.classes.get(&class_name) {
+                    // Extract method info before borrowing self mutably
+                    let method_info = if let Some(class) = self.classes.get(&class_name) {
                         if let Some(CpEntry::Methodref(class_idx, nat_idx)) = class.constant_pool.get(idx as usize) {
-                            let method_name = self.resolve_method_name(class, *class_idx, *nat_idx);
-                            if let Some((cls, meth)) = method_name {
-                                if let Some(result) = stdlib::handle_stdlib_call(&cls, &meth, &mut frame.stack, &mut self.output, &mut self.heap) {
-                                    frame.push(result);
-                                }
+                            let ci = *class_idx;
+                            let ni = *nat_idx;
+                            // Resolve names inline
+                            let cn = if let Some(CpEntry::Class(name_idx)) = class.constant_pool.get(ci as usize) {
+                                class.get_utf8(*name_idx).map(|s| String::from(s))
+                            } else { None };
+                            let mn = if let Some(CpEntry::NameAndType(name_idx, _)) = class.constant_pool.get(ni as usize) {
+                                class.get_utf8(*name_idx).map(|s| String::from(s))
+                            } else { None };
+                            match (cn, mn) {
+                                (Some(c), Some(m)) => Some((c.replace('/', "."), m)),
+                                _ => None,
                             }
+                        } else { None }
+                    } else { None };
+                    if let Some((cls, meth)) = method_info {
+                        let frame = self.frames.last_mut().unwrap();
+                        if let Some(result) = stdlib::handle_stdlib_call(&cls, &meth, &mut frame.stack, &mut self.output, &mut self.heap) {
+                            frame.push(result);
                         }
                     }
                 }

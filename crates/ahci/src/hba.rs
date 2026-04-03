@@ -4,6 +4,20 @@
 //! Register, PCI BAR5). This module maps those registers as volatile
 //! memory-mapped structs with safe read/write accessors.
 //!
+//! ## Register Space Layout
+//!
+//! ```text
+//! ABAR + 0x000..0x02B  Generic Host Control (CAP, GHC, IS, PI, VS, etc.)
+//! ABAR + 0x02C..0x09F  Reserved / vendor-specific
+//! ABAR + 0x100..0x17F  Port 0 registers (CLB, FB, IS, IE, CMD, TFD, SIG, SSTS, etc.)
+//! ABAR + 0x180..0x1FF  Port 1 registers
+//! ...                  (each port is 0x80 bytes)
+//! ABAR + 0x100+N*0x80  Port N registers (N = 0..31)
+//! ```
+//!
+//! All reads/writes use `ptr::read_volatile` / `ptr::write_volatile` to prevent
+//! the compiler from reordering or eliding MMIO accesses.
+//!
 //! Reference: AHCI 1.3.1 specification, Section 3 (HBA Memory Registers).
 
 use core::ptr;
@@ -341,6 +355,9 @@ impl HbaRegs {
     // -----------------------------------------------------------------------
 
     /// Compute the base offset for a given port (0..31).
+    ///
+    /// Per AHCI spec, port registers start at ABAR + 0x100 and each port
+    /// occupies 0x80 (128) bytes. So port N is at offset 0x100 + N * 0x80.
     fn port_offset(&self, port: u32) -> usize {
         0x100 + (port as usize) * 0x80
     }
@@ -449,11 +466,26 @@ impl HbaRegs {
     // Low-level volatile MMIO
     // -----------------------------------------------------------------------
 
+    /// Read a 32-bit MMIO register at the given byte offset from ABAR.
+    ///
+    /// # Safety
+    /// Uses volatile read to ensure the compiler does not optimize away or
+    /// reorder this access. The ABAR base was validated at construction time.
     fn read32(&self, offset: usize) -> u32 {
+        // SAFETY: self.base is a valid ABAR address (caller-guaranteed at construction).
+        // Volatile read is required for MMIO -- hardware state may change between reads.
         unsafe { ptr::read_volatile((self.base + offset) as *const u32) }
     }
 
+    /// Write a 32-bit MMIO register at the given byte offset from ABAR.
+    ///
+    /// # Safety
+    /// Uses volatile write to ensure the compiler does not elide or reorder this
+    /// access. Some registers are write-1-to-clear (W1C) -- the caller must be
+    /// aware of register semantics.
     fn write32(&self, offset: usize, val: u32) {
+        // SAFETY: self.base is a valid ABAR address. Volatile write ensures the
+        // hardware sees this store immediately and in program order.
         unsafe { ptr::write_volatile((self.base + offset) as *mut u32, val) }
     }
 }

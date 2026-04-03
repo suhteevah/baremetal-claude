@@ -3,6 +3,20 @@
 //! Both families use the "legacy" descriptor format. Each descriptor is 16 bytes.
 //! The NIC reads/writes these via DMA, so they must be in physically contiguous
 //! memory and we must use the physical address when programming RDBAL/TDBAL.
+//!
+//! ## DMA Descriptor Ring Protocol
+//!
+//! The NIC and driver share a circular buffer of descriptors. The NIC maintains
+//! a Head pointer (RDH/TDH) and the driver maintains a Tail pointer (RDT/TDT):
+//!
+//! - **RX**: The NIC owns descriptors from Head to Tail-1. When a packet arrives,
+//!   the NIC writes data to the buffer, sets the DD (Descriptor Done) bit, and
+//!   advances Head. The driver reads completed descriptors from its read position
+//!   and advances Tail (via RDT register) to return descriptors to the NIC.
+//!
+//! - **TX**: The driver writes descriptors and advances Tail (via TDT register).
+//!   The NIC transmits from Head to Tail-1, sets DD on completion, and advances
+//!   Head. The driver reclaims completed descriptors by checking DD bits.
 
 extern crate alloc;
 

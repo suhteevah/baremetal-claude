@@ -257,7 +257,9 @@ pub fn half_md4_hash(name: &[u8], seed: &[u32; 4]) -> u32 {
         }
     }
 
-    // Return the lower 32 bits of the hash, masking to positive
+    // Return the lower 32 bits of the hash, masking out the sign bit (bit 31)
+    // to ensure the hash is always a non-negative value. The ext4 HTree uses
+    // unsigned comparison for hash ordering, so this keeps things consistent.
     (b.wrapping_add(a)) & 0x7FFFFFFF
 }
 
@@ -283,7 +285,9 @@ pub fn tea_hash(name: &[u8], seed: &[u32; 4]) -> u32 {
             }
         }
 
-        // TEA-like scramble
+        // TEA-like scramble using the golden ratio constant.
+        // delta = 0x9E3779B9 = floor(2^32 / golden_ratio) is the standard
+        // TEA constant that ensures each round produces a different mixing.
         let mut sum = 0u32;
         let delta: u32 = 0x9E3779B9;
         for _ in 0..16 {
@@ -385,17 +389,27 @@ where
 }
 
 // --- Half-MD4 internal round functions ---
+//
+// These are the three auxiliary boolean functions from the MD4 specification
+// (RFC 1320). Each round of the half-MD4 transform uses one of these to mix
+// the four state variables (a, b, c, d) together with input words.
 
+/// Round 1 function F(X,Y,Z) = (X AND Y) OR (NOT X AND Z).
+/// Acts as a bitwise multiplexer: selects Y bits where X=1, Z bits where X=0.
 #[inline]
 fn f(x: u32, y: u32, z: u32) -> u32 {
     (x & y) | (!x & z)
 }
 
+/// Round 2 function G(X,Y,Z) = (X AND Y) OR (X AND Z) OR (Y AND Z).
+/// Majority function: output bit is 1 if at least two of the three input bits are 1.
 #[inline]
 fn g(x: u32, y: u32, z: u32) -> u32 {
     (x & y) | (x & z) | (y & z)
 }
 
+/// Round 3 function H(X,Y,Z) = X XOR Y XOR Z.
+/// Parity function: output bit is 1 if an odd number of input bits are 1.
 #[inline]
 fn h(x: u32, y: u32, z: u32) -> u32 {
     x ^ y ^ z
@@ -412,6 +426,8 @@ fn half_md4_round1(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, input: &[
     *b = b.wrapping_add(f(*c, *d, *a)).wrapping_add(input[7]).rotate_left(19);
 }
 
+/// Round 2 additive constant: floor(2^30 * sqrt(2)) = 0x5A827999.
+/// This is the same constant used in the original MD4 specification.
 const MD4_ROUND2_CONST: u32 = 0x5A827999;
 
 fn half_md4_round2(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, input: &[u32; 8]) {
@@ -425,6 +441,8 @@ fn half_md4_round2(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, input: &[
     *b = b.wrapping_add(g(*c, *d, *a)).wrapping_add(input[6]).wrapping_add(MD4_ROUND2_CONST).rotate_left(13);
 }
 
+/// Round 3 additive constant: floor(2^30 * sqrt(3)) = 0x6ED9EBA1.
+/// This is the same constant used in the original MD4 specification.
 const MD4_ROUND3_CONST: u32 = 0x6ED9EBA1;
 
 fn half_md4_round3(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, input: &[u32; 8]) {

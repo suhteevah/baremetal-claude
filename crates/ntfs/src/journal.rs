@@ -73,12 +73,25 @@ pub struct JournalEntry {
     pub committed: bool,
 }
 
-/// Entry header size on disk: LSN(8) + txn_id(8) + op(1) + committed(1) +
-/// padding(2) + target_offset(8) + data_length(4) + redo_len(4) + undo_len(4) = 40 bytes
+/// Entry header size on disk.
+///
+/// Layout (40 bytes total):
+///   Offset 0:  LSN (u64 LE) -- Log Sequence Number
+///   Offset 8:  transaction_id (u64 LE) -- groups related entries
+///   Offset 16: op (u8) -- operation type (see JournalOp)
+///   Offset 17: committed (u8) -- 0 = uncommitted, 1 = committed
+///   Offset 18: padding (2 bytes)
+///   Offset 20: target_offset (u64 LE) -- byte offset on disk
+///   Offset 28: data_length (u32 LE) -- length of write data
+///   Offset 32: redo_len (u32 LE) -- bytes of redo data following header
+///   Offset 36: undo_len (u32 LE) -- bytes of undo data following redo
+///
+/// After the header: redo_data[redo_len] followed by undo_data[undo_len].
 const JOURNAL_ENTRY_HEADER_SIZE: usize = 40;
 
-/// Magic for the journal header block.
-const JOURNAL_MAGIC: u32 = 0x4A524E4C; // "JRNL"
+/// Magic for the journal header block: ASCII "JRNL" (0x4A=J, 0x52=R, 0x4E=N, 0x4C=L).
+/// Used to identify a valid ClaudioOS NTFS journal region on disk.
+const JOURNAL_MAGIC: u32 = 0x4A524E4C;
 
 /// Journal header (first 64 bytes of the journal area).
 #[derive(Debug, Clone)]

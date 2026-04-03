@@ -155,13 +155,19 @@ fn resolve_imports(loaded: &LoadedPe) -> usize {
 /// Call the PE entry point.
 ///
 /// For a Windows EXE, the entry point signature is:
-///   DWORD WINAPI WinMainCRTStartup(void) — for CRT-linked apps
-///   or void mainCRTStartup(void)
+///   `DWORD WINAPI WinMainCRTStartup(void)` — for CRT-linked apps
+///   or `void mainCRTStartup(void)`
 ///
-/// We call it with the Windows x64 calling convention.
+/// We call it with the Windows x64 calling convention (`extern "system"`),
+/// which on x86_64 is identical to the Microsoft x64 ABI: first 4 args in
+/// RCX/RDX/R8/R9, caller-allocated shadow space, callee-saved RBX/RBP/RDI/RSI.
+///
+/// The `transmute` converts the raw u64 address into a Rust function pointer.
+/// When the PE code executes, all Win32 API calls (via the patched IAT) jump
+/// to our Rust implementations in the `claudio_win32` crate.
 ///
 /// # Safety
-/// The entry_point must be a valid, mapped code address.
+/// The entry_point must be a valid, mapped code address within the loaded PE image.
 unsafe fn call_pe_entry(entry_point: u64) -> i32 {
     // The PE entry point for a console app is typically:
     //   int mainCRTStartup(void)

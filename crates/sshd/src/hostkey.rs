@@ -1,9 +1,18 @@
 //! SSH Host Key Management.
 //!
-//! Manages the server's long-term identity keys:
-//! - Ed25519 (classical, RFC 8709)
-//! - ML-DSA-65 (post-quantum, FIPS 204)
-//! - Hybrid: ML-DSA-65 + Ed25519 dual signature
+//! Manages the server's long-term identity keys used to prove the server's
+//! identity to clients during key exchange. The host key is the SSH equivalent
+//! of a TLS certificate -- it lets clients verify they are talking to the
+//! expected server and not a man-in-the-middle.
+//!
+//! We support three host key types:
+//! - **Ed25519** (classical, RFC 8709): A 32-byte public key with 64-byte
+//!   signatures. Fast, small, and the modern default for SSH.
+//! - **ML-DSA-65** (post-quantum, FIPS 204 / CRYSTALS-Dilithium): Lattice-based
+//!   signatures believed to be quantum-resistant. Larger keys (1952 bytes) and
+//!   signatures (3309 bytes), but provides NIST security level 3.
+//! - **Hybrid**: ML-DSA-65 + Ed25519 dual signature. Both algorithms sign the
+//!   same data independently. Security holds if either algorithm remains unbroken.
 //!
 //! Provides SSH wire-format serialization for public keys and signatures,
 //! and signing of the exchange hash during key exchange.
@@ -24,27 +33,44 @@ use crate::wire::SshWriter;
 // Host key type identifiers (SSH name strings)
 // ---------------------------------------------------------------------------
 
-/// SSH name for Ed25519 host keys (RFC 8709).
+/// SSH algorithm name string for Ed25519 host keys (RFC 8709).
+/// This exact string is used in KEXINIT negotiation and in the wire-format
+/// encoding of public key blobs and signature blobs.
 pub const SSH_ED25519: &str = "ssh-ed25519";
 
-/// SSH name for hybrid ML-DSA-65 + Ed25519 host keys.
-/// Following the naming convention from draft PQ SSH specs.
+/// SSH algorithm name string for hybrid ML-DSA-65 + Ed25519 host keys.
+/// Uses the OpenSSH naming convention with `@openssh.com` suffix for
+/// vendor-specific extensions. Note: the "mlkem768" prefix is a naming
+/// artifact from the KEX algorithm -- the host key uses ML-DSA, not ML-KEM.
 pub const SSH_MLDSA65_ED25519: &str = "mlkem768-ed25519@openssh.com";
 
 // ---------------------------------------------------------------------------
 // Ed25519 host key
 // ---------------------------------------------------------------------------
 
-/// An Ed25519 host keypair.
+/// An Ed25519 host keypair (RFC 8032).
+///
+/// Ed25519 uses a 32-byte seed (the "secret key") from which the actual
+/// 64-byte expanded secret key and the 32-byte public key are derived
+/// deterministically. We store only the 32-byte seed for compactness.
+///
+/// Ed25519 signatures are 64 bytes and are deterministic (no randomness
+/// needed at signing time), which eliminates a class of implementation
+/// bugs related to nonce generation.
 pub struct Ed25519HostKey {
-    /// Ed25519 secret key seed (32 bytes).
+    /// Ed25519 secret key seed (32 bytes). The actual signing key is derived
+    /// from this seed via SHA-512 hashing (per RFC 8032).
     secret: [u8; 32],
-    /// Ed25519 public key (32 bytes).
+    /// Ed25519 public key (32 bytes). A compressed Edwards curve point.
     public: [u8; 32],
 }
 
 impl Ed25519HostKey {
-    /// Generate a new Ed25519 host keypair.
+    /// Generate a new Ed25519 host keypair from random bytes.
+    ///
+    /// # Parameters
+    /// - `rng`: A cryptographically secure random byte source. Must provide
+    ///   32 bytes of entropy for the secret key seed.
     pub fn generate(rng: &mut dyn FnMut(&mut [u8])) -> Self {
         log::info!("hostkey: generating Ed25519 host keypair");
 
@@ -97,6 +123,15 @@ impl Ed25519HostKey {
     }
 
     /// Verify an Ed25519 signature over data using a raw 32-byte public key.
+    ///
+    /// # Parameters
+    /// - `public_key`: The 32-byte Ed25519 public key (compressed Edwards point).
+    /// - `data`: The data that was signed.
+    /// - `signature`: The 64-byte Ed25519 signature to verify.
+    ///
+    /// # Returns
+    /// `true` if the signature is valid, `false` otherwise. Returns `false`
+    /// (rather than panicking) for malformed keys or signatures.
     pub fn verify(public_key: &[u8; 32], data: &[u8], signature: &[u8]) -> bool {
         log::debug!(
             "hostkey: verifying Ed25519 signature — data={} bytes, sig={} bytes",
@@ -139,7 +174,8 @@ impl Ed25519HostKey {
         &self.public
     }
 
-    /// Serialize the full keypair for persistence (secret || public).
+    /// Serialize the full keypair for persistence as `secret(32) || public(32)`.
+    /// The secret key seed must be stored securely (encrypted on disk).
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(64);
         out.extend_from_slice(&self.secret);
@@ -147,7 +183,8 @@ impl Ed25519HostKey {
         out
     }
 
-    /// Deserialize a keypair from persistence.
+    /// Deserialize a keypair from persistence, validating that the stored
+    /// public key matches what the secret key derives. This catches corruption.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 64 {
             log::error!("hostkey: Ed25519 key data too short: {} bytes", data.len());
@@ -177,22 +214,34 @@ impl Ed25519HostKey {
 
 /// An ML-DSA-65 host keypair (FIPS 204 / CRYSTALS-Dilithium).
 ///
-/// Internally stores the 32-byte seed from which the signing key is derived
-/// deterministically, plus the encoded verifying (public) key.
+/// ML-DSA-65 is a post-quantum digital signature scheme based on the
+/// hardness of Module-LWE (Module Learning With Errors) over lattices.
+/// It is the NIST-standardized successor to CRYSTALS-Dilithium.
+///
+/// Key sizes are much larger than Ed25519:
+/// - Public key: 1,952 bytes (vs 32 for Ed25519)
+/// - Signature: 3,309 bytes (vs 64 for Ed25519)
+/// - Secret key: 4,032 bytes (but we only store a 32-byte seed)
+///
+/// We store only the 32-byte seed from which the full signing key is derived
+/// deterministically. This keeps persistence compact while the expanded
+/// 4,032-byte signing key is reconstructed in memory when needed.
 pub struct MlDsa65HostKey {
-    /// ML-DSA-65 seed (32 bytes) — used to derive the full signing key.
+    /// ML-DSA-65 seed (32 bytes). The full 4,032-byte signing key is derived
+    /// from this seed deterministically via the ML-DSA key generation function.
     seed: [u8; 32],
-    /// ML-DSA-65 encoded public/verifying key.
+    /// ML-DSA-65 encoded verifying (public) key (1,952 bytes).
     public: Vec<u8>,
 }
 
-/// ML-DSA-65 public key size (FIPS 204).
+/// ML-DSA-65 public (verifying) key size in bytes per FIPS 204.
 pub const MLDSA65_PK_SIZE: usize = 1952;
 
-/// ML-DSA-65 secret key size (FIPS 204).
+/// ML-DSA-65 secret (signing) key size in bytes per FIPS 204.
+/// We do not store this directly -- it is derived from the 32-byte seed.
 pub const MLDSA65_SK_SIZE: usize = 4032;
 
-/// ML-DSA-65 signature size (FIPS 204).
+/// ML-DSA-65 signature size in bytes per FIPS 204.
 pub const MLDSA65_SIG_SIZE: usize = 3309;
 
 impl MlDsa65HostKey {
@@ -221,7 +270,9 @@ impl MlDsa65HostKey {
         Self { seed, public }
     }
 
-    /// Reconstruct the expanded signing key from the stored seed.
+    /// Reconstruct the full expanded signing key from the compact 32-byte seed.
+    /// This performs the deterministic ML-DSA key generation internally, which
+    /// expands the seed into the 4,032-byte signing key.
     fn signing_key(&self) -> ml_dsa::SigningKey<MlDsa65> {
         let seed_array = ml_dsa::B32::from(self.seed);
         MlDsa65::from_seed(&seed_array)
@@ -359,7 +410,12 @@ impl MlDsa65HostKey {
 // ---------------------------------------------------------------------------
 
 /// A hybrid host key combining ML-DSA-65 and Ed25519.
-/// Both keys are presented together; both signatures are produced during KEX.
+///
+/// This is the "belt and suspenders" approach to post-quantum security:
+/// both keys are presented together in the public key blob, and both
+/// algorithms sign the exchange hash independently during key exchange.
+/// A client MUST verify both signatures. Security holds as long as at
+/// least one of the two signature schemes remains unbroken.
 pub struct HybridHostKey {
     /// The Ed25519 component.
     pub ed25519: Ed25519HostKey,

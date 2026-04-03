@@ -10,7 +10,12 @@
 //!
 //! Reference: <https://btrfs.readthedocs.io/en/latest/dev/On-disk-format.html>
 
-/// CRC32C polynomial (Castagnoli) in reversed bit order.
+/// CRC32C polynomial (Castagnoli) in reversed (reflected) bit order.
+///
+/// Normal form: 0x1EDC6F41. Reflected form: 0x82F63B78. The reflected form
+/// is used because the table-driven algorithm processes bits from LSB to MSB,
+/// which matches the reflected polynomial convention. This is the same
+/// polynomial used by ext4, SCTP, iSCSI, and Intel's CRC32 CPU instruction.
 const CRC32C_POLY: u32 = 0x82F6_3B78;
 
 /// Precomputed CRC32C lookup table (256 entries).
@@ -57,15 +62,18 @@ pub fn crc32c(data: &[u8]) -> u32 {
 
 /// Compute the btrfs name hash for directory items.
 ///
-/// btrfs uses CRC32C but with an initial seed of `0xFFFF_FFFF` and does NOT
-/// final-XOR. This matches the `~crc32c(~0, name)` convention used in the kernel.
+/// btrfs directory items are keyed by a CRC32C hash of the filename, enabling
+/// O(log n) lookup in the filesystem B-tree. The hash uses a non-standard
+/// initialization value of `~1 = 0xFFFFFFFE` (instead of the usual `0xFFFFFFFF`)
+/// and does NOT apply a final XOR. This matches the kernel's `btrfs_name_hash()`:
 ///
-/// Actually, btrfs uses `btrfs_name_hash` = `crc32c(0xFFFFFFFE, name)` with
-/// no final XOR? No -- the kernel `btrfs_name_hash` is simply:
-/// `crc32c(~1, name, len)` which is `crc32c_le(~1, name, len)`.
+/// ```c
+/// static inline u32 btrfs_name_hash(const char *name, int len) {
+///     return crc32c((u32)~1, name, len);
+/// }
+/// ```
 ///
-/// In practice the kernel code does: `crc = btrfs_crc32c(~1, name, len)` which
-/// is `crc32c_le` with init=0xFFFFFFFE. The result is NOT inverted.
+/// The `~1` seed (0xFFFFFFFE) differs from standard CRC32C by exactly one bit.
 pub fn btrfs_name_hash(name: &[u8]) -> u32 {
     // btrfs_name_hash = crc32c with initial value ~1 = 0xFFFFFFFE, no final XOR
     crc32c_update(0xFFFF_FFFE, name)

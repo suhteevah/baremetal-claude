@@ -32,11 +32,18 @@ use claudio_net::NetworkStack;
 
 use crate::keyboard;
 
-/// RNG seed counter — each TLS connection needs a unique seed.
+/// RNG seed counter — each TLS connection needs a unique seed for its
+/// handshake nonces.  We use an incrementing counter rather than true
+/// randomness because embedded-tls only needs uniqueness, not cryptographic
+/// unpredictability, for session key derivation (the actual entropy comes
+/// from the TLS key exchange).  Starts at 1 because 0 can cause issues
+/// with some PRNG implementations.
 pub(crate) static RNG_SEED: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum number of consecutive tool-use rounds before we force-stop.
-/// Prevents runaway loops if the model keeps requesting tools.
+/// Prevents runaway loops if the model keeps requesting tools endlessly
+/// (e.g., recursive file exploration or compilation retry loops).
+/// 20 rounds is generous -- most real tasks complete in 3-5 rounds.
 const MAX_TOOL_ROUNDS: usize = 20;
 
 // ---------------------------------------------------------------------------

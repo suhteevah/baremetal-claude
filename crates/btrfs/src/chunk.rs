@@ -428,7 +428,19 @@ impl fmt::Debug for ChunkMap {
 
 /// Resolve a read address within a chunk, handling all RAID profiles.
 ///
-/// Returns (devid, physical_offset) for the target read location.
+/// Returns `(devid, physical_offset)` for the target read location.
+///
+/// ## RAID profile resolution strategy
+///
+/// - **Single / DUP / RAID1 / RAID1C3 / RAID1C4**: All stripes hold identical
+///   data. For reads, we simply pick the first stripe (any mirror would work).
+/// - **RAID0**: Data is striped (round-robin) across `num_stripes` devices in
+///   chunks of `stripe_len` bytes. We compute which stripe holds the target
+///   offset and translate to the physical offset on that device.
+/// - **RAID10**: Combination of striping and mirroring. Data is striped across
+///   `num_stripes / sub_stripes` groups, where each group has `sub_stripes`
+///   mirrors. We select the stripe group via RAID0 logic, then read from the
+///   first mirror in that group.
 fn resolve_for_chunk(chunk: &ChunkItem, offset_in_chunk: u64) -> Option<(u64, u64)> {
     if chunk.stripes.is_empty() {
         log::error!("[btrfs::chunk] chunk has no stripes");
@@ -436,13 +448,20 @@ fn resolve_for_chunk(chunk: &ChunkItem, offset_in_chunk: u64) -> Option<(u64, u6
     }
 
     let ct = chunk.chunk_type;
+    // Default stripe length of 64 KiB if not specified. btrfs typically uses
+    // 64 KiB stripes, matching the default extent allocation unit.
     let stripe_len = if chunk.stripe_len > 0 { chunk.stripe_len } else { 65536 };
 
     if ct & chunk_type::RAID0 != 0 {
-        // RAID0: data is striped across all devices.
-        // stripe_nr = offset / stripe_len
-        // stripe_index = stripe_nr % num_stripes
-        // stripe_offset = (stripe_nr / num_stripes) * stripe_len + (offset % stripe_len)
+        // RAID0 stripe address calculation:
+        //   stripe_nr     = which stripe (of stripe_len size) this offset falls in
+        //   stripe_index  = which device (0..num_stripes-1) holds this stripe
+        //   stripe_offset = byte offset within that device's portion of the chunk
+        //
+        // The data is laid out in round-robin order across devices:
+        //   Device 0: stripes 0, N, 2N, ...
+        //   Device 1: stripes 1, N+1, 2N+1, ...
+        //   etc.
         let num_stripes = chunk.num_stripes as u64;
         if num_stripes == 0 {
             return None;

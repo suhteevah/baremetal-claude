@@ -20,18 +20,33 @@ use crate::wire::*;
 // Session state machine
 // ---------------------------------------------------------------------------
 
-/// High-level session states.
+/// High-level session states forming a linear state machine.
+///
+/// The SSH protocol progresses through these states in order:
+/// ```text
+/// VersionExchange -> KeyExchange -> Authenticating -> Interactive -> Disconnected
+/// ```
+/// Any state can transition directly to `Disconnected` if an error occurs
+/// or either side sends SSH_MSG_DISCONNECT.
+///
+/// Re-keying (repeat key exchange during an active session) would cycle
+/// back from Interactive to KeyExchange, but is not yet implemented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
-    /// Initial: exchanging SSH version strings.
+    /// Initial state: exchanging SSH-2.0 version strings over raw TCP.
+    /// No encryption, no framing -- just line-oriented text.
     VersionExchange,
-    /// KEXINIT sent, performing key exchange.
+    /// KEXINIT sent, performing key exchange (algorithm negotiation, DH, NEWKEYS).
+    /// Packets are still unencrypted until NEWKEYS is received.
     KeyExchange,
-    /// Key exchange done, waiting for authentication.
+    /// Key exchange complete, encryption active. Waiting for the client to
+    /// request and complete user authentication (SSH_MSG_USERAUTH_REQUEST).
     Authenticating,
-    /// Authenticated, interactive session active.
+    /// Authenticated. The client can open channels, request shells/exec,
+    /// and send/receive data. This is the normal operating state.
     Interactive,
-    /// Session has been disconnected.
+    /// Session has been disconnected (cleanly or due to error).
+    /// No further packets will be sent or processed.
     Disconnected,
 }
 
@@ -52,10 +67,22 @@ impl core::fmt::Display for SessionState {
 // ---------------------------------------------------------------------------
 
 /// A single SSH session (one per TCP connection).
+///
+/// Encapsulates all state for an SSH connection: protocol state machine,
+/// encryption keys, authentication progress, and open channels. The session
+/// processes raw TCP data and produces framed, encrypted packets for
+/// transmission.
+///
+/// ## Ownership
+/// Each TCP connection spawns one `SshSession`. The caller (kernel network
+/// stack) feeds raw bytes in via `on_version_received` and `on_data_received`,
+/// and drains outgoing packets via `drain_outgoing`.
 pub struct SshSession {
-    /// Current session state.
+    /// Current protocol state (version exchange, KEX, auth, interactive, etc.).
     pub state: SessionState,
-    /// Session ID (first exchange hash, set after first KEX).
+    /// Session ID: the exchange hash H from the *first* key exchange.
+    /// Per RFC 4253 section 7.2, the session ID never changes, even after
+    /// re-keying. It is used in key derivation and authentication signatures.
     session_id: Option<Vec<u8>>,
     /// Peer's version string.
     peer_version: Option<String>,
@@ -146,7 +173,8 @@ impl SshSession {
         &mut self.channels
     }
 
-    /// Queue a framed packet for sending.
+    /// Encrypt, frame, and queue a payload for sending to the client.
+    /// Handles sequence number advancement and cipher state automatically.
     fn queue_packet(&mut self, payload: &[u8]) {
         let seq = self.send_seq.next();
         let rng = self.rng_fill;
@@ -435,23 +463,28 @@ impl SshSession {
         let newkeys = transport::build_newkeys();
         self.queue_packet(&newkeys);
 
-        // Derive encryption keys
-        // For chacha20-poly1305@openssh.com: 64 bytes per direction (two 32-byte keys)
+        // Derive encryption keys per RFC 4253 section 7.2.
+        // For chacha20-poly1305@openssh.com, we need:
+        // - IV length = 0 (ChaCha20 uses the sequence number as nonce, not a derived IV)
+        // - Encryption key length = 64 (two 32-byte keys: main key + header key)
+        // - Integrity key length = 0 (Poly1305 is integrated into the AEAD, no separate MAC)
         let session_id = self.session_id.as_ref().unwrap();
         let keys = kex::derive_keys(
             &shared_secret,
             &exchange_hash,
             session_id,
-            0,  // chacha20-poly1305 doesn't use separate IV
-            64, // two 32-byte keys per direction
-            0,  // MAC is integrated in AEAD
+            0,  // no IV needed for chacha20-poly1305 (uses seq number as nonce)
+            64, // 64 bytes = two 32-byte keys (main + header) per direction
+            0,  // no separate integrity key (MAC is built into the AEAD cipher)
         );
 
         // Store keys for activation after we receive client NEWKEYS
         log::info!("session: KEX complete — keys derived, waiting for client NEWKEYS");
 
-        // Prepare cipher states (activate after NEWKEYS)
-        // For chacha20-poly1305, enc_key is 64 bytes: first 32 = main key, second 32 = header key
+        // Prepare cipher states for both directions.
+        // For chacha20-poly1305@openssh.com, the 64-byte derived key is split:
+        //   bytes [0..32]  = main encryption key (ChaCha20 for body + Poly1305 MAC)
+        //   bytes [32..64] = header encryption key (ChaCha20 for 4-byte packet length)
         let mut send_key = [0u8; 32];
         let mut send_header = [0u8; 32];
         if keys.enc_key_s2c.len() >= 64 {

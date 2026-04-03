@@ -76,11 +76,15 @@ fn decompress_zlib(data: &[u8], output_size: usize) -> Result<Vec<u8>, Decompres
         return Err(DecompressError::InvalidData("zlib header checksum failed"));
     }
 
+    // CM (compression method) is the lower 4 bits of CMF. Value 8 = DEFLATE,
+    // which is the only compression method defined for zlib.
     let cm = cmf & 0x0F;
     if cm != 8 {
         return Err(DecompressError::InvalidData("zlib: compression method not DEFLATE"));
     }
 
+    // FDICT (bit 5 of FLG): if set, a 4-byte preset dictionary ID follows
+    // the header. The DEFLATE stream starts after the header + optional DICTID.
     let fdict = (flg >> 5) & 1;
     let deflate_start = if fdict != 0 { 6 } else { 2 };
 
@@ -212,7 +216,9 @@ fn build_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(Vec<u8>, Vec<u8>)
     let hdist = reader.read_bits(5).ok_or(DecompressError::InvalidData("dyn: truncated HDIST"))? as usize + 1;
     let hclen = reader.read_bits(4).ok_or(DecompressError::InvalidData("dyn: truncated HCLEN"))? as usize + 4;
 
-    // Code length code lengths, in the special order defined by RFC 1951
+    // Code length code lengths arrive in a permuted order defined by RFC 1951.
+    // This order puts the most likely-to-be-zero lengths last, allowing the
+    // encoder to omit trailing zeros and use fewer HCLEN entries.
     const CL_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
     let mut cl_lengths = [0u8; 19];
     for i in 0..hclen {
@@ -324,7 +330,11 @@ fn decode_distance(sym: u16, reader: &mut BitReader<'_>) -> Result<u32, Decompre
     Ok(base + extra)
 }
 
-/// Bit reader for the DEFLATE stream. Reads LSB-first.
+/// Bit reader for the DEFLATE stream. Reads bits in LSB-first order.
+///
+/// DEFLATE packs bits starting from the least significant bit of each byte.
+/// For example, reading 3 bits from byte 0b_abcdefgh yields bits h, g, f
+/// (in that order, as the least significant bits of the result).
 struct BitReader<'a> {
     data: &'a [u8],
     byte_pos: usize,
@@ -387,7 +397,11 @@ impl<'a> BitReader<'a> {
 
 /// A simple canonical Huffman decoding table.
 ///
-/// Supports code lengths up to 15 bits (DEFLATE max).
+/// Supports code lengths up to 15 bits (DEFLATE max). Canonical Huffman codes
+/// are uniquely determined by the set of code lengths: shorter codes are
+/// numerically smaller, and codes of the same length are assigned in symbol order.
+/// This table stores the minimum code value and symbol index for each code length,
+/// enabling O(max_code_length) decoding per symbol.
 struct HuffmanTable {
     /// For each code length (1..=15), store the starting code value and the
     /// first symbol index.
@@ -524,8 +538,10 @@ fn decompress_lzo(data: &[u8], output_size: usize) -> Result<Vec<u8>, Decompress
         lzo1x_decompress_segment(segment, &mut output, output_size)?;
         pos += seg_len;
 
-        // btrfs aligns segments to page boundaries in some versions
-        // Round up to 4-byte alignment
+        // btrfs aligns LZO segments to 4-byte boundaries within the compressed
+        // data stream. The `& !3` mask rounds up to the next 4-byte boundary.
+        // Some btrfs versions align to page boundaries instead, but 4-byte
+        // alignment is the minimum required by the on-disk format.
         pos = (pos + 3) & !3;
     }
 

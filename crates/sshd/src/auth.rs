@@ -17,7 +17,10 @@ use crate::wire::*;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum authentication attempts before disconnect.
+/// Maximum authentication attempts before the server disconnects the client.
+/// This limits brute-force attacks. After 6 failed attempts, we send
+/// SSH_DISCONNECT_NO_MORE_AUTH_METHODS and close the connection.
+/// The value 6 matches OpenSSH's default `MaxAuthTries`.
 pub const MAX_AUTH_ATTEMPTS: u32 = 6;
 
 /// SSH service name for the authentication protocol.
@@ -58,7 +61,15 @@ pub struct AuthorizedUser {
 // Authentication request parsing
 // ---------------------------------------------------------------------------
 
-/// Parsed SSH_MSG_USERAUTH_REQUEST.
+/// Parsed SSH_MSG_USERAUTH_REQUEST (RFC 4252 section 5).
+///
+/// The SSH authentication protocol is a series of request/response exchanges.
+/// The client sends a USERAUTH_REQUEST specifying a method, and the server
+/// responds with SUCCESS, FAILURE, or a method-specific continuation message.
+///
+/// The "none" method is always the client's first request -- it probes for
+/// available methods. The server always rejects it but returns the list of
+/// methods the client can try (publickey, password).
 #[derive(Debug)]
 pub enum AuthRequest {
     /// "none" method — client probing for available methods.
@@ -183,12 +194,19 @@ pub fn parse_userauth_request(payload: &[u8]) -> Result<AuthRequest, AuthError> 
 // ---------------------------------------------------------------------------
 
 /// Per-connection authentication state.
+///
+/// Tracks the progress of authentication for a single SSH connection.
+/// Each connection gets its own `AuthState` to prevent cross-connection
+/// information leakage.
 pub struct AuthState {
-    /// Number of failed attempts so far.
+    /// Number of authentication attempts so far (including the "none" probe).
+    /// Incremented on every request, even failed ones, to enforce MAX_AUTH_ATTEMPTS.
     pub attempts: u32,
-    /// Authenticated username (Some after success).
+    /// The authenticated username, set to `Some(name)` after a successful auth.
+    /// Once set, the session transitions to the Interactive state.
     pub authenticated_user: Option<String>,
-    /// Username from the last request (learned from "none" method).
+    /// Username from the most recent request. Learned from the "none" method
+    /// probe so we can use it for logging and diagnostics before auth succeeds.
     pub last_username: Option<String>,
 }
 
@@ -214,7 +232,22 @@ impl AuthState {
 
     /// Process an authentication request against the authorized users list.
     ///
-    /// Returns the response payload to send back to the client.
+    /// This is the core authentication dispatch. It handles each method:
+    /// - **"none"**: Always rejects, but tells the client which methods to try.
+    /// - **"publickey" (query)**: Checks if the key is in authorized_keys without
+    ///   requiring a signature. Responds with PK_OK if accepted.
+    /// - **"publickey" (auth)**: Verifies the cryptographic signature over the
+    ///   session-specific signed data (RFC 4252 section 7). This prevents replay.
+    /// - **"password"**: Compares SHA-256 hash of the password against stored hash.
+    ///
+    /// # Parameters
+    /// - `request`: The parsed USERAUTH_REQUEST.
+    /// - `authorized_users`: The list of users and their authorized keys/passwords.
+    /// - `session_id`: The SSH session ID (first exchange hash), used in signature
+    ///   verification to bind the auth to this specific session.
+    ///
+    /// # Returns
+    /// The response payload to send to the client (SUCCESS, FAILURE, or PK_OK).
     pub fn process_request(
         &mut self,
         request: &AuthRequest,
@@ -266,16 +299,22 @@ impl AuthState {
                     return Ok(build_userauth_failure(&["publickey", "password"], false));
                 }
 
-                // Verify the signature over the session_id + userauth request data
-                // Per RFC 4252 §7: signature is over:
-                //   string    session identifier
-                //   byte      SSH_MSG_USERAUTH_REQUEST
+                // CRITICAL: Verify the client's signature over session-bound data.
+                //
+                // Per RFC 4252 section 7, the signature covers:
+                //   string    session_id        <-- binds to THIS session (prevents replay)
+                //   byte      SSH_MSG_USERAUTH_REQUEST (50)
                 //   string    user name
                 //   string    service name
                 //   string    "publickey"
                 //   boolean   TRUE
                 //   string    public key algorithm name
                 //   string    public key blob
+                //
+                // The session_id inclusion is essential: without it, an attacker who
+                // observes one session could replay the signature in a different session.
+                // Since session_id is derived from the key exchange (which uses fresh
+                // ephemeral keys), each session has a unique ID.
                 let signed_data = build_publickey_signed_data(
                     session_id,
                     username,
@@ -411,7 +450,14 @@ fn is_key_authorized(
 // Message builders
 // ---------------------------------------------------------------------------
 
-/// Build the data that the client signs for publickey auth (RFC 4252 §7).
+/// Build the data blob that the client's signature must cover (RFC 4252 section 7).
+///
+/// This constructs the exact byte sequence that the client should have signed
+/// with their private key. We reconstruct it server-side and verify the
+/// signature against this reconstruction.
+///
+/// The session_id at the beginning binds the signature to this specific
+/// SSH session, preventing cross-session replay attacks.
 fn build_publickey_signed_data(
     session_id: &[u8],
     username: &str,

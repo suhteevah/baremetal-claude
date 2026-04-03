@@ -134,12 +134,17 @@ fn decompress_chunk(
                 // The number of offset bits depends on the current position
                 // within the uncompressed chunk
                 let decompressed_pos = output.len() - chunk_start_output;
+                // Split the 16-bit token into offset and length fields.
+                // The number of bits allocated to each depends on how far into
+                // the chunk we've decompressed (see compute_offset_bits).
                 let offset_bits = compute_offset_bits(decompressed_pos);
                 let length_bits = 16 - offset_bits;
 
                 let length_mask = (1u16 << length_bits) - 1;
-                let length = (token & length_mask) as usize + 3; // minimum length is 3
-                let offset = ((token >> length_bits) as usize) + 1; // minimum offset is 1
+                // Minimum match length is 3 (added to the encoded value).
+                let length = (token & length_mask) as usize + 3;
+                // Minimum back-reference offset is 1 (added to the encoded value).
+                let offset = ((token >> length_bits) as usize) + 1;
 
                 if offset > decompressed_pos {
                     log::error!("[ntfs::compression] back-reference offset {} exceeds decompressed size {}",
@@ -163,13 +168,17 @@ fn decompress_chunk(
 /// Compute the number of bits used for the offset field in a back-reference,
 /// based on the current decompressed position within the chunk.
 ///
-/// LZNT1 uses a variable-width encoding: more offset bits when further into
-/// the chunk (since back-references can reach further back).
+/// LZNT1 uses a variable-width encoding for back-references. The 16-bit token
+/// is split into an offset field and a length field, where the split point
+/// depends on how far into the chunk we've decompressed. Early in the chunk,
+/// back-references can only reach a short distance back, so fewer offset bits
+/// are needed and more bits are available for the length. As we progress
+/// further into the chunk, we need more offset bits to address earlier data.
 ///
-/// Position range -> offset bits:
-///   0..=0       -> 4  (but no back-refs at pos 0)
-///   1..=1       -> 4  (offset 1, max)
-///   ...the formula is: offset_bits = max(4, ceil(log2(pos)))
+/// The formula is: `offset_bits = max(4, ceil(log2(decompressed_position)))`.
+/// This gives: 4 bits for positions 0-15, 5 bits for 16-31, ..., 12 bits for
+/// positions 2048-4095. Since each LZNT1 chunk decompresses to at most 4096
+/// bytes, 12 offset bits is the maximum.
 fn compute_offset_bits(pos: usize) -> u16 {
     if pos < 0x10 {
         4

@@ -26,14 +26,29 @@ pub struct MemoryMapping {
 }
 
 /// Process memory state for mmap/brk management.
+///
+/// Tracks two kinds of memory allocation that Linux binaries expect:
+///
+/// 1. **brk (program break)**: The traditional Unix heap.  `brk_base` is set
+///    by the ELF loader to the end of the last PT_LOAD segment.  The program
+///    calls `brk(addr)` to grow/shrink the heap.  `malloc()` in glibc uses
+///    brk for small allocations.
+///
+/// 2. **mmap (memory mapping)**: Used for large allocations, shared memory,
+///    and file-backed mappings.  Each mapping is tracked in a `BTreeMap` keyed
+///    by start address.  In ClaudioOS, all mappings are backed by heap-allocated
+///    `Vec<u8>` since we have no real page table manipulation for user processes.
+///
+/// The `mmap_hint` address starts at 0x7F00_0000_0000 (typical Linux mmap
+/// region) and advances upward as mappings are created.
 pub struct MemoryManager {
-    /// Current program break.
+    /// Current program break (end of the brk heap).
     pub brk_current: u64,
-    /// Initial program break (set by ELF loader).
+    /// Initial program break (set by ELF loader, never shrinks below this).
     pub brk_base: u64,
     /// Anonymous memory mappings, keyed by start address.
     pub mappings: BTreeMap<u64, MemoryMapping>,
-    /// Next anonymous mmap address hint.
+    /// Next anonymous mmap address hint (advances upward after each allocation).
     pub mmap_hint: u64,
 }
 

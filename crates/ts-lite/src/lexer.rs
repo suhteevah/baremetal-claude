@@ -85,7 +85,7 @@ pub fn tokenize_ts(source: &str) -> Result<Vec<SpannedToken>, String> {
         col += 1; // simplified tracking
 
         let ts_tok = match &tok {
-            js_lite::tokenizer::Token::Ident(ref name) => {
+            js_lite::tokenizer::Token::Ident(name) => {
                 match name.as_str() {
                     "interface" => TsToken::Interface,
                     "enum" => TsToken::Enum,

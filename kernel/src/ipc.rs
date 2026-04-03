@@ -182,16 +182,24 @@ impl MessageBus {
 // ---------------------------------------------------------------------------
 
 /// A named channel (pipe) for streaming data between agents.
+///
+/// Implemented as a circular (ring) buffer with separate read and write cursors.
+/// The buffer is full when `(write_pos + 1) % capacity == read_pos` (one slot
+/// is always wasted to distinguish full from empty).  This means the usable
+/// capacity is `capacity - 1` bytes.
+///
+/// Channels are SPSC (single-producer, single-consumer) by convention, though
+/// the spinlock on IpcState serializes all access regardless.
 pub struct Channel {
-    /// Channel name.
+    /// Channel name (used for lookup by the `channel_read`/`channel_write` tools).
     pub name: String,
-    /// Ring buffer for data.
+    /// Ring buffer backing store.
     buffer: Vec<u8>,
-    /// Write position (wraps around).
+    /// Write cursor -- next position to write at (wraps via modulo).
     write_pos: usize,
-    /// Read position (wraps around).
+    /// Read cursor -- next position to read from (wraps via modulo).
     read_pos: usize,
-    /// Total capacity.
+    /// Total capacity of the ring buffer (usable = capacity - 1).
     capacity: usize,
 }
 

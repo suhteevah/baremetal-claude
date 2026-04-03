@@ -2,6 +2,31 @@
 //!
 //! The HDA codec is organized as a tree: root node (NID 0) contains
 //! function group nodes, each of which contains widget nodes.
+//!
+//! ## Widget Tree Structure
+//!
+//! ```text
+//! Root Node (NID 0)
+//! └── Audio Function Group (NID 1, type 0x01)
+//!     ├── Audio Output (DAC) — NID 2
+//!     ├── Audio Mixer — NID 3 (connection list: [2])
+//!     ├── Pin Complex (Speaker) — NID 4 (connection list: [3])
+//!     ├── Pin Complex (Headphone) — NID 5 (connection list: [3])
+//!     └── Audio Input (ADC) — NID 6
+//! ```
+//!
+//! Each widget has capabilities (amp presence, connection list, format override, etc.)
+//! queried via GET_PARAMETER verbs. Pin Complex widgets additionally have a
+//! Configuration Default register encoding default device type, location, and
+//! connectivity.
+//!
+//! ## Output Path Finding
+//!
+//! `find_output_path()` discovers a DAC -> [Mixer/Selector] -> Pin path by:
+//! 1. Finding all output-capable, connected Pin Complex widgets
+//! 2. Walking each pin's connection list backwards to find a DAC
+//! 3. Returning the first valid path found
+//!
 //! Per Intel HDA spec 1.0a, Section 7.
 
 use alloc::vec::Vec;

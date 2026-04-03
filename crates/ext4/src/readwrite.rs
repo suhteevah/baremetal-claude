@@ -168,7 +168,11 @@ impl<D: BlockDevice> Ext4Fs<D> {
             0
         };
 
-        // Read hash seed from superblock (at offset 0xEC, 4 x u32)
+        // Read hash seed from superblock at offset 0xEC (s_hash_seed).
+        // This is a 128-bit random seed (4 x u32 LE) generated at mkfs time,
+        // used to salt the half-MD4/TEA hash functions in HTree directory lookups.
+        // Without this seed, an attacker could craft filenames that all hash to
+        // the same bucket, degrading HTree lookup from O(1) to O(n).
         let hash_seed = if sb_buf.len() >= 0xFC {
             [
                 u32::from_le_bytes([sb_buf[0xEC], sb_buf[0xED], sb_buf[0xEE], sb_buf[0xEF]]),
@@ -186,6 +190,12 @@ impl<D: BlockDevice> Ext4Fs<D> {
         // Read block group descriptor table
         let bg_count = sb.block_group_count();
         let desc_size = sb.group_desc_size() as usize;
+        // The Group Descriptor Table (GDT) always starts in the block
+        // immediately after the superblock. When block_size == 1024, the
+        // superblock occupies block 1 (bytes 1024-2047), so the GDT starts
+        // at block 2. For larger block sizes, the superblock fits in block 0
+        // (starting at byte offset 1024 within block 0), and the GDT starts
+        // at block 1.
         let gdt_block = if sb.block_size() == 1024 { 2 } else { 1 };
         let gdt_offset = gdt_block as u64 * sb.block_size();
         let gdt_len = bg_count as usize * desc_size;
@@ -254,8 +264,11 @@ impl<D: BlockDevice> Ext4Fs<D> {
         let read_journal_block = |journal_block_idx: u64| -> Option<Vec<u8>> {
             if uses_block_map {
                 match block_map::read_block_map(
-                    // We can't pass &self here in a closure, so we handle differently below.
-                    // This path is unlikely for ext4 journals; they almost always use extents.
+                    // SAFETY: We create a shared reference to `self` via raw pointer to
+                    // work around the borrow checker inside this closure. This is safe
+                    // because block_map::read_block_map is read-only (calls read_block
+                    // -> device.read_bytes). This path is unlikely for ext4 journals
+                    // since they almost always use extents, not legacy block maps.
                     unsafe { &*(self as *const Self) },
                     &journal_inode,
                     journal_block_idx,
@@ -347,7 +360,10 @@ impl<D: BlockDevice> Ext4Fs<D> {
 
                 let mut data = jblock;
 
-                // If the block was escaped, restore the original JBD2 magic
+                // If the block was escaped, its first 4 bytes were zeroed in the
+                // journal to avoid confusing the journal scanner (which looks for
+                // JBD2_MAGIC at the start of every block). Restore the original
+                // JBD2 magic bytes before writing to the final filesystem location.
                 if mapping.escaped {
                     let magic_bytes = journal::JBD2_MAGIC.to_be_bytes();
                     data[..4].copy_from_slice(&magic_bytes);

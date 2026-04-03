@@ -198,7 +198,14 @@ fn find_line_end(data: &[u8]) -> Option<usize> {
 /// and claude.ai format:
 ///   `{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}`
 ///
-/// Uses lightweight string scanning (no full JSON parse) for speed.
+/// Uses lightweight string scanning (no full JSON parse) for speed and to
+/// avoid pulling in a JSON parser dependency.  This is safe because the
+/// Anthropic API has a stable, predictable JSON structure -- we only need
+/// to extract the `text` field from `text_delta` objects, not parse
+/// arbitrary JSON.
+///
+/// The two-step approach (find "text_delta", then find "text" after it)
+/// avoids false positives from the `"type":"text_delta"` field itself.
 fn extract_text_delta(data: &str) -> Option<String> {
     // Must be a content_block_delta with text_delta.
     if !data.contains("\"text_delta\"") {

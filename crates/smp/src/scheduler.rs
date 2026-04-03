@@ -2,6 +2,25 @@
 //!
 //! Each CPU core has its own run queue. Idle cores steal tasks from busy cores.
 //! Timer interrupts drive preemptive scheduling decisions.
+//!
+//! ## Work Stealing Algorithm
+//!
+//! When a core's run queue is empty, it attempts to steal half the tasks from
+//! the busiest other core. This naturally balances load across cores without
+//! a central dispatcher. The steal threshold is > 1 task (don't steal from a
+//! core that only has one task).
+//!
+//! ## Context Switch Mechanism
+//!
+//! The `context_switch()` function saves callee-saved registers (rsp, rbp, rbx,
+//! r12-r15, rflags) into the old task's `CpuContext` and restores them from
+//! the new task's context. The RIP is saved as a label address within the asm
+//! block -- when we switch back to a task, execution resumes right after the
+//! context switch point. For new tasks, RIP is the entry function and RDI holds
+//! the first argument (System V ABI).
+//!
+//! Context switches must occur with interrupts disabled to prevent re-entrant
+//! scheduling during the register save/restore window.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -52,6 +71,10 @@ impl From<u8> for TaskState {
 /// This matches the layout expected by the context switch assembly stub.
 /// System V AMD64 ABI callee-saved registers: rbx, rbp, r12-r15, rsp, rip.
 /// We save all GPRs for completeness (interrupt context).
+///
+/// The struct layout matters: the inline asm in `context_switch()` accesses
+/// fields by fixed byte offsets (e.g., `[ctx + 0x00]` = rsp, `[ctx + 0x38]` = rip).
+/// Any reordering would break the context switch.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CpuContext {

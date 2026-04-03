@@ -491,11 +491,11 @@ impl<'a> Parser<'a> {
                 while *self.peek() != TokenKind::RBrace {
                     let fname = self.expect_ident()?;
                     let fty = self.parse_type()?;
-                    let tag = if let TokenKind::StringLit(ref s) = self.peek() {
+                    let tag = if let TokenKind::StringLit(s) = self.peek() {
                         let s = s.clone();
                         self.advance();
                         Some(s)
-                    } else if let TokenKind::RawStringLit(ref s) = self.peek() {
+                    } else if let TokenKind::RawStringLit(s) = self.peek() {
                         let s = s.clone();
                         self.advance();
                         Some(s)
@@ -576,7 +576,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Break => {
                 self.advance();
-                let label = if let TokenKind::Ident(ref s) = self.peek() {
+                let label = if let TokenKind::Ident(s) = self.peek() {
                     let s = s.clone();
                     self.advance();
                     Some(s)
@@ -587,7 +587,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Continue => {
                 self.advance();
-                let label = if let TokenKind::Ident(ref s) = self.peek() {
+                let label = if let TokenKind::Ident(s) = self.peek() {
                     let s = s.clone();
                     self.advance();
                     Some(s)
@@ -802,10 +802,10 @@ impl<'a> Parser<'a> {
                     let iter = self.parse_expr()?;
                     let body = self.parse_block()?;
                     let key = first_exprs.first().and_then(|e| {
-                        if let Expr::Ident(ref s) = e { Some(s.clone()) } else { None }
+                        if let Expr::Ident(s) = e { Some(s.clone()) } else { None }
                     });
                     let value = first_exprs.get(1).and_then(|e| {
-                        if let Expr::Ident(ref s) = e { Some(s.clone()) } else { None }
+                        if let Expr::Ident(s) = e { Some(s.clone()) } else { None }
                     });
                     return Ok(Stmt::ForRange { key, value, iter, body, is_assign });
                 }

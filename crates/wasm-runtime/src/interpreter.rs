@@ -1,4 +1,37 @@
-//! Stack-based WASM interpreter: ~200 opcodes.
+//! Stack-based WebAssembly interpreter (~200 opcodes).
+//!
+//! Executes WASM bytecode using a software interpreter (no JIT). The WASM
+//! execution model is a **stack machine** with structured control flow:
+//!
+//! ## Execution Model
+//!
+//! - **Value stack**: All computation happens by pushing/popping `Value`s
+//!   (i32, i64, f32, f64) on the value stack
+//! - **Call stack**: Each function invocation creates a [`CallFrame`] with
+//!   its own local variables (params + declared locals) and stack base
+//! - **Label stack**: Structured control flow (`block`, `loop`, `if`) pushes
+//!   [`Label`]s that track branch targets and stack heights
+//!
+//! ## Structured Control Flow
+//!
+//! Unlike JVM/CIL, WASM does not have arbitrary `goto`. Instead:
+//! - `block` creates a forward-jump target (br exits the block)
+//! - `loop` creates a backward-jump target (br re-enters the loop header)
+//! - `if`/`else` is syntactic sugar over blocks
+//! - `br N` branches to the Nth enclosing label (0 = innermost)
+//! - `br_table` is a computed branch (switch/case)
+//!
+//! ## Memory Model
+//!
+//! WASM has linear memory: a flat byte array addressed by i32 offsets.
+//! Load/store instructions take an alignment hint and a static offset,
+//! combined with a dynamic base address popped from the stack:
+//! `effective_addr = pop_i32() + static_offset`
+//!
+//! ## Safety Limits
+//!
+//! - `MAX_CALL_DEPTH` (1024): Prevents stack overflow from deep recursion
+//! - `MAX_INSTRUCTIONS` (100M): Prevents infinite loops from hanging the system
 
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -1,4 +1,39 @@
-//! Lua VM: tree-walking interpreter with LuaValue, environment, metatables.
+//! Lua VM: tree-walking interpreter with dynamic typing.
+//!
+//! Implements Lua 5.4 semantics as a direct AST interpreter. Key features:
+//!
+//! ## Value System
+//!
+//! Lua has 8 types, represented by [`LuaValue`]:
+//! - `nil`, `boolean`, `number` (integer or float), `string`
+//! - `table` (the only data structure: hybrid array + hash map)
+//! - `function` (closures with captured upvalues)
+//! - Native functions (Rust functions exposed to Lua)
+//!
+//! ## Scoping and Closures
+//!
+//! Variables use **lexical scoping** via a linked list of [`Scope`]s. Each
+//! scope contains a `Vec<(name, value)>` and a parent pointer. Variable lookup
+//! walks up the chain. Closures capture the scope at definition time, enabling
+//! upvalue access after the enclosing function returns.
+//!
+//! ## Control Flow
+//!
+//! Lua has `while`, `repeat..until`, numeric `for`, generic `for` (iterators),
+//! `if/elseif/else`, `break`, `goto`, and `return`. These are handled by
+//! returning [`ControlFlow`] signals that propagate up the call stack.
+//!
+//! ## Multiple Return Values
+//!
+//! Lua functions can return multiple values. The last expression in a return
+//! statement or function call is "expanded" via `eval_exp_multi`, which returns
+//! all values from a multi-return function call.
+//!
+//! ## Metatables
+//!
+//! Tables can have metatables (set via `setmetatable`) that customize operator
+//! behavior (`__add`, `__index`, `__newindex`, `__call`, `__tostring`, etc.).
+//! The metatable mechanism is the foundation of Lua's OOP system.
 
 use alloc::format;
 use alloc::string::String;

@@ -34,6 +34,18 @@ pub trait LineReader {
 }
 
 /// The main shell state machine.
+///
+/// The shell operates in two modes:
+/// 1. **Command mode**: input that looks like a traditional command (starts with
+///    a known builtin, contains pipes/redirects, or matches a path-like pattern)
+///    is parsed as a pipeline and executed via the builtin system.
+/// 2. **Natural language mode**: input that doesn't match any command pattern is
+///    classified as natural language and sent to the AI callback (Claude API) for
+///    interpretation.  The AI may respond with text or suggest commands to run.
+///
+/// The classification heuristic (`ai::classify_input`) checks for command-like
+/// patterns first, falling back to natural language.  This means users can type
+/// either `ls -la /tmp` or "show me the files in tmp" and both work.
 pub struct Shell {
     /// Environment variables.
     pub env: Environment,

@@ -1,7 +1,38 @@
-//! Java .class file parser.
+//! Java .class file parser (JVM spec, Ch. 4).
 //!
-//! Parses magic (0xCAFEBABE), version, constant pool, access flags,
-//! this/super class, interfaces, fields, methods, and attributes.
+//! Parses the binary `.class` file format into structured Rust types.
+//! The class file layout is:
+//!
+//! ```text
+//! ClassFile {
+//!     magic: 0xCAFEBABE          // 4 bytes — identifies this as a Java class
+//!     minor_version, major_version  // 2+2 bytes (e.g., major=52 for Java 8)
+//!     constant_pool_count        // 2 bytes
+//!     constant_pool[]            // variable — see CpEntry variants
+//!     access_flags               // 2 bytes (public, final, abstract, etc.)
+//!     this_class, super_class    // 2+2 bytes — indices into constant pool
+//!     interfaces[]               // count + indices
+//!     fields[]                   // count + FieldInfo structs
+//!     methods[]                  // count + MethodInfo structs
+//!     attributes[]               // count + generic AttributeInfo
+//! }
+//! ```
+//!
+//! ## Constant Pool
+//!
+//! The constant pool is a 1-indexed array of tagged entries. Key entry types:
+//! - **Utf8** (tag 1): Raw string data (method names, descriptors, etc.)
+//! - **Class** (tag 7): Points to a Utf8 entry with the class name
+//! - **Methodref** (tag 10): Points to a Class and a NameAndType
+//! - **NameAndType** (tag 12): Points to name (Utf8) and descriptor (Utf8)
+//! - **Long/Double** (tags 5/6): Occupy TWO constant pool slots (JVM spec quirk)
+//!
+//! ## Code Attribute
+//!
+//! The Code attribute (found on methods) contains the actual bytecode plus:
+//! - `max_stack`: Maximum operand stack depth
+//! - `max_locals`: Number of local variable slots
+//! - `exception_table[]`: Try/catch ranges with handler offsets
 
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -1,4 +1,46 @@
 //! Tree-walking evaluator for python-lite AST.
+//!
+//! Implements a subset of Python 3 semantics as a direct AST interpreter.
+//!
+//! ## Value System
+//!
+//! Python values ([`Value`]) include:
+//! - `Int(i64)` -- arbitrary precision in CPython, fixed 64-bit here
+//! - `Float(f64)` -- IEEE 754 double
+//! - `Str(String)` -- immutable UTF-8 string
+//! - `Bool(bool)` -- `True`/`False` (subtype of int in CPython)
+//! - `List(Vec<Value>)` -- mutable ordered collection
+//! - `None` -- Python's null value
+//! - `Func { name, params, body }` -- user-defined functions
+//!
+//! ## Truthiness
+//!
+//! Python's truthiness rules: `False`, `0`, `0.0`, `""`, `[]`, and `None` are
+//! falsy; everything else is truthy. This is implemented by `Value::is_truthy`.
+//!
+//! ## Scoping
+//!
+//! Uses a two-level scope model: globals (`self.globals`) and a local scope
+//! (`BTreeMap<String, Value>`) passed through function calls. Variable lookup
+//! checks the local scope first, then falls back to globals.
+//!
+//! ## Control Flow
+//!
+//! - `return`: Produces `ControlFlow::Return(value)`
+//! - `break`/`continue`: Produce `ControlFlow::Break`/`ControlFlow::Continue`
+//! - These propagate up via `Option<ControlFlow>` return values
+//!
+//! ## Built-in Functions
+//!
+//! `print()`, `len()`, `range()`, `int()`, `float()`, `str()`, `bool()`,
+//! `type()`, `abs()`, `min()`, `max()`, `sum()`, `sorted()`, `reversed()`,
+//! `enumerate()`, `zip()`, `map()`, `filter()`, `input()` (stub),
+//! and list methods `.append()`, `.pop()`, `.insert()`, `.remove()`, etc.
+//!
+//! ## Safety Limits
+//!
+//! - `MAX_CALL_DEPTH` (256): Prevents stack overflow from infinite recursion
+//! - `MAX_ITERATIONS` (100,000): Prevents infinite loops from hanging
 
 use alloc::collections::BTreeMap;
 use alloc::format;

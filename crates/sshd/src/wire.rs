@@ -11,22 +11,24 @@ use alloc::vec::Vec;
 // SSH Message Type Constants (RFC 4253 §12, RFC 4252 §6, RFC 4254 §9)
 // ---------------------------------------------------------------------------
 
-// -- Transport layer (1-49) -------------------------------------------------
-pub const SSH_MSG_DISCONNECT: u8 = 1;
-pub const SSH_MSG_IGNORE: u8 = 2;
-pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
-pub const SSH_MSG_DEBUG: u8 = 4;
-pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
-pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
-pub const SSH_MSG_EXT_INFO: u8 = 7;
+// -- Transport layer generic messages (1-19) --------------------------------
+pub const SSH_MSG_DISCONNECT: u8 = 1;          // Graceful connection teardown
+pub const SSH_MSG_IGNORE: u8 = 2;              // Padding/keep-alive (ignored by receiver)
+pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;       // Response to unrecognized message types
+pub const SSH_MSG_DEBUG: u8 = 4;               // Debug messages (ignored in production)
+pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;     // Client requests a service (e.g., "ssh-userauth")
+pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;      // Server accepts the requested service
+pub const SSH_MSG_EXT_INFO: u8 = 7;            // Extension negotiation (RFC 8308)
 
-// -- Key exchange (20-49) ---------------------------------------------------
-pub const SSH_MSG_KEXINIT: u8 = 20;
-pub const SSH_MSG_NEWKEYS: u8 = 21;
+// -- Key exchange (20-29: generic, 30-49: method-specific) ------------------
+pub const SSH_MSG_KEXINIT: u8 = 20;            // Algorithm negotiation (both sides send this)
+pub const SSH_MSG_NEWKEYS: u8 = 21;            // Signals transition to new encryption keys
 
-// KEX method-specific (30-49, allocated per method)
-pub const SSH_MSG_KEX_ECDH_INIT: u8 = 30; // also used for hybrid PQ KEX
-pub const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
+// KEX method-specific messages (30-49). The meaning of 30/31 depends on
+// the negotiated key exchange algorithm, but for both curve25519-sha256
+// and the hybrid PQ KEX, they are ECDH_INIT and ECDH_REPLY.
+pub const SSH_MSG_KEX_ECDH_INIT: u8 = 30;     // Client's ephemeral public value(s)
+pub const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;    // Server's host key + ephemeral + signature
 
 // -- User authentication (50-79) --------------------------------------------
 pub const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
@@ -81,25 +83,40 @@ pub const SSH_EXTENDED_DATA_STDERR: u32 = 1;
 // Maximum sizes
 // ---------------------------------------------------------------------------
 
-/// Maximum SSH packet size (RFC 4253 §6.1: implementations MUST support 35000).
+/// Maximum SSH packet size. RFC 4253 section 6.1 requires implementations
+/// to support at least 35,000 bytes. We reject anything larger to prevent
+/// memory exhaustion from malicious or buggy peers.
 pub const MAX_PACKET_SIZE: usize = 35000;
 
-/// Minimum padding length (RFC 4253 §6).
+/// Minimum padding length per RFC 4253 section 6: at least 4 bytes of
+/// random padding must be included in every packet. This ensures the
+/// packet is always at least partially opaque to traffic analysis.
 pub const MIN_PADDING: usize = 4;
 
-/// Maximum padding length.
+/// Maximum padding length: 255 bytes (limited by the single-byte
+/// padding_length field in the packet header).
 pub const MAX_PADDING: usize = 255;
 
-/// Block size for unencrypted packets (RFC 4253 §6: 8 bytes minimum).
+/// Block size for unencrypted packets. RFC 4253 section 6 mandates a
+/// minimum block size of 8 bytes for alignment purposes, even when no
+/// cipher is active.
 pub const UNENCRYPTED_BLOCK_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------
 // SSH Wire Format Reader
 // ---------------------------------------------------------------------------
 
-/// A cursor-based reader over an SSH binary payload.
+/// A cursor-based reader for deserializing SSH wire-format data.
+///
+/// Reads SSH-encoded primitives (byte, boolean, uint32, string, mpint,
+/// name-list) sequentially from a byte buffer. The cursor advances with
+/// each read, and errors are returned if the buffer is exhausted.
+///
+/// All multi-byte integers are big-endian per RFC 4251 section 5.
 pub struct SshReader<'a> {
+    /// The underlying byte buffer being read.
     buf: &'a [u8],
+    /// Current read position (byte offset into buf).
     pos: usize,
 }
 

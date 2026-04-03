@@ -256,7 +256,21 @@ impl MemoryFile {
 
 /// Complete memory system for a single agent.
 ///
-/// Manages markdown memory files and integrates with the global vector store.
+/// Manages markdown memory files and integrates with the global vector store
+/// for semantic retrieval (RAG -- Retrieval-Augmented Generation).
+///
+/// # Data flow
+///
+/// ```text
+/// Agent calls `remember("project", "notes", "...content...")
+///   -> MemoryFile created (or updated) in `files` BTreeMap
+///   -> Content inserted into global VectorStore (TF-IDF vectorized)
+///   -> dirty flag set for VFS persistence
+///
+/// Before API call, `inject_relevant_context(user_query, top_k=3)`
+///   -> VectorStore.search(query) returns top matches by cosine similarity
+///   -> Matching memory text injected into system prompt as <relevant_memories>
+/// ```
 #[derive(Debug, Clone)]
 pub struct AgentMemory {
     /// Agent name (used as namespace).

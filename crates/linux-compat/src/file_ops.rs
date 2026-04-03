@@ -10,8 +10,15 @@ use crate::types::*;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Process file descriptor table.
-/// Maps Linux fd numbers to internal VFS file descriptors.
+/// Process file descriptor table — the ClaudioOS equivalent of the Linux
+/// kernel's `struct files_struct`.
+///
+/// Maps integer file descriptor numbers (0, 1, 2, ...) to `FdEntry` objects
+/// that track the open file's path, position, type, and flags.  FDs 0/1/2
+/// are pre-opened as stdin/stdout/stderr (matching Linux conventions).
+///
+/// New FDs are allocated at the lowest available slot (matching POSIX semantics
+/// for `open()`, `dup()`, `pipe()`, etc.).  Maximum 1024 FDs per process.
 pub struct FileDescriptorTable {
     /// Maps fd number -> Option<FdEntry>.
     entries: Vec<Option<FdEntry>>,

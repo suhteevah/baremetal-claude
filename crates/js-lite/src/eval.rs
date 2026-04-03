@@ -1,20 +1,48 @@
 //! Tree-walking JavaScript evaluator for js-lite.
 //!
-//! Evaluates the AST produced by the parser. Supports:
-//! - Variables, scoping (function scope + block scope for let/const)
-//! - Functions (declarations, expressions, arrows, closures)
-//! - Objects and arrays with methods
-//! - String/Math/Array/Object builtins
-//! - parseInt, parseFloat, encodeURIComponent, decodeURIComponent
-//! - btoa, atob (base64)
-//! - setTimeout/setInterval stubs (execute immediately)
-//! - document.cookie (get/set)
-//! - Regex .test() and .exec() (basic)
-//! - Bitwise operators
-//! - try/catch/finally, throw
-//! - for-in, for-of
-//! - switch/case
-//! - typeof, instanceof, delete, void
+//! Evaluates the AST produced by the parser. This is a complete (but simplified)
+//! JavaScript interpreter implementing the core semantics of ECMAScript.
+//!
+//! ## Value System
+//!
+//! JavaScript has 7 value types, represented by [`Value`]:
+//! - `Number` (f64 -- all JS numbers are IEEE 754 doubles)
+//! - `Str` (UTF-8 string)
+//! - `Bool` (true/false)
+//! - `Null`, `Undefined`
+//! - `Array` (Vec of Values), `Object` (BTreeMap of string -> Value)
+//! - `Function` (closures with captured scope)
+//! - `Regex` (pattern + flags)
+//!
+//! ## Type Coercion
+//!
+//! JavaScript is dynamically typed with implicit coercion:
+//! - `to_number`: `""` -> 0, `"42"` -> 42, `true` -> 1, `null` -> 0, `undefined` -> NaN
+//! - `to_string_val`: `null` -> `"null"`, arrays -> comma-separated, objects -> `"[object Object]"`
+//! - `to_i32`/`to_u32`: For bitwise operators (ToInt32/ToUint32 spec algorithms)
+//! - **Loose equality** (`==`): Performs type coercion (null == undefined, etc.)
+//! - **Strict equality** (`===`): No coercion, types must match
+//! - `typeof null === "object"` (the famous JS bug, faithfully reproduced)
+//!
+//! ## Scoping
+//!
+//! Uses a scope chain (Vec of Scopes). Variable lookup walks from innermost to
+//! outermost scope. `var` declarations go to the function scope; `let`/`const`
+//! go to the block scope. Closures capture variables by value (simplified).
+//!
+//! ## Control Flow
+//!
+//! Exceptional control flow (return, break, continue, throw) is modeled as
+//! [`Signal`] variants that propagate up the call stack. `try/catch/finally`
+//! intercepts `Signal::Throw`.
+//!
+//! ## Built-in Objects
+//!
+//! - `Math`: PI, E, floor, ceil, sqrt, abs, min, max, pow, random, etc.
+//! - `console.log`: Captured to output buffer
+//! - `JSON.parse`/`JSON.stringify` (basic)
+//! - `parseInt`, `parseFloat`, `String.fromCharCode`, `encodeURIComponent`
+//! - `document.cookie` (get/set support)
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;

@@ -20,6 +20,12 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// JBD2 journal magic number.
+///
+/// All JBD2 metadata blocks (superblock, descriptor, commit, revoke) begin
+/// with this 4-byte big-endian magic value. It is used to distinguish
+/// journal metadata from raw data blocks during log scanning.
+///
+/// Value: `0xC03B3998` (no ASCII meaning; chosen to be unlikely in user data).
 pub const JBD2_MAGIC: u32 = 0xC03B3998;
 
 /// Journal superblock (v2) block type.
@@ -37,10 +43,24 @@ pub const JBD2_REVOKE_BLOCK: u32 = 5;
 pub const JOURNAL_INODE: u32 = 8;
 
 /// Journal block tag flag: same UUID as previous.
+///
+/// When set, the 16-byte UUID field is omitted from this tag because it
+/// is the same as the previous tag's UUID. This saves 16 bytes per tag
+/// in the common single-filesystem case.
 pub const JBD2_FLAG_SAME_UUID: u32 = 0x02;
+
 /// Journal block tag flag: last tag in descriptor block.
+///
+/// Marks the final tag in the descriptor block's tag array. The scanner
+/// must stop parsing tags when it encounters a tag with this flag set.
 pub const JBD2_FLAG_LAST_TAG: u32 = 0x08;
+
 /// Journal block tag flag: block is escaped (magic number replaced).
+///
+/// If a journaled data block happens to start with the JBD2_MAGIC bytes,
+/// those bytes are zeroed in the journal copy to avoid confusing the scanner.
+/// On replay, the original magic bytes must be restored before writing the
+/// block to its final filesystem location.
 pub const JBD2_FLAG_ESCAPE: u32 = 0x01;
 
 /// Parsed JBD2 journal superblock.
@@ -348,8 +368,12 @@ where
     let first = journal_sb.first as u64;
     let mut block_idx = journal_sb.log_start as u64;
     let mut expected_seq = journal_sb.sequence;
-    let has_64bit = journal_sb.feature_incompat & 0x01 != 0; // JBD2_FEATURE_INCOMPAT_64BIT
-    let has_csum_v3 = journal_sb.feature_incompat & 0x10 != 0; // JBD2_FEATURE_INCOMPAT_CSUM_V3
+    // JBD2_FEATURE_INCOMPAT_64BIT (bit 0): block tags include a high-32-bit blocknr field,
+    // allowing the journal to address blocks beyond the 2^32 limit.
+    let has_64bit = journal_sb.feature_incompat & 0x01 != 0;
+    // JBD2_FEATURE_INCOMPAT_CSUM_V3 (bit 4): tags use the v3 format with a per-tag
+    // CRC32C checksum field (2 bytes) inserted before the flags field.
+    let has_csum_v3 = journal_sb.feature_incompat & 0x10 != 0;
 
     log::info!(
         "[ext4::journal] scanning journal: start_block={}, expected_seq={}, maxlen={}",
@@ -464,7 +488,11 @@ where
             }
             JBD2_REVOKE_BLOCK => {
                 // Revoke blocks mark filesystem blocks that should NOT be replayed
-                // from earlier transactions. For simplicity, we skip them.
+                // from earlier transactions. They exist to prevent stale data from
+                // an older transaction from overwriting newer data written directly
+                // to the filesystem (bypassing the journal). A full implementation
+                // would collect revoked block numbers and skip them during replay.
+                // For simplicity, we skip revoke blocks entirely here.
                 log::debug!(
                     "[ext4::journal] revoke block at journal block {}, seq={}",
                     block_idx, header.sequence

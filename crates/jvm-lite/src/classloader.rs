@@ -1,7 +1,7 @@
 //! Class loading: bootstrap loader, class resolution, field/method lookup.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::classfile::{ClassFile, FieldInfo, MethodInfo, ACC_STATIC};

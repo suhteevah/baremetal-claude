@@ -33,12 +33,26 @@ pub struct SyscallArgs {
 }
 
 /// Combined process state for syscall dispatch.
+///
+/// Each loaded Linux binary gets one `ProcessContext` that holds all the
+/// kernel-side state a Linux process would normally have.  This is the
+/// ClaudioOS equivalent of the Linux `task_struct` -- but much simpler
+/// because we only support one process at a time (no fork, no threads).
+///
+/// The context is stored in a global `Mutex<Option<ProcessContext>>` in
+/// `linux_compat.rs` and accessed from the SYSCALL handler.
 pub struct ProcessContext {
+    /// File descriptor table (stdin/stdout/stderr + opened files/pipes/sockets).
     pub fdt: FileDescriptorTable,
+    /// Virtual memory manager (brk heap, anonymous mmap regions).
     pub mm: MemoryManager,
+    /// Process identity and lifecycle (PID, exit code, exited flag).
     pub ps: ProcessState,
+    /// Signal disposition and pending signals.
     pub ss: SignalState,
+    /// Network socket table (TCP/UDP sockets created by the binary).
     pub st: SocketTable,
+    /// Epoll instance table (for I/O multiplexing).
     pub et: EpollTable,
 }
 

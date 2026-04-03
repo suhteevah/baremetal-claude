@@ -1,6 +1,7 @@
 //! Mini C++ STL: std::string, std::vector<T>, std::map<K,V>,
 //! std::cout/cin, std::unique_ptr<T>, std::shared_ptr<T>.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -1,7 +1,41 @@
 //! Recursive descent C parser producing AST.
 //!
-//! Handles full C operator precedence (15 levels), declarations, statements,
-//! structs, unions, enums, typedefs, arrays, pointers, function definitions.
+//! Parses a token stream (from [`crate::lexer::tokenize`]) into a C abstract syntax
+//! tree ([`TranslationUnit`]). Implements all 15 levels of C operator precedence
+//! using a precedence-climbing / recursive descent hybrid.
+//!
+//! ## Operator Precedence (lowest to highest)
+//!
+//! | Level | Operators                        | Associativity | Method               |
+//! |-------|----------------------------------|---------------|----------------------|
+//! | 1     | `=`, `+=`, `-=`, etc.            | Right         | `parse_assignment`   |
+//! | 2     | `?:`                             | Right         | `parse_ternary`      |
+//! | 3     | `\|\|`                           | Left          | `parse_log_or`       |
+//! | 4     | `&&`                             | Left          | `parse_log_and`      |
+//! | 5     | `\|`                             | Left          | `parse_bit_or`       |
+//! | 6     | `^`                              | Left          | `parse_bit_xor`      |
+//! | 7     | `&`                              | Left          | `parse_bit_and`      |
+//! | 8     | `==`, `!=`                       | Left          | `parse_equality`     |
+//! | 9     | `<`, `<=`, `>`, `>=`             | Left          | `parse_relational`   |
+//! | 10    | `<<`, `>>`                       | Left          | `parse_shift`        |
+//! | 11    | `+`, `-`                         | Left          | `parse_additive`     |
+//! | 12    | `*`, `/`, `%`                    | Left          | `parse_multiplicative` |
+//! | 13    | `!`, `~`, `-`, `++`, `--`, casts | Right (unary) | `parse_unary`        |
+//! | 14    | `()`, `[]`, `.`, `->`, `++`, `--`| Left (postfix)| `parse_postfix`      |
+//! | 15    | literals, identifiers, `(expr)`  | N/A           | `parse_primary`      |
+//!
+//! ## Declaration Parsing
+//!
+//! C declarations are notoriously tricky because the parser must distinguish
+//! between type names and variable names. This parser maintains a `typedef_names`
+//! list: when a `typedef` is parsed, the new name is added so subsequent uses
+//! can be recognized as type specifiers rather than identifiers.
+//!
+//! The general flow for external declarations is:
+//! 1. Parse declaration specifiers (`int`, `static`, `const`, `struct X`, etc.)
+//! 2. Parse the declarator (pointer, name, array dimensions)
+//! 3. Look ahead: if `(` follows, it could be a function definition or prototype
+//! 4. Otherwise, parse optional initializer and expect `;`
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -10,11 +44,17 @@ use alloc::vec::Vec;
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind, Span};
 
-/// Parser state.
+/// Recursive descent parser for C source code.
+///
+/// Consumes a slice of [`Token`]s and produces an AST. The parser tracks its
+/// position in the token stream (`pos`) and maintains a list of known typedef
+/// names to resolve the C parsing ambiguity between type names and identifiers.
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
-    /// Typedef names known so far (needed to disambiguate types vs identifiers).
+    /// Typedef names seen so far. Required because C's grammar is ambiguous:
+    /// `foo * bar;` could be a multiplication expression or a pointer declaration,
+    /// depending on whether `foo` is a typedef name or a variable.
     typedef_names: Vec<String>,
 }
 

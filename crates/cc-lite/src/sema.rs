@@ -1,4 +1,24 @@
-//! Semantic analysis: type checking, symbol table, struct layout, implicit conversions.
+//! Semantic analysis for cc-lite: type checking, symbol resolution, struct layout.
+//!
+//! Performs a pass over the parsed AST to:
+//! - Build a **scoped symbol table** (nested scopes for file, function, block)
+//! - Compute **struct/union layouts** with proper alignment and padding
+//! - Register **enum constants**, **typedefs**, and **function signatures**
+//! - Implement **C integer promotion** rules (C11 6.3.1.1): types smaller than
+//!   `int` (char, short, bool) are promoted to `int` in arithmetic expressions
+//! - Implement **usual arithmetic conversions** (C11 6.3.1.8): when two operands
+//!   have different types, the result type is determined by a ranked hierarchy:
+//!   `double > float > unsigned long long > long long > unsigned long > long > unsigned int > int`
+//!
+//! ## Struct Layout Algorithm
+//!
+//! For each field in order:
+//! 1. Compute the field's alignment requirement
+//! 2. Add padding bytes to bring the current offset to a multiple of that alignment
+//! 3. Place the field at the padded offset
+//! 4. Advance the offset by the field's size
+//! 5. After all fields, pad the total size to a multiple of the struct's alignment
+//!    (the maximum alignment of any field)
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -6,12 +26,16 @@ use alloc::vec::Vec;
 
 use crate::ast::*;
 
-/// Symbol information.
+/// Information about a declared symbol (variable, function parameter, enum constant).
 #[derive(Debug, Clone)]
 pub struct Symbol {
+    /// The C type of this symbol.
     pub ty: CType,
+    /// Which scope level this symbol was declared in.
     pub scope: ScopeKind,
-    pub offset: Option<i32>, // stack offset for locals
+    /// Stack frame offset for local variables (None for globals).
+    pub offset: Option<i32>,
+    /// Whether this symbol has file (global) scope.
     pub is_global: bool,
 }
 
@@ -233,7 +257,11 @@ impl SemaContext {
         }
     }
 
-    /// Integer promotion: types smaller than int become int.
+    /// Integer promotion (C11 6.3.1.1).
+    ///
+    /// Types with rank less than `int` (bool, char, unsigned char, short,
+    /// unsigned short) are promoted to `int` when used in expressions.
+    /// This matches real C compilers: `char + char` yields `int`.
     pub fn integer_promote(ty: &CType) -> CType {
         match ty {
             CType::Bool | CType::Char | CType::UChar | CType::Short | CType::UShort => CType::Int,
@@ -241,7 +269,15 @@ impl SemaContext {
         }
     }
 
-    /// Usual arithmetic conversions between two types.
+    /// Usual arithmetic conversions (C11 6.3.1.8).
+    ///
+    /// Determines the common type when two different types appear as operands
+    /// in a binary arithmetic expression. The rules, applied in order:
+    /// 1. If either operand is `double`, the result is `double`
+    /// 2. If either operand is `float`, the result is `float`
+    /// 3. Apply integer promotion to both operands
+    /// 4. If both have the same type, that's the result
+    /// 5. Otherwise, use the type with the larger size
     pub fn usual_arithmetic_conversion(a: &CType, b: &CType) -> CType {
         // If either is double, result is double
         if matches!(a, CType::Double) || matches!(b, CType::Double) {

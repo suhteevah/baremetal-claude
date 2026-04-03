@@ -1,6 +1,23 @@
-//! Go runtime basics: goroutine scheduler (simplified cooperative), channel
-//! send/recv with select, defer/panic/recover, make(), new(), append(),
-//! len(), cap(), copy(), delete(), close().
+//! Go runtime support for go-lite.
+//!
+//! Implements the runtime primitives that Go programs depend on:
+//!
+//! - **Goroutines**: Simplified cooperative scheduling (no preemption). Each
+//!   goroutine is represented as an async task in ClaudioOS's executor.
+//! - **Channels**: Buffered message queues with mutex-based synchronization.
+//!   `send` fails if the buffer is full; `recv` fails if empty and not closed.
+//!   Closing a channel prevents further sends; receives return `(Nil, false)`.
+//! - **Defer stack**: LIFO stack of deferred function calls, executed when the
+//!   enclosing function returns (matching Go's `defer` semantics).
+//! - **Built-in functions**: `make()`, `new()`, `append()`, `len()`, `cap()`,
+//!   `copy()`, `delete()`, `close()` -- all implemented as methods on the
+//!   [`Runtime`] struct or as free functions on [`GoValue`]/[`GoSlice`].
+//!
+//! ## Go Slice Layout
+//!
+//! A Go slice is a fat pointer: `(data_ptr, len, cap)`. When `append` would
+//! exceed capacity, the backing array is grown by doubling (matching Go's
+//! growth strategy for small slices).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -111,7 +128,12 @@ impl GoSlice {
     }
 }
 
-/// Simplified channel: buffered queue with mutex.
+/// A Go channel: a thread-safe buffered FIFO queue.
+///
+/// Go channels provide synchronized communication between goroutines.
+/// This implementation uses spin mutexes (suitable for bare-metal) and
+/// a `VecDeque` as the buffer. Unbuffered channels (capacity 0) are
+/// simplified to capacity 1 here.
 pub struct Channel {
     buffer: Mutex<VecDeque<GoValue>>,
     capacity: usize,
@@ -155,7 +177,11 @@ impl Channel {
     }
 }
 
-/// Defer stack for a goroutine.
+/// LIFO stack of deferred function calls for a goroutine.
+///
+/// Go's `defer` statement pushes a closure onto this stack. When the
+/// enclosing function returns (normally or via panic), `run_all` pops
+/// and executes each deferred closure in reverse order (LIFO).
 pub struct DeferStack {
     deferred: Vec<Box<dyn FnOnce()>>,
 }

@@ -6,11 +6,29 @@
 //! at `trampoline_page << 12`, transitions through protected mode to long mode,
 //! and finally jumps to the Rust AP entry point.
 //!
-//! Memory layout at the trampoline page (e.g., physical 0x8000):
+//! ## Mode Transitions
+//!
+//! The AP wakes up in 16-bit real mode with no GDT, no paging, and no stack.
+//! The trampoline code performs three mode transitions:
+//!
+//! 1. **Real mode -> Protected mode**: Load a minimal GDT, set CR0.PE, far jump
+//!    to flush the pipeline and enter 32-bit code.
+//!
+//! 2. **Protected mode -> Long mode**: Enable PAE (CR4.PAE), load CR3 with PML4
+//!    from TrampolineData, enable long mode (IA32_EFER.LME), then enable paging
+//!    (CR0.PG) which activates IA-32e mode.
+//!
+//! 3. **32-bit compatibility -> 64-bit mode**: Far jump to a 64-bit code segment,
+//!    load 64-bit data segments, set up the stack from TrampolineData, signal
+//!    AP ready, and call the Rust entry point.
+//!
+//! ## Memory Layout at the trampoline page (e.g., physical 0x8000)
 //!
 //! ```text
-//! +0x000  trampoline code (real -> protected -> long mode)
-//! +0xF00  TrampolineData struct (shared BSP <-> AP data)
+//! +0x000  Trampoline code (real -> protected -> long mode, ~150 bytes)
+//! +0x080  GDT descriptor (6 bytes: limit + base)
+//! +0x088  GDT data (5 entries x 8 bytes = 40 bytes)
+//! +0xF00  TrampolineData struct (shared BSP <-> AP data: PML4, stack, entry, etc.)
 //! ```
 
 use core::ptr;

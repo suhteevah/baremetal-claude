@@ -506,8 +506,17 @@ fn rng_fill(buf: &mut [u8]) {
 // ---------------------------------------------------------------------------
 
 /// Wrapper to make the raw pointer Send-safe.
-/// Safety: SshListener is only accessed from the single-threaded executor
-/// and the dashboard event loop -- never concurrently from multiple threads.
+///
+/// # Safety
+///
+/// `SshListener` contains smoltcp socket handles and SSH session state that
+/// are NOT inherently thread-safe.  This wrapper is sound because:
+/// 1. ClaudioOS uses a single-threaded cooperative executor -- there is no
+///    preemption and no parallel execution on multiple cores (yet).
+/// 2. The pointer is only dereferenced inside `poll_ssh_server()`, which is
+///    called from the dashboard's main async loop -- always on the same thread.
+/// 3. The pointed-to `SshListener` is heap-leaked (`Box::into_raw`) and lives
+///    for the entire kernel lifetime -- no use-after-free is possible.
 struct SendPtr(*mut SshListener);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}

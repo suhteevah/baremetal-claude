@@ -141,7 +141,11 @@ impl claudio_terminal::DrawTarget for FbDrawTarget {
 // ---------------------------------------------------------------------------
 
 /// Each dashboard pane is either an agent chat session, a shell session,
-/// or the system monitor.
+/// or a specialized UI (system monitor, browser, file manager).
+///
+/// This enum is the dispatch target for all pane-specific operations:
+/// keyboard input routing, prompt rendering, and Enter-key submission
+/// all branch on this type to determine the correct handler.
 enum PaneType {
     /// An agent chat session. The usize is the agent session id in the Dashboard.
     Agent(usize),
@@ -365,6 +369,12 @@ impl<'a> SystemInfo for DashboardSystemInfoMut<'a> {
 
 /// Input line buffer for each pane. Characters accumulate here until
 /// Enter is pressed, at which point the buffer is drained and submitted.
+///
+/// This decouples keyboard input from pane output: characters echo to the
+/// pane's terminal immediately, but the actual command/message is only
+/// dispatched on Enter.  Backspace pops from the buffer AND erases from
+/// the terminal display.  The buffer is NOT a scrollback -- it only holds
+/// the current in-progress line.
 struct InputBuffer {
     /// The pane id this buffer belongs to.
     pane_id: usize,
@@ -401,8 +411,16 @@ impl InputBuffer {
 // Prefix key state machine
 // ---------------------------------------------------------------------------
 
-/// Tracks whether we are in "prefix mode" (Ctrl+B was pressed, waiting for
-/// the next key to determine the command).
+/// Two-state machine for the tmux-style prefix key system.
+///
+/// In Normal mode, all keypresses go to the focused pane's input buffer.
+/// When the user presses Ctrl+B, we enter AwaitingCommand mode.  The NEXT
+/// keypress is interpreted as a pane management command (e.g., `"` = split
+/// horizontal, `c` = new agent, `x` = close pane, `n`/`p` = cycle focus).
+/// After the command key, we return to Normal mode.
+///
+/// This mirrors tmux's prefix key behavior so users with tmux muscle memory
+/// can operate the dashboard without learning new keybindings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PrefixState {
     /// Normal mode — keys go to the focused pane.

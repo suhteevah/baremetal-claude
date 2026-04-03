@@ -18,14 +18,14 @@ pub fn call_stdlib(pkg: &str, func: &str, args: &[GoValue], output: &mut String)
             None
         }
         ("fmt", "Printf") => {
-            if let Some(GoValue::String(ref fmt_str)) = args.first() {
+            if let Some(GoValue::String(fmt_str)) = args.first() {
                 let formatted = go_sprintf(fmt_str, &args[1..]);
                 output.push_str(&formatted);
             }
             None
         }
         ("fmt", "Sprintf") => {
-            if let Some(GoValue::String(ref fmt_str)) = args.first() {
+            if let Some(GoValue::String(fmt_str)) = args.first() {
                 let formatted = go_sprintf(fmt_str, &args[1..]);
                 Some(GoValue::String(formatted))
             } else {

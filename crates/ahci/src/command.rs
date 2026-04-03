@@ -4,6 +4,23 @@
 //! Each Command Header points to a Command Table containing the FIS (Frame
 //! Information Structure) and PRDT (Physical Region Descriptor Table) entries.
 //!
+//! ## Memory Layout
+//!
+//! ```text
+//! Command List (1 KiB, 32 entries)
+//! ┌────────────────────┐
+//! │ Command Header [0] │──────> Command Table (128+ bytes)
+//! │  - flags, PRDTL   │        ┌──────────────────────┐
+//! │  - CTBA pointer   │        │ CFIS (64 bytes)      │ ← FIS Register H2D
+//! ├────────────────────┤        │ ACMD (16 bytes)      │ ← ATAPI command (if any)
+//! │ Command Header [1] │        │ Reserved (48 bytes)  │
+//! │ ...               │        ├──────────────────────┤
+//! │ Command Header [31]│        │ PRDT Entry [0]       │ ← data buffer pointer + size
+//! └────────────────────┘        │ PRDT Entry [1]       │
+//!                               │ ...                  │
+//!                               └──────────────────────┘
+//! ```
+//!
 //! Reference: AHCI 1.3.1 spec, Section 4 (Port System Memory Structures).
 
 use alloc::alloc::{alloc_zeroed, Layout};
@@ -49,10 +66,15 @@ pub const ATA_CMD_SET_FEATURES: u8 = 0xEF;
 // FIS Register H2D (20 bytes)
 // ---------------------------------------------------------------------------
 
-/// A Register FIS from Host to Device.
+/// A Register FIS (Frame Information Structure) from Host to Device.
 ///
 /// This is the primary mechanism for sending ATA commands to a SATA device.
-/// Laid out in memory exactly as the HBA expects.
+/// The 20-byte structure is laid out in memory exactly as the HBA expects,
+/// matching the SATA specification's Register FIS format.
+///
+/// The FIS encodes the ATA command register file: command opcode, LBA address
+/// (up to 48-bit), sector count, device/head, and features. The C (Command) bit
+/// in byte 1 distinguishes a command register write from a control register write.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct FisRegH2d {
@@ -230,10 +252,13 @@ impl CommandHeader {
 // PRDT Entry (16 bytes)
 // ---------------------------------------------------------------------------
 
-/// A Physical Region Descriptor Table entry.
+/// A Physical Region Descriptor Table (PRDT) entry.
 ///
-/// Each PRDT entry describes one scatter/gather region of data in memory.
-/// Maximum 4 MiB per entry (byte count is 22 bits, with bit 0 meaning +1).
+/// Each PRDT entry describes one scatter/gather DMA region in system memory.
+/// The HBA transfers data between the SATA device and the memory regions
+/// described by the PRDT entries, in order. Maximum 4 MiB per entry (the byte
+/// count field is 22 bits and stores count-1, so actual range is 1 byte to 4 MiB).
+/// The data base address must be word-aligned (even byte boundary).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct PrdtEntry {

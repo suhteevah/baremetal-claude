@@ -1,8 +1,35 @@
-//! High-level xHCI Host Controller Driver
+//! High-level xHCI (eXtensible Host Controller Interface) Driver
 //!
 //! `XhciController` is the top-level API. It wraps register access, ring
 //! management, device enumeration, and HID keyboard integration into a single
 //! struct that the kernel can init once and then poll for keyboard events.
+//!
+//! ## Initialization Sequence (xHCI spec 4.2)
+//!
+//! 1. Read capability registers to discover hardware limits (MaxSlots, MaxPorts, context size)
+//! 2. Wait for Controller Not Ready (CNR) bit to clear in USBSTS
+//! 3. Halt the controller (clear Run/Stop) then issue Host Controller Reset (HCRST)
+//! 4. Program MaxSlotsEn in CONFIG register
+//! 5. Allocate and program the Device Context Base Address Array (DCBAA) via DCBAAP
+//! 6. Allocate the Command Ring and program its base into CRCR
+//! 7. Allocate the Event Ring, program ERSTSZ/ERDP/ERSTBA for interrupter 0
+//! 8. Enable interrupts (INTE) and set Run/Stop = 1 to start the controller
+//!
+//! ## Port Enumeration
+//!
+//! After init, `enumerate_ports()` scans all root hub ports. For each connected device:
+//! - Reset the port if not yet enabled
+//! - Issue Enable Slot command to get a slot ID from the controller
+//! - Address Device to assign a USB address
+//! - Read device and configuration descriptors
+//! - Configure endpoints via Configure Endpoint command
+//! - If a HID keyboard is found, set boot protocol and start interrupt polling
+//!
+//! ## Keyboard Polling
+//!
+//! `poll_keyboard()` checks the Event Ring for Transfer Event completions on
+//! the keyboard's interrupt IN endpoint. Each 8-byte HID Boot Protocol report
+//! is parsed for modifier keys and keycodes, generating press/release events.
 
 use alloc::vec::Vec;
 
@@ -26,7 +53,9 @@ use crate::hid::{
 use crate::registers::*;
 use crate::ring::*;
 
-/// Maximum number of command completion retries before giving up.
+/// Maximum number of event ring poll iterations before declaring a command timeout.
+/// At spin_loop() speed on modern CPUs this corresponds to roughly 10-50ms depending
+/// on clock frequency, which is generous for most USB command completions.
 const MAX_EVENT_POLL_RETRIES: u32 = 100_000;
 
 /// The xHCI Host Controller driver.
@@ -62,6 +91,9 @@ pub struct XhciController {
 }
 
 /// Keyboard-specific state bundled together.
+///
+/// Tracks the slot, endpoint, DMA buffer, and HID state machine for a single
+/// USB HID Boot Protocol keyboard. Only one keyboard is supported at a time.
 struct KeyboardInfo {
     /// Slot ID of the keyboard device
     slot_id: u8,
@@ -121,6 +153,9 @@ impl XhciController {
         );
 
         // --- Step 2: Wait for Controller Not Ready = 0 ---
+        // The CNR (Controller Not Ready) bit in USBSTS indicates the controller is
+        // still initializing internal state. We must wait for it to clear before
+        // accessing operational registers (xHCI spec 4.2, step 1).
         log::debug!("xhci: waiting for controller ready (CNR=0)...");
         let mut timeout = 1_000_000u32;
         while !op.is_ready() {
@@ -199,7 +234,9 @@ impl XhciController {
             None => return Err(XhciError::AllocFailed("event ring")),
         };
 
-        // Program ERSTSZ, ERDP, then ERSTBA (order matters per spec 5.5.2.3.2)
+        // Program ERSTSZ, ERDP, then ERSTBA in this exact order (xHCI spec 5.5.2.3.2).
+        // Writing ERSTBA last triggers the controller to load the Event Ring Segment Table.
+        // Writing ERDP first ensures the controller knows where to start reading events.
         rt.set_erstsz(0, evt_ring.erst_size());
         rt.set_erdp(0, evt_ring.dequeue_phys());
         rt.set_erstba(0, evt_ring.erst_phys());
@@ -211,7 +248,9 @@ impl XhciController {
             evt_ring.erst_phys(),
         );
 
-        // Set IMOD for interrupter 0 (4000 = ~1ms at 250ns intervals)
+        // Set IMOD (Interrupt Moderation) for interrupter 0.
+        // Value of 4000 means 4000 * 250ns = 1ms between interrupt assertions.
+        // This reduces interrupt overhead while maintaining responsive USB polling.
         rt.set_imod(0, 4000);
 
         // Enable interrupter 0

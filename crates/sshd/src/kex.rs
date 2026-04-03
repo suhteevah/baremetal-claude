@@ -32,20 +32,48 @@ use crate::wire::*;
 // ---------------------------------------------------------------------------
 
 /// The result of algorithm negotiation from two KEXINIT messages.
+///
+/// Each field holds the name string of the algorithm both sides agreed on.
+/// Algorithm negotiation follows RFC 4253 section 7.1: for each category,
+/// the first algorithm in the server's list that also appears in the
+/// client's list is selected. If no common algorithm exists, the connection
+/// is terminated.
 #[derive(Debug, Clone)]
 pub struct NegotiatedAlgorithms {
+    /// Key exchange algorithm (e.g., "mlkem768x25519-sha256@openssh.com").
     pub kex: String,
+    /// Host key algorithm (e.g., "ssh-ed25519").
     pub host_key: String,
+    /// Encryption algorithm, client-to-server direction.
     pub encryption_c2s: String,
+    /// Encryption algorithm, server-to-client direction.
     pub encryption_s2c: String,
+    /// MAC algorithm, client-to-server (unused with AEAD ciphers).
     pub mac_c2s: String,
+    /// MAC algorithm, server-to-client (unused with AEAD ciphers).
     pub mac_s2c: String,
+    /// Compression algorithm, client-to-server (always "none").
     pub compression_c2s: String,
+    /// Compression algorithm, server-to-client (always "none").
     pub compression_s2c: String,
 }
 
-/// Negotiate algorithms: for each category, pick the first algorithm in the
-/// server's list that also appears in the client's list (RFC 4253 §7.1).
+/// Negotiate algorithms from the client's and server's KEXINIT messages.
+///
+/// Per RFC 4253 section 7.1, for each algorithm category (kex, host key,
+/// encryption, mac, compression), the server iterates its preference list
+/// and picks the first algorithm that also appears in the client's list.
+/// This means the **server's preference order wins**.
+///
+/// # Parameters
+/// - `client`: The parsed client KEXINIT message.
+/// - `server_kex`, `server_hostkey`, etc.: The server's algorithm lists.
+///
+/// # Returns
+/// `NegotiatedAlgorithms` with one algorithm per category.
+///
+/// # Errors
+/// Returns `KexError::NoCommonAlgorithm` if any category has no overlap.
 pub fn negotiate(
     client: &KexInit,
     server_kex: &[&str],
@@ -132,7 +160,14 @@ fn pick_algorithm(
 // Key exchange state
 // ---------------------------------------------------------------------------
 
-/// Key exchange state machine.
+/// Key exchange state machine tracking where we are in the KEX process.
+///
+/// The key exchange follows this sequence:
+/// 1. Both sides send KEXINIT -> `WaitingForClientKexInit`
+/// 2. Algorithms negotiated -> `WaitingForClientKexDhInit`
+/// 3. Client sends KEX_ECDH_INIT -> server computes shared secret
+/// 4. Server sends KEX_ECDH_REPLY + NEWKEYS -> `WaitingForNewKeys`
+/// 5. Client sends NEWKEYS -> `Complete` (encryption now active)
 #[derive(Debug)]
 pub enum KexState {
     /// Waiting for client KEXINIT.
@@ -234,20 +269,31 @@ pub fn compute_exchange_hash(
 // Key derivation (RFC 4253 §7.2)
 // ---------------------------------------------------------------------------
 
-/// Derived key material from the key exchange.
+/// Derived key material from the key exchange (RFC 4253 section 7.2).
+///
+/// Six keys are derived, identified by the letters 'A' through 'F'.
+/// Each key is computed as `HASH(K || H || <letter> || session_id)` where:
+/// - `K` = shared secret (mpint-encoded)
+/// - `H` = exchange hash (SHA-256 output, 32 bytes)
+/// - `<letter>` = single ASCII character ('A'..='F')
+/// - `session_id` = the exchange hash from the *first* key exchange
+///
+/// For ChaCha20-Poly1305, we need 64 bytes per direction for the two
+/// 32-byte keys (main key + header key). The IV and integrity keys are
+/// not used since the AEAD cipher handles both.
 #[derive(Debug)]
 pub struct DerivedKeys {
-    /// IV client-to-server (char 'A').
+    /// Initial IV, client-to-server (derived with char 'A'). Unused for ChaCha20-Poly1305.
     pub iv_c2s: Vec<u8>,
-    /// IV server-to-client (char 'B').
+    /// Initial IV, server-to-client (derived with char 'B'). Unused for ChaCha20-Poly1305.
     pub iv_s2c: Vec<u8>,
-    /// Encryption key client-to-server (char 'C').
+    /// Encryption key, client-to-server (derived with char 'C'). 64 bytes for ChaCha20-Poly1305.
     pub enc_key_c2s: Vec<u8>,
-    /// Encryption key server-to-client (char 'D').
+    /// Encryption key, server-to-client (derived with char 'D'). 64 bytes for ChaCha20-Poly1305.
     pub enc_key_s2c: Vec<u8>,
-    /// Integrity key client-to-server (char 'E').
+    /// Integrity key, client-to-server (derived with char 'E'). Unused for AEAD ciphers.
     pub integrity_key_c2s: Vec<u8>,
-    /// Integrity key server-to-client (char 'F').
+    /// Integrity key, server-to-client (derived with char 'F'). Unused for AEAD ciphers.
     pub integrity_key_s2c: Vec<u8>,
 }
 
@@ -292,9 +338,22 @@ pub fn derive_keys(
     }
 }
 
-/// Derive a single key: HASH(K || H || X || session_id).
-/// If the key needs to be longer than one hash output, extend by
-/// appending HASH(K || H || K1) repeatedly.
+/// Derive a single key using the formula from RFC 4253 section 7.2.
+///
+/// First round:  `K1 = HASH(K || H || X || session_id)`
+/// Extension:    `K2 = HASH(K || H || K1)`, `K3 = HASH(K || H || K1 || K2)`, etc.
+///
+/// The key is `K1 || K2 || K3 || ...` truncated to `needed_len` bytes.
+/// Extension is needed when the required key length exceeds the hash output
+/// size (32 bytes for SHA-256). For ChaCha20-Poly1305, we need 64 bytes
+/// per direction, so one extension round is always performed.
+///
+/// # Parameters
+/// - `shared_secret`: The raw shared secret K from the key exchange.
+/// - `exchange_hash`: The exchange hash H (SHA-256, 32 bytes).
+/// - `letter`: The key identifier character ('A' through 'F').
+/// - `session_id`: The session ID (first exchange hash of the connection).
+/// - `needed_len`: How many bytes of key material to produce.
 fn derive_key(
     shared_secret: &[u8],
     exchange_hash: &[u8],
@@ -302,7 +361,10 @@ fn derive_key(
     session_id: &[u8],
     needed_len: usize,
 ) -> Vec<u8> {
-    // Build the mpint encoding of K for hashing
+    // The shared secret K must be encoded as an SSH mpint (multi-precision
+    // integer) for hashing. This means: uint32 length prefix + big-endian
+    // bytes, with a leading zero byte if the high bit is set (to distinguish
+    // positive from negative in two's complement).
     let mut k_mpint = SshWriter::new();
     k_mpint.write_mpint(shared_secret);
     let k_bytes = k_mpint.into_bytes();
@@ -346,15 +408,31 @@ fn derive_key(
 // Hybrid PQ KEX: mlkem768x25519-sha256@openssh.com
 // ---------------------------------------------------------------------------
 
-/// Server-side ephemeral keys for hybrid PQ KEX.
+/// Server-side ephemeral keys for the hybrid post-quantum key exchange.
+///
+/// This implements `mlkem768x25519-sha256@openssh.com`, which combines:
+/// - **ML-KEM-768** (FIPS 203, formerly CRYSTALS-Kyber): A lattice-based KEM
+///   believed to be resistant to quantum computers. ML-KEM-768 provides
+///   NIST security level 3 (~AES-192 equivalent against quantum attacks).
+/// - **X25519**: Classical Elliptic Curve Diffie-Hellman on Curve25519,
+///   providing 128-bit security against classical computers.
+///
+/// The hybrid approach ensures that even if one primitive is broken (e.g.,
+/// a quantum computer breaks X25519, or a classical attack breaks ML-KEM),
+/// the combined shared secret remains secure as long as the other holds.
+///
+/// The server generates both keypairs, sends both public keys to the client,
+/// and the client returns an ML-KEM ciphertext + X25519 public key.
 pub struct HybridKexServerState {
-    /// ML-KEM-768 decapsulation key (serialized).
+    /// ML-KEM-768 decapsulation (secret) key, serialized. Used to recover
+    /// the shared secret from the client's ciphertext.
     mlkem_dk_bytes: Vec<u8>,
-    /// ML-KEM-768 encapsulation key (serialized, 1184 bytes for ML-KEM-768).
+    /// ML-KEM-768 encapsulation (public) key, serialized (1184 bytes).
+    /// Sent to the client so it can encapsulate a shared secret.
     mlkem_ek_bytes: Vec<u8>,
-    /// X25519 secret key (32 bytes).
+    /// X25519 secret key (32 bytes). Kept server-side for DH computation.
     x25519_secret: [u8; 32],
-    /// X25519 public key (32 bytes).
+    /// X25519 public key (32 bytes). Sent to the client.
     x25519_public: [u8; 32],
 }
 
@@ -415,22 +493,39 @@ impl HybridKexServerState {
         out
     }
 
-    /// Process the client's KEX_ECDH_INIT and compute the shared secret.
+    /// Process the client's KEX_ECDH_INIT and compute the hybrid shared secret.
     ///
-    /// Client sends: `mlkem_ciphertext (1088 bytes for ML-KEM-768) || x25519_public (32 bytes)`
+    /// The client's ephemeral value is a concatenation:
+    /// `mlkem_ciphertext (1088 bytes) || x25519_public_key (32 bytes)`
     ///
-    /// Server:
-    /// 1. Decapsulates ML-KEM ciphertext -> mlkem_shared_secret (32 bytes)
-    /// 2. Performs X25519 DH with client's X25519 public key -> x25519_shared (32 bytes)
-    /// 3. shared_secret = SHA-256(mlkem_shared || x25519_shared)
+    /// The server performs these steps:
+    /// 1. **ML-KEM decapsulation**: Uses our secret decapsulation key to recover
+    ///    the 32-byte ML-KEM shared secret from the client's 1088-byte ciphertext.
+    ///    This is the KEM equivalent of "decrypting" the shared secret.
+    /// 2. **X25519 Diffie-Hellman**: Multiplies our X25519 secret scalar by the
+    ///    client's X25519 public point to get a 32-byte DH shared secret.
+    /// 3. **Combination**: `shared_secret = SHA-256(mlkem_shared || x25519_shared)`.
+    ///    Hashing both together means an attacker must break BOTH primitives.
+    ///
+    /// # Parameters
+    /// - `client_ephemeral`: The client's concatenated ML-KEM ciphertext + X25519 public key.
+    ///
+    /// # Returns
+    /// The 32-byte combined shared secret.
+    ///
+    /// # Errors
+    /// - `InvalidEphemeralKey`: Client data is too short.
+    /// - `MlKemDecapsulationFailed`: ML-KEM ciphertext could not be decapsulated.
+    /// - `X25519ZeroOutput`: X25519 DH produced all zeros (client sent a low-order point).
     pub fn compute_shared_secret(
         &self,
         client_ephemeral: &[u8],
     ) -> Result<Vec<u8>, KexError> {
         log::info!("kex: computing hybrid shared secret from client ephemeral ({} bytes)", client_ephemeral.len());
 
-        // ML-KEM-768 ciphertext is 1088 bytes, X25519 public key is 32 bytes
+        // ML-KEM-768 ciphertext size per FIPS 203 (768 coefficients, compressed)
         const MLKEM768_CT_SIZE: usize = 1088;
+        // X25519 public key is always exactly 32 bytes (a compressed curve point)
         const X25519_PK_SIZE: usize = 32;
 
         if client_ephemeral.len() < MLKEM768_CT_SIZE + X25519_PK_SIZE {
@@ -478,14 +573,25 @@ impl HybridKexServerState {
         let their_public = X25519PublicKey::from(client_pk_bytes);
         let x25519_shared = x25519_secret.diffie_hellman(&their_public);
 
-        // Check for all-zero output (low-order point attack)
+        // SECURITY CHECK: Reject all-zero DH output.
+        // An attacker could send a low-order X25519 point (e.g., the identity
+        // point or a small-subgroup element) that causes the DH result to be
+        // all zeros. Accepting this would mean the "shared secret" is known
+        // to the attacker, completely breaking confidentiality. We must abort.
         if x25519_shared.as_bytes().iter().all(|&b| b == 0) {
             log::error!("kex: X25519 DH produced all-zero output — invalid client public key");
             return Err(KexError::X25519ZeroOutput);
         }
         log::debug!("kex: X25519 shared secret derived");
 
-        // Combine: shared_secret = SHA-256(mlkem_shared || x25519_shared)
+        // Combine both shared secrets via SHA-256 hash.
+        // WHY hash them together instead of XOR or concatenation?
+        // - XOR would allow an attacker who breaks one component to compute the
+        //   combined secret if they can observe the other component's output.
+        // - Plain concatenation would work but produces a longer key than needed.
+        // - SHA-256 acts as a key derivation function, producing a fixed-size
+        //   output that is uniformly distributed regardless of the input structure.
+        // Formula: shared_secret = SHA-256(mlkem_shared_secret || x25519_shared_secret)
         let mut hasher = Sha256::new();
         hasher.update(mlkem_shared.as_slice());
         hasher.update(x25519_shared.as_bytes());
@@ -507,11 +613,16 @@ impl HybridKexServerState {
 // Classical fallback: curve25519-sha256
 // ---------------------------------------------------------------------------
 
-/// Server-side state for classical curve25519-sha256 KEX.
+/// Server-side state for classical curve25519-sha256 key exchange.
+///
+/// This is the fallback KEX used when the client does not support the
+/// hybrid post-quantum algorithm. It uses standard X25519 Elliptic Curve
+/// Diffie-Hellman, which provides 128-bit classical security but is
+/// vulnerable to quantum computers running Shor's algorithm.
 pub struct ClassicalKexServerState {
-    /// X25519 secret key.
+    /// X25519 secret scalar (32 random bytes, clamped by the library).
     x25519_secret: [u8; 32],
-    /// X25519 public key.
+    /// X25519 public key (the secret scalar multiplied by the base point).
     x25519_public: [u8; 32],
 }
 
@@ -574,8 +685,15 @@ impl ClassicalKexServerState {
 // RNG wrapper: adapts `&mut dyn FnMut(&mut [u8])` to `CryptoRng + RngCore`
 // ---------------------------------------------------------------------------
 
-/// Wraps a `&mut dyn FnMut(&mut [u8])` to implement `RngCore + CryptoRng`
-/// so it can be passed to crypto crate APIs that require those traits.
+/// Adapter that wraps a `&mut dyn FnMut(&mut [u8])` callback to implement
+/// the `RngCore + CryptoRng` traits from the `rand_core` crate.
+///
+/// This is necessary because our kernel's CSPRNG exposes a simple `fill(&mut [u8])`
+/// interface, but crypto libraries (ml-kem, x25519-dalek) require a type that
+/// implements the `CryptoRng` trait. This wrapper bridges that gap.
+///
+/// The `CryptoRng` marker trait (empty impl below) asserts to the crypto
+/// libraries that our RNG is cryptographically secure.
 pub(crate) struct FnRng<'a>(pub(crate) &'a mut dyn FnMut(&mut [u8]));
 
 impl<'a> rand_core::RngCore for FnRng<'a> {

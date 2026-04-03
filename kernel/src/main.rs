@@ -1,10 +1,29 @@
-//! ClaudioOS — Bare-metal Rust OS for AI coding agents
+//! ClaudioOS — Bare-metal Rust OS for AI coding agents.
 //!
-//! Boot sequence:
-//!   UEFI -> bootloader -> kernel_main -> init_hardware -> auth_gate -> agent_dashboard
+//! This is the kernel binary crate: the very first Rust code that runs after
+//! the UEFI bootloader hands off control.  It is `#![no_std]` + `#![no_main]`
+//! -- there is no libc, no POSIX, no runtime.  Everything is built from scratch.
 //!
-//! This is a single-address-space async application. No kernel/user boundary,
-//! no syscalls, no process isolation. Every agent session is an async task.
+//! # Boot sequence (in order of execution)
+//!
+//! ```text
+//! UEFI firmware
+//!   -> bootloader crate (v0.11) -- sets up page tables, identity map, GOP framebuffer
+//!     -> kernel_main()          -- Phase -1..6: hardware init, heap, interrupts, PCI, SMP
+//!       -> post_stack_switch()  -- switches to heap-allocated 4 MiB stack
+//!         -> main_async()       -- async executor starts, networking, auth, dashboard
+//! ```
+//!
+//! # Key design decisions
+//!
+//! - **Single address space**: no kernel/user boundary, no syscalls, no process
+//!   isolation.  Every agent session is an async task in the same address space.
+//! - **Cooperative multitasking**: an interrupt-driven async executor runs all
+//!   tasks.  `hlt` when idle for power savings.
+//! - **Native TLS**: HTTPS to api.anthropic.com is done directly from kernel
+//!   code via `embedded-tls` + `smoltcp`.  No userland networking stack.
+//! - **No JavaScript**: the Anthropic Messages API is called via raw HTTP/1.1
+//!   POST + SSE streaming.  No Node.js, no npm, no V8.
 
 #![no_std]
 #![no_main]
@@ -73,10 +92,20 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Physical memory offset provided by the bootloader, stored globally so that
-/// subsystems initialised after boot (e.g. networking) can translate addresses.
+/// subsystems initialised after boot (e.g. networking, xHCI, Intel NIC) can
+/// translate between virtual and physical addresses.
+///
+/// The bootloader maps all physical memory at `virtual = physical + offset`.
+/// This means any physical address P is accessible at virtual address P + offset.
+/// This is essential for MMIO register access (PCI BARs, xHCI, E1000) and DMA
+/// buffer address translation.
 static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
-/// Bootloader configuration — request a framebuffer and physical memory mapping
+/// Bootloader configuration — tells the bootloader what we need before it
+/// hands off to kernel_main.  Key settings:
+/// - Physical memory mapping (Dynamic) so we can access any physical address
+/// - 128 KiB kernel stack (interrupt handlers + log formatting are stack-heavy)
+/// - 1920x1080 minimum framebuffer resolution for the terminal dashboard
 static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
@@ -309,6 +338,11 @@ fn post_stack_switch() -> ! {
 
 /// Return the current time as a smoltcp Instant, derived from the PIT tick
 /// counter in the timer interrupt handler.
+///
+/// This is the time source for ALL network operations: TCP retransmissions,
+/// DHCP lease timers, TLS handshake timeouts, and SSE streaming timeouts.
+/// The PIT runs at ~18.2 Hz so resolution is ~55ms -- good enough for
+/// network protocols but not for sub-millisecond benchmarking.
 fn now() -> claudio_net::Instant {
     claudio_net::Instant::from_millis(interrupts::millis_since_boot())
 }

@@ -171,7 +171,30 @@ fn tls_read(
 
 /// Send an email via SMTPS (port 465, implicit TLS).
 ///
-/// Uses AUTH LOGIN with base64-encoded credentials.
+/// Uses AUTH LOGIN with base64-encoded credentials.  The SMTP protocol
+/// state machine proceeds as:
+///
+/// ```text
+/// [connect TLS to port 465]
+/// <- 220 greeting
+/// -> EHLO claudioos
+/// <- 250 capabilities
+/// -> AUTH LOGIN
+/// <- 334 (send username)
+/// -> base64(username)
+/// <- 334 (send password)
+/// -> base64(password)
+/// <- 235 authenticated
+/// -> MAIL FROM:<sender>
+/// <- 250 ok
+/// -> RCPT TO:<recipient>
+/// <- 250 ok
+/// -> DATA
+/// <- 354 go ahead
+/// -> <headers + body + ".\r\n">
+/// <- 250 ok
+/// -> QUIT
+/// ```
 pub fn send_email(
     stack: &mut NetworkStack,
     smtp_server: &str,

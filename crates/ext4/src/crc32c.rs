@@ -7,11 +7,21 @@
 //! This is a table-based implementation suitable for `no_std` environments.
 
 /// CRC32C polynomial (Castagnoli), reflected form.
+///
+/// The unreflected (normal) form is 0x1EDC6F41. The reflected form used here
+/// (0x82F63B78) allows a simpler right-shifting implementation where we process
+/// data starting from the least significant bit. CRC32C was chosen for ext4
+/// over the standard CRC32 (Ethernet) polynomial because it has better error
+/// detection properties for the block sizes used in filesystem metadata.
 const CRC32C_POLY: u32 = 0x82F63B78;
 
 /// Pre-computed CRC32C lookup table (256 entries).
 ///
-/// Generated at compile time from the CRC32C polynomial.
+/// Generated at compile time from the CRC32C polynomial using the standard
+/// bit-by-bit division method. Each entry `TABLE[i]` is the CRC32C remainder
+/// of the single byte `i`. This allows O(1) per-byte processing instead of
+/// O(8) bit-by-bit processing during runtime. The table is computed in a
+/// const context, so there is no runtime initialization cost.
 const CRC32C_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
     let mut i = 0u32;
@@ -90,7 +100,11 @@ pub fn verify_superblock_checksum(sb_bytes: &[u8]) -> bool {
         sb_bytes[0x3FF],
     ]);
 
-    // Compute CRC32C of the superblock with checksum field zeroed
+    // Compute CRC32C of the superblock with the checksum field (at offset
+    // 0x3FC = 1020) treated as zeros. This is the standard "skip-the-checksum-
+    // field" approach: feed everything before it, feed 4 zero bytes in its place,
+    // then feed everything after it (nothing, since it's the last 4 bytes of
+    // the 1024-byte superblock).
     let mut crc = 0xFFFFFFFF_u32;
     crc = crc32c_update(crc, &sb_bytes[..0x3FC]);
     crc = crc32c_update(crc, &[0u8; 4]); // zeroed checksum field

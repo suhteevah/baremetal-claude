@@ -452,8 +452,13 @@ pub struct AcpiInfoSnapshot {
 
 /// Perform an ACPI shutdown (S5 sleep state). Powers off the machine.
 ///
-/// Falls back to QEMU-specific shutdown port (0x604) if ACPI shutdown
-/// is not available.
+/// The shutdown sequence tries three methods in order:
+/// 1. ACPI S5: Write the SLP_TYPa value to PM1a_CNT with the SLP_EN bit set.
+///    This is the proper way to power off -- works on real hardware.
+/// 2. QEMU shutdown port: Write 0x2000 to I/O port 0x604. QEMU intercepts
+///    this and exits the VM.  Only works in QEMU, not on real hardware.
+/// 3. Halt loop: If neither works, disable interrupts and loop `hlt` forever.
+///    The machine stays powered on but stops executing code.
 pub fn shutdown() -> ! {
     log::info!("[acpi] shutdown requested");
 
@@ -488,8 +493,12 @@ pub fn shutdown() -> ! {
 
 /// Perform an ACPI reboot via the FADT reset register.
 ///
-/// Falls back to keyboard controller reset (0xFE to port 0x64) if
-/// ACPI reboot is not available.
+/// The reboot sequence tries two methods in order:
+/// 1. ACPI reset register: Write the reset value to the address specified in
+///    the FADT.  This is the proper way to reboot -- works on modern hardware.
+/// 2. Keyboard controller reset: Write 0xFE to I/O port 0x64 (the PS/2
+///    controller command port).  This pulse the CPU reset line.  Works on
+///    most x86 hardware including QEMU.
 pub fn reboot() -> ! {
     log::info!("[acpi] reboot requested");
 

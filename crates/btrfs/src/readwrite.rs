@@ -39,8 +39,13 @@ use crate::key::{BtrfsKey, KeyType, objectid};
 use crate::superblock::{Superblock, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE};
 use crate::tree;
 
-/// Maximum size for inline extents (~3800 bytes, leaving room for the item
-/// descriptor and header in a leaf node).
+/// Maximum size for inline extents.
+///
+/// Small files (up to ~3800 bytes) are stored directly inside the B-tree leaf
+/// node alongside their metadata, avoiding a separate data extent allocation.
+/// The limit is derived from the default nodesize (16384) minus the header
+/// (101 bytes), item descriptor (25 bytes), and file extent item (53 bytes),
+/// with some safety margin for other items sharing the leaf.
 const MAX_INLINE_DATA_SIZE: usize = 3800;
 
 /// Errors that can occur during btrfs filesystem operations.

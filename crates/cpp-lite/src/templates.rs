@@ -1,4 +1,27 @@
-//! Template instantiation via monomorphization.
+//! C++ template instantiation via monomorphization.
+//!
+//! C++ templates are compiled using monomorphization: for each unique set of
+//! type arguments, a new specialization is generated. For example,
+//! `vector<int>` and `vector<double>` produce two distinct concrete types
+//! with independent machine code.
+//!
+//! ## Monomorphization Process
+//!
+//! 1. **Registration**: Template definitions (function or class) are stored
+//!    alongside their template parameter lists (`template<typename T>`).
+//!
+//! 2. **Instantiation request**: When code uses `foo<int>(42)`, the engine
+//!    looks up the template `foo` and the concrete type argument `int`.
+//!
+//! 3. **Substitution**: A substitution map is built (`T -> int`), and the
+//!    template AST is cloned. In a full implementation, every occurrence of
+//!    `T` in the AST would be replaced with `int`.
+//!
+//! 4. **Name mangling**: The instantiated function gets a unique mangled name
+//!    like `identity_Int` to avoid symbol collisions.
+//!
+//! 5. **Deduplication**: The `instantiated` map tracks which (template, args)
+//!    pairs have already been instantiated, preventing duplicate codegen.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -7,16 +30,22 @@ use alloc::format;
 
 use crate::ast::*;
 
-/// A pending template instantiation request.
+/// A key identifying a specific template instantiation.
+///
+/// Two instantiation requests with the same template name and type arguments
+/// (stringified for comparison) are considered identical and will share code.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstantiationKey {
-    /// Template name.
+    /// Name of the template being instantiated.
     pub name: String,
-    /// Concrete type arguments (stringified).
+    /// Stringified concrete type arguments (e.g., `["Int", "Double"]`).
     pub args: Vec<String>,
 }
 
 /// Template instantiation engine.
+///
+/// Stores registered function and class templates, tracks which have been
+/// instantiated, and generates concrete specializations on demand.
 pub struct TemplateEngine {
     /// Function templates: name -> template def.
     func_templates: BTreeMap<String, CppFuncDef>,

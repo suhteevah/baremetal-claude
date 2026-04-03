@@ -1,4 +1,22 @@
 //! Simple mark-sweep garbage collector for the JVM heap.
+//!
+//! Implements a classic two-phase GC algorithm:
+//!
+//! ## Mark Phase (`mark`)
+//! 1. Clear the `marked` bit on every heap object
+//! 2. Starting from root references (stack frames, static fields), perform a
+//!    worklist-based traversal: for each reachable object, set `marked = true`
+//!    and add any references in its fields or array elements to the worklist
+//!
+//! ## Sweep Phase (`sweep`)
+//! Walk the entire object array. Any object with `marked == false` is unreachable
+//! and is freed: its slot is set to `None` and its index is added to the free list
+//! for reuse by future allocations.
+//!
+//! ## Allocation
+//! New objects are allocated from the free list (O(1) if available) or by
+//! appending to the objects vector. The GC is triggered when `alloc_count`
+//! exceeds `gc_threshold` (default 1024 allocations).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

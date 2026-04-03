@@ -1,8 +1,33 @@
-//! High-level AHCI driver API.
+//! High-level AHCI (Advanced Host Controller Interface) driver API.
 //!
 //! Provides `AhciController` (discovers and manages all AHCI ports) and
 //! `AhciDisk` (per-drive read/write interface that implements a BlockDevice-
 //! compatible API matching the pattern used by ClaudioOS filesystem crates).
+//!
+//! ## AHCI Initialization Sequence
+//!
+//! 1. Enable AHCI mode by setting GHC.AE (AHCI Enable) in the Global HBA Control register
+//! 2. Perform an HBA reset via GHC.HR and wait for it to self-clear (max 1 second)
+//! 3. Re-enable AHCI mode (reset clears GHC.AE)
+//! 4. Read the Ports Implemented (PI) register to discover which ports are wired
+//! 5. Enable global interrupts via GHC.IE
+//! 6. For each implemented port: detect device type, allocate DMA buffers, issue IDENTIFY
+//!
+//! ## DMA I/O Model
+//!
+//! AHCI uses a Command List / Command Table / FIS / PRDT hierarchy:
+//! - Each port has a Command List (32 Command Headers) in DMA-accessible memory
+//! - Each Command Header points to a Command Table containing the FIS and PRDT
+//! - The FIS (Frame Information Structure) carries the ATA command
+//! - The PRDT (Physical Region Descriptor Table) describes scatter-gather data buffers
+//! - Commands are issued by setting bits in the port's CI (Command Issue) register
+//!
+//! ## Command Completion
+//!
+//! After setting a CI bit, the driver polls until the bit clears (command complete)
+//! or an error is detected in the port's IS (Interrupt Status) / TFD (Task File Data)
+//! registers. Error conditions include Task File Error, Host Bus Fatal/Data Error,
+//! and Interface Fatal Error.
 
 use alloc::alloc::{alloc_zeroed, Layout};
 use alloc::vec::Vec;

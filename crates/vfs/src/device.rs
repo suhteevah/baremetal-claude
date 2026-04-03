@@ -11,14 +11,22 @@ use alloc::vec::Vec;
 use crate::fs_trait::FsType;
 
 // ── Well-known GPT partition type GUIDs ──────────────────────────────────────
+//
+// GPT partition type GUIDs identify what kind of content a partition holds.
+// These are stored in "mixed-endian" format on disk: the first 3 components
+// are little-endian, the last 2 are big-endian. The byte arrays below are
+// in on-disk order (mixed-endian), matching what we read directly from the
+// GPT partition entry.
 
 /// Microsoft Basic Data (NTFS / FAT32).
+/// GUID: EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
 pub const GPT_GUID_MICROSOFT_BASIC: [u8; 16] = [
     0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44,
     0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
 ];
 
 /// Linux filesystem data.
+/// GUID: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
 pub const GPT_GUID_LINUX_FS: [u8; 16] = [
     0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
     0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
@@ -146,6 +154,9 @@ impl PartitionEntry {
 /// A view of a block device restricted to a single partition.
 ///
 /// Translates byte offsets so that offset 0 maps to the partition's start LBA.
+/// This allows filesystem implementations to work with partition-relative
+/// offsets without knowing the partition's physical location on the device.
+/// Bounds checking prevents reads/writes from escaping the partition boundary.
 pub struct Partition<'a> {
     /// The underlying full device.
     pub device: &'a dyn BlockDevice,

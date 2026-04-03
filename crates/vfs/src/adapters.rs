@@ -53,8 +53,13 @@ struct AhciBlockDeviceInner {
     hba: *const claudio_ahci::hba::HbaRegs,
 }
 
-// SAFETY: AHCI MMIO registers are accessed through volatile reads/writes and
-// the Mutex serializes access.
+// SAFETY: AhciBlockDeviceInner contains raw pointers to AHCI hardware
+// structures (AhciDisk and HbaRegs). These are safe to share across threads
+// because: (1) AHCI MMIO registers use volatile reads/writes that are
+// inherently thread-safe at the hardware level, and (2) all access is
+// serialized through the outer Mutex, preventing concurrent register access.
+// The raw pointers are used because AhciDisk is owned by AhciController
+// and we need a long-lived reference without Rust lifetime gymnastics.
 unsafe impl Send for AhciBlockDeviceInner {}
 unsafe impl Sync for AhciBlockDeviceInner {}
 
@@ -130,7 +135,11 @@ struct NvmeBlockDeviceInner {
     sector_size: u32,
 }
 
-// SAFETY: NVMe MMIO registers use volatile access and the Mutex serializes.
+// SAFETY: NvmeBlockDeviceInner contains a raw pointer to the NVMe controller.
+// This is safe to share across threads because: (1) NVMe MMIO registers use
+// volatile access, and (2) all access is serialized through the outer Mutex.
+// The raw pointer is used because the NvmeController is owned elsewhere and
+// we need a long-lived, non-borrowing handle.
 unsafe impl Send for NvmeBlockDeviceInner {}
 unsafe impl Sync for NvmeBlockDeviceInner {}
 
@@ -214,9 +223,16 @@ impl BlockDevice for NvmeBlockDeviceAdapter {
 // ============================================================================
 // Partition-scoped block device adapters for filesystem crates
 //
-// Each filesystem crate defines its own `BlockDevice` trait with its own error
-// type. These adapters wrap the VFS `BlockDevice` trait behind the FS-specific
-// `BlockDevice` traits.
+// Each filesystem crate (ext4, btrfs, NTFS) defines its own `BlockDevice`
+// trait with its own error type (Ext4Error, BtrfsError, NtfsError). The VFS
+// layer uses a different, unified `BlockDevice` trait. These thin adapter
+// structs bridge the two: they hold a reference to a VFS BlockDevice plus a
+// partition byte offset, and implement the FS-specific BlockDevice trait by
+// translating offsets (adding partition_offset) and converting errors.
+//
+// This "adapter pattern" avoids coupling the filesystem implementations to
+// the VFS layer or to any specific storage driver, keeping the crate
+// boundaries clean.
 // ============================================================================
 
 /// Wraps a VFS `&dyn BlockDevice` (or a `Partition` view) to satisfy the

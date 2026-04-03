@@ -33,18 +33,26 @@ use claudio_linux_compat::dispatcher::{ProcessContext, SyscallArgs, dispatch_sys
 use spin::Mutex;
 
 /// GDT segment selectors. These must match the GDT layout in gdt.rs.
-/// SYSCALL loads CS from STAR[47:32] and SS from STAR[47:32]+8.
-/// SYSRET loads CS from STAR[63:48]+16 and SS from STAR[63:48]+8.
-const KERNEL_CS: u64 = 0x08; // Kernel code segment selector
-const KERNEL_SS: u64 = 0x10; // Kernel data segment selector
-const USER_CS_BASE: u64 = 0x18; // User code segment base (SYSRET adds 16)
+///
+/// The SYSCALL/SYSRET mechanism uses the IA32_STAR MSR to determine which
+/// GDT segments to load on transitions:
+/// - SYSCALL: loads CS from STAR[47:32], SS from STAR[47:32]+8
+/// - SYSRET:  loads CS from STAR[63:48]+16, SS from STAR[63:48]+8
+///
+/// This means the GDT must have kernel CS at offset 0x08, kernel SS at 0x10,
+/// and a "user" CS base at 0x18 (SYSRET will use 0x18+16=0x28 for user CS
+/// and 0x18+8=0x20 for user SS).
+const KERNEL_CS: u64 = 0x08; // Kernel code segment selector (ring 0, 64-bit)
+const KERNEL_SS: u64 = 0x10; // Kernel data segment selector (ring 0)
+const USER_CS_BASE: u64 = 0x18; // User code segment base (SYSRET adds 16 -> 0x28)
 
-// MSR addresses
-const IA32_STAR: u32 = 0xC000_0081;
-const IA32_LSTAR: u32 = 0xC000_0082;
-const IA32_FMASK: u32 = 0xC000_0084;
-const IA32_EFER: u32 = 0xC000_0080;
-const EFER_SCE: u64 = 1 << 0; // System Call Extensions enable bit
+// MSR addresses for SYSCALL/SYSRET configuration.
+// These are written during init() to set up the fast system call mechanism.
+const IA32_STAR: u32 = 0xC000_0081;  // Segment selectors for SYSCALL/SYSRET transitions
+const IA32_LSTAR: u32 = 0xC000_0082; // Long mode SYSCALL target RIP (our entry stub)
+const IA32_FMASK: u32 = 0xC000_0084; // RFLAGS bits to clear on SYSCALL (mask out IF+TF)
+const IA32_EFER: u32 = 0xC000_0080;  // Extended Feature Enable Register
+const EFER_SCE: u64 = 1 << 0;        // System Call Extensions enable bit in EFER
 
 /// Global process context for the currently running Linux binary.
 /// Protected by a spinlock since we might access it from interrupt context.

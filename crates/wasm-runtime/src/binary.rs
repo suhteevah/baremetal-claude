@@ -1,4 +1,47 @@
-//! WASM binary format parser: magic, version, sections, LEB128 decoding.
+//! WASM binary format parser (WebAssembly spec, Ch. 5: Binary Format).
+//!
+//! Parses a `.wasm` file from raw bytes into a [`WasmModule`] structure.
+//!
+//! ## Binary Layout
+//!
+//! ```text
+//! +-------------------+
+//! | Magic: \0asm      |  4 bytes
+//! | Version: 1        |  4 bytes (little-endian)
+//! +-------------------+
+//! | Section 1 (type)  |  id(1) + size(LEB128) + content
+//! | Section 2 (import)|  id(2) + size(LEB128) + content
+//! | ...               |
+//! | Section 10 (code) |  id(10) + size(LEB128) + function bodies
+//! | Section 11 (data) |  id(11) + size(LEB128) + data segments
+//! +-------------------+
+//! ```
+//!
+//! ## LEB128 Encoding
+//!
+//! WASM uses Little-Endian Base 128 (LEB128) for variable-length integers:
+//! - Each byte contributes 7 data bits (bits 0-6)
+//! - Bit 7 is a continuation flag: 1 = more bytes follow, 0 = last byte
+//! - Unsigned LEB128 (`read_u32_leb128`): value bits are concatenated
+//! - Signed LEB128 (`read_i32_leb128`, `read_i64_leb128`): sign-extends
+//!   using the MSB of the last byte
+//!
+//! ## Section IDs
+//!
+//! | ID | Section | Content |
+//! |----|---------|---------|
+//! | 0  | Custom  | Name sections, debug info (skipped) |
+//! | 1  | Type    | Function signatures (`(params) -> (results)`) |
+//! | 2  | Import  | External functions, tables, memories, globals |
+//! | 3  | Function| Type index for each defined function |
+//! | 4  | Table   | Function reference tables (for `call_indirect`) |
+//! | 5  | Memory  | Linear memory declarations (min/max pages) |
+//! | 6  | Global  | Global variables with initial values |
+//! | 7  | Export  | Exported functions/memories/globals by name |
+//! | 8  | Start   | Optional start function index |
+//! | 9  | Element | Table initialization segments |
+//! | 10 | Code    | Function bodies (locals + bytecode) |
+//! | 11 | Data    | Memory initialization segments |
 
 use alloc::string::String;
 use alloc::vec::Vec;

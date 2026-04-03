@@ -964,6 +964,15 @@ pub fn format_message_w(
 }
 
 /// Convert a Windows-style path to a VFS path.
+///
+/// Windows PE binaries use paths like `C:\Users\foo\bar.txt`.  ClaudioOS
+/// uses Unix-style forward-slash paths.  This function:
+/// 1. Replaces all `\` with `/`
+/// 2. Strips the drive letter prefix (e.g., `C:`)
+/// 3. Ensures the path starts with `/`
+///
+/// Examples: `C:\Windows\System32` -> `/Windows/System32`
+///           `foo\bar.txt` -> `/foo/bar.txt`
 fn windows_path_to_vfs(path: &str) -> String {
     // Strip drive letter and convert backslashes
     let mut vfs = path.replace('\\', "/");

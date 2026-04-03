@@ -2,6 +2,25 @@
 //!
 //! The MADT (signature "APIC") describes the interrupt controller configuration
 //! including all local APICs (one per CPU core) and I/O APICs. Essential for SMP.
+//!
+//! ## MADT Entry Types
+//!
+//! The MADT contains a fixed header (Local APIC Address + flags) followed by
+//! a variable-length array of interrupt controller structures, each tagged
+//! with a type byte and length byte:
+//!
+//! | Type | Description                       | Key Fields                          |
+//! |------|-----------------------------------|-------------------------------------|
+//! | 0    | Processor Local APIC              | ACPI processor ID, APIC ID, flags   |
+//! | 1    | I/O APIC                          | ID, MMIO address, GSI base          |
+//! | 2    | Interrupt Source Override          | Bus, IRQ source -> GSI mapping      |
+//! | 3    | NMI Source                        | Flags, GSI                          |
+//! | 4    | Local APIC NMI                    | Processor ID, LINT#, flags          |
+//! | 5    | Local APIC Address Override (64b) | 64-bit APIC base address            |
+//! | 9    | Processor Local x2APIC            | x2APIC ID, ACPI UID, flags          |
+//!
+//! The PCAT_COMPAT flag (bit 0 of MADT flags) indicates dual 8259 PICs are
+//! present and must be disabled before using APIC-based interrupts.
 
 use alloc::vec::Vec;
 use crate::sdt::{SdtHeader, SDT_HEADER_SIZE};

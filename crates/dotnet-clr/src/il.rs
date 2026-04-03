@@ -1,7 +1,37 @@
-//! CIL (Common Intermediate Language) interpreter (ECMA-335 III).
+//! CIL (Common Intermediate Language) opcode definitions and method body parser.
 //!
-//! Interprets .NET CIL bytecode: 200+ opcodes including arithmetic, control flow,
-//! object creation, array access, exception handling, and method calls.
+//! Implements the bytecode layer of the .NET CLR as defined in ECMA-335 Part III.
+//! CIL is a stack-based bytecode similar to JVM bytecodes but with key differences:
+//!
+//! ## Opcode Encoding
+//!
+//! Most CIL opcodes are single-byte (0x00..0xFE). The byte 0xFE is a prefix
+//! indicating a two-byte opcode (0xFE followed by a second byte). This module
+//! represents all opcodes as `u16` values: single-byte opcodes use their byte
+//! value directly, and two-byte opcodes use `0xFE00 | second_byte`.
+//!
+//! ## Opcode Categories
+//!
+//! | Category | Examples | Description |
+//! |----------|---------|-------------|
+//! | Constants | `ldc.i4.0`..`ldc.i4.8`, `ldc.i4.s`, `ldc.i8`, `ldc.r4/r8` | Push constants |
+//! | Locals | `ldloc.0`..`ldloc.3`, `stloc.0`..`stloc.3`, `ldloc.s` | Load/store locals |
+//! | Arguments | `ldarg.0`..`ldarg.3`, `starg.s` | Load/store method args |
+//! | Arithmetic | `add`, `sub`, `mul`, `div`, `rem`, `neg`, `not` | Stack arithmetic |
+//! | Bitwise | `and`, `or`, `xor`, `shl`, `shr` | Bitwise operations |
+//! | Comparison | `ceq` (0xFE01), `cgt` (0xFE02), `clt` (0xFE04) | Two-byte comparison |
+//! | Branching | `br.s`, `brfalse.s`, `brtrue.s`, `beq.s`..`blt.un.s` | Short (i8) branches |
+//! | Branching | `br`, `brfalse`, `brtrue`, `beq`..`blt.un` | Long (i32) branches |
+//! | Objects | `newobj`, `callvirt`, `ldfld`, `stfld`, `box`, `unbox.any` | Object model |
+//! | Arrays | `newarr`, `ldlen`, `ldelem.*`, `stelem.*` | Array operations |
+//! | Conversion | `conv.i1`..`conv.u8`, `conv.r4`, `conv.r8` | Type conversions |
+//! | Control | `call`, `ret`, `throw`, `leave`, `endfinally` | Flow control |
+//!
+//! ## Method Body Format (ECMA-335 II.25.4)
+//!
+//! Method bodies are either **tiny** (1-byte header, max 64 bytes of code, no locals,
+//! no exception handling) or **fat** (12-byte header with max_stack, local var sig,
+//! code size, and optional exception handling sections).
 
 use alloc::string::String;
 use alloc::vec::Vec;

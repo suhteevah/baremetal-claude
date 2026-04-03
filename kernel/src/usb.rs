@@ -69,8 +69,15 @@ pub fn init() {
     crate::pci::enable_bus_master_for(pci_dev.bus, pci_dev.device, pci_dev.function);
 
     // Determine the MMIO base address from BAR0.
-    // xHCI uses memory-mapped I/O (bit 0 of BAR0 = 0).
-    // If BAR0 bits [2:1] == 0b10, it's a 64-bit BAR and we need BAR1 for the upper 32 bits.
+    //
+    // PCI BAR encoding (per PCI Local Bus Spec 3.0, section 6.2.5.1):
+    // - Bit 0: 0 = memory-mapped I/O, 1 = I/O port space
+    // - Bits [2:1] for memory BARs: 00 = 32-bit, 10 = 64-bit
+    //
+    // For 64-bit BARs, the physical address spans BAR0 (low 32 bits, mask off
+    // low 4 flag bits) and BAR1 (high 32 bits, at PCI config offset 0x14).
+    // xHCI controllers almost always use 64-bit memory BARs because their
+    // register spaces can be mapped above 4 GiB.
     let bar0_raw = pci_dev.bar0;
     if bar0_raw & 1 != 0 {
         log::error!("[usb] xHCI BAR0 is I/O-space ({:#x}), expected memory-mapped — aborting", bar0_raw);

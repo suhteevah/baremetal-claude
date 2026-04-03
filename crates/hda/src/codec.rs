@@ -2,7 +2,27 @@
 //!
 //! The Command Output Ring Buffer (CORB) sends 32-bit verbs to codecs.
 //! The Response Input Ring Buffer (RIRB) receives 64-bit responses.
-//! Per Intel HDA spec 1.0a, Sections 4.4 and 4.5.
+//!
+//! ## CORB/RIRB Protocol
+//!
+//! The CORB and RIRB are circular DMA buffers in system memory. The host writes
+//! 32-bit verb commands to the CORB and advances the CORB Write Pointer (CORBWP).
+//! The controller reads verbs from the CORB, sends them to the addressed codec,
+//! and writes the 64-bit response (32-bit response + 32-bit extended info) to the
+//! RIRB, advancing the RIRB Write Pointer (RIRBWP).
+//!
+//! The host polls RIRBWP to detect new responses. Each response includes a
+//! "solicited" flag (bit 4 of the extended response) to distinguish command
+//! responses from unsolicited events (e.g., jack detection).
+//!
+//! ## Verb Encoding
+//!
+//! HDA verbs are 32 bits: `codec_addr(4) | node_id(8) | verb_id | payload`.
+//! Two formats exist:
+//! - **Short verbs**: 12-bit verb + 8-bit payload (e.g., GET_PARAMETER, SET_PIN_CTRL)
+//! - **Long verbs**: 4-bit verb + 16-bit payload (e.g., SET_AMP_GAIN, SET_STREAM_FORMAT)
+//!
+//! Per Intel HDA spec 1.0a, Sections 4.4, 4.5, and 7.1.
 
 use alloc::vec;
 use alloc::vec::Vec;

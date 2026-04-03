@@ -238,23 +238,27 @@ pub fn load_elf_with_args(
     let stack_base: u64 = 0x0000_7FFF_FFFF_0000 - DEFAULT_STACK_SIZE as u64;
     let stack_top = stack_base + DEFAULT_STACK_SIZE as u64;
 
-    // Build initial stack contents per Linux x86_64 ABI:
-    //   [top]
-    //   random bytes (16 bytes for AT_RANDOM)
-    //   null-terminated strings for argv and envp
-    //   padding for alignment
-    //   AT_NULL (0, 0)
-    //   auxv entries...
-    //   NULL (end of envp)
-    //   envp[n-1] pointer
+    // Build initial stack contents per the Linux x86_64 ABI (System V AMD64 ABI
+    // supplement, section 3.4.1 "Initial Stack and Register State").
+    //
+    // The stack is laid out from high addresses (top) to low addresses (bottom):
+    //
+    //   [stack_top]
+    //   random bytes (16 bytes, pointed to by AT_RANDOM auxv entry)
+    //   null-terminated strings for argv and envp (the actual string data)
+    //   padding for 16-byte alignment
+    //   AT_NULL (0, 0)        -- sentinel ending the auxv array
+    //   auxv entries...       -- AT_PAGESZ, AT_PHDR, AT_ENTRY, AT_RANDOM, etc.
+    //   NULL (0)              -- sentinel ending envp pointer array
+    //   envp[n-1] pointer     -- each is a u64 pointing into the string area above
     //   ...
     //   envp[0] pointer
-    //   NULL (end of argv)
-    //   argv[n-1] pointer
+    //   NULL (0)              -- sentinel ending argv pointer array
+    //   argv[n-1] pointer     -- each is a u64 pointing into the string area above
     //   ...
     //   argv[0] pointer
-    //   argc
-    //   [bottom = initial RSP]
+    //   argc (u64)            -- number of command-line arguments
+    //   [initial RSP]         -- this is where we set RSP before jumping to entry
 
     let mut stack_data: Vec<u8> = Vec::new();
 

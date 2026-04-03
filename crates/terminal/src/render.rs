@@ -34,7 +34,12 @@ impl Color {
         Self { r, g, b }
     }
 
-    /// Pack into a BGR32 4-byte array (UEFI GOP pixel format: B, G, R, 0).
+    /// Pack into a BGR32 4-byte array (UEFI GOP pixel format: B, G, R, reserved).
+    ///
+    /// UEFI's `EFI_GRAPHICS_OUTPUT_BLT_PIXEL` uses Blue-Green-Red byte order
+    /// (opposite of the more common RGB).  The 4th byte is reserved/padding
+    /// and must be 0.  This is the native pixel format for all framebuffer
+    /// writes in ClaudioOS.
     #[inline(always)]
     pub const fn to_bgr32(self) -> [u8; 4] {
         [self.b, self.g, self.r, 0]

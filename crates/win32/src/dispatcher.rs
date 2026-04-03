@@ -310,6 +310,14 @@ fn register(table: &mut BTreeMap<String, FnPtr>, dll: &str, name: &str, ptr: FnP
 ///
 /// `dll_name` is e.g. "kernel32.dll", `func_name` is e.g. "CreateFileW".
 /// Returns the address of the Rust implementation, or None if not found.
+///
+/// This is the core of Win32 compatibility: the PE loader's import resolution
+/// calls this for every imported function, and the returned address is written
+/// into the PE's IAT (Import Address Table).  When the loaded PE code calls
+/// `CreateFileW`, it jumps to our Rust `kernel32::create_file_w` function.
+///
+/// Lookup is by normalized key: `"kernel32.dll!CreateFileW"` (case-insensitive
+/// on the DLL name).
 pub fn resolve_import(dll_name: &str, func_name: &str) -> Option<FnPtr> {
     let key = alloc::format!("{}!{}", dll_name.to_ascii_lowercase(), func_name);
     let table = DISPATCH.lock();

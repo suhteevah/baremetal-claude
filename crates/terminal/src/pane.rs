@@ -363,6 +363,14 @@ fn sgr_bright_color(idx: u16) -> Color {
 // ---------------------------------------------------------------------------
 
 /// Adapter that connects the `vte::Perform` callbacks to a [`Pane`].
+///
+/// The `vte` crate's `Parser` is a state machine that parses ANSI escape
+/// sequences byte-by-byte.  It calls methods on a `Perform` implementor
+/// to notify about printable characters, control codes (LF, CR, BS, TAB),
+/// and CSI sequences (cursor movement, colours, erase).
+///
+/// This adapter translates those callbacks into cell grid mutations on the
+/// pane, updating cursor position, cell content, and colour state.
 struct PanePerformer<'a> {
     pane: &'a mut Pane,
 }

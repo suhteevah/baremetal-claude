@@ -301,7 +301,12 @@ impl<D: BlockDevice> NtfsFs<D> {
 
     /// Perform a journaled write to the device.
     ///
-    /// Logs old data (for undo) and new data (for redo) before writing.
+    /// This implements write-ahead logging (WAL): before modifying any on-disk
+    /// data, we first read the old content (for undo/rollback on crash), then
+    /// log both old and new data to the journal. Only after the journal entry
+    /// is recorded do we perform the actual write. On mount after a crash,
+    /// uncommitted entries can be rolled back using the undo data, ensuring
+    /// filesystem consistency.
     fn journaled_write(&self, op: JournalOp, offset: u64, new_data: &[u8]) -> Result<(), NtfsError> {
         // Read old data for undo
         let mut old_data = vec![0u8; new_data.len()];
@@ -404,8 +409,16 @@ impl<D: BlockDevice> NtfsFs<D> {
         Ok(data_runs::decode_data_runs(run_bytes))
     }
 
-    /// Resolve the byte offset of a specific MFT entry number,
+    /// Resolve the byte offset of a specific MFT entry number on disk,
     /// accounting for non-contiguous MFT data runs.
+    ///
+    /// The $MFT file itself can be fragmented across the volume, described
+    /// by its own data runs. This function translates a logical MFT entry
+    /// number into a physical byte offset by:
+    ///   1. Computing the byte offset within the MFT's logical data stream
+    ///   2. Converting that to a VCN (Virtual Cluster Number)
+    ///   3. Looking up the VCN in the MFT's data run mapping to get an LCN
+    ///   4. Computing the final physical byte offset from LCN + offset
     fn resolve_mft_entry_offset(
         runs: &[DataRun],
         entry_number: u64,

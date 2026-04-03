@@ -232,9 +232,16 @@ impl MftEntry {
         log::trace!("[ntfs::mft] applying fixup: usa_offset=0x{:04X}, usa_count={}, check=0x{:04X}",
             usa_offset, usa_count, check_value);
 
-        // Apply fixups: for each sector, verify the last 2 bytes match check_value,
-        // then replace them with the stored original bytes
-        let sector_size = 512usize; // NTFS always uses 512-byte fixup sectors
+        // Apply fixups (Update Sequence Array): NTFS protects multi-sector
+        // records against torn writes by replacing the last 2 bytes of each
+        // 512-byte sector with a "check value" on write. The original bytes
+        // are saved in the USA. On read, we:
+        //   1. Verify that each sector's last 2 bytes match the check value
+        //      (if not, the record was partially written -- corrupt)
+        //   2. Replace them with the saved originals from the USA
+        // This always uses 512-byte sectors regardless of the physical disk
+        // sector size, as defined by the NTFS on-disk format specification.
+        let sector_size = 512usize;
         for i in 1..usa_count {
             let sector_end = i * sector_size;
             if sector_end > record_size {
@@ -446,18 +453,31 @@ impl<'a> Iterator for MftAttributeIter<'a> {
 }
 
 /// Extract the MFT entry number from an MFT reference (lower 48 bits).
+///
+/// NTFS MFT references are 8-byte values encoding both the entry number
+/// (bits 0-47) and a sequence number (bits 48-63). The sequence number is
+/// incremented each time an MFT entry is reused, allowing stale references
+/// to be detected (e.g., a directory entry pointing to a deleted-then-reused
+/// MFT slot).
 #[inline]
 pub fn mft_reference_number(reference: u64) -> u64 {
     reference & 0x0000_FFFF_FFFF_FFFF
 }
 
 /// Extract the sequence number from an MFT reference (upper 16 bits).
+///
+/// The sequence number is compared against the MFT entry's own sequence
+/// field to detect stale references. A mismatch means the entry was
+/// freed and reallocated since this reference was created.
 #[inline]
 pub fn mft_reference_sequence(reference: u64) -> u16 {
     (reference >> 48) as u16
 }
 
 /// Build an MFT reference from an entry number and sequence number.
+///
+/// Packs the 48-bit entry number and 16-bit sequence number into a single
+/// 64-bit value, matching NTFS's on-disk MFT reference format.
 #[inline]
 pub fn make_mft_reference(entry_number: u64, sequence: u16) -> u64 {
     (entry_number & 0x0000_FFFF_FFFF_FFFF) | ((sequence as u64) << 48)

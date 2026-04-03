@@ -48,7 +48,7 @@ impl<'a> CppParser<'a> {
 
     fn expect_ident(&mut self) -> Result<String, String> {
         match self.peek().clone() {
-            CppTokenKind::Ident(ref s) => { let s = s.clone(); self.advance(); Ok(s) }
+            CppTokenKind::Ident(s) => { let s = s.clone(); self.advance(); Ok(s) }
             _ => Err(alloc::format!("{}:{}: expected identifier, got {:?}",
                 self.span().line, self.span().col, self.peek())),
         }
@@ -419,7 +419,7 @@ impl<'a> CppParser<'a> {
 
     fn parse_stmt(&mut self) -> Result<CppStmt, String> {
         match self.peek() {
-            CppTokenKind::Ident(ref s) if s == "return" => {
+            CppTokenKind::Ident(s) if s == "return" => {
                 self.advance();
                 if *self.peek() == CppTokenKind::Semicolon {
                     self.advance();
@@ -434,7 +434,7 @@ impl<'a> CppParser<'a> {
                 let block = self.parse_block()?;
                 Ok(CppStmt::Block(block))
             }
-            CppTokenKind::Ident(ref s) if s == "if" => {
+            CppTokenKind::Ident(s) if s == "if" => {
                 self.advance();
                 self.expect(&CppTokenKind::LParen)?;
                 let cond = self.parse_expr()?;
@@ -447,7 +447,7 @@ impl<'a> CppParser<'a> {
                 };
                 Ok(CppStmt::If { cond, then_body, else_body })
             }
-            CppTokenKind::Ident(ref s) if s == "while" => {
+            CppTokenKind::Ident(s) if s == "while" => {
                 self.advance();
                 self.expect(&CppTokenKind::LParen)?;
                 let cond = self.parse_expr()?;
@@ -455,7 +455,7 @@ impl<'a> CppParser<'a> {
                 let body = Box::new(self.parse_stmt()?);
                 Ok(CppStmt::While { cond, body })
             }
-            CppTokenKind::Ident(ref s) if s == "for" => {
+            CppTokenKind::Ident(s) if s == "for" => {
                 self.advance();
                 self.expect(&CppTokenKind::LParen)?;
                 // Simplified: just parse 3-clause for
@@ -517,12 +517,12 @@ impl<'a> CppParser<'a> {
                     Ok(CppStmt::Delete(expr))
                 }
             }
-            CppTokenKind::Ident(ref s) if s == "break" => {
+            CppTokenKind::Ident(s) if s == "break" => {
                 self.advance();
                 self.eat(&CppTokenKind::Semicolon);
                 Ok(CppStmt::Break)
             }
-            CppTokenKind::Ident(ref s) if s == "continue" => {
+            CppTokenKind::Ident(s) if s == "continue" => {
                 self.advance();
                 self.eat(&CppTokenKind::Semicolon);
                 Ok(CppStmt::Continue)

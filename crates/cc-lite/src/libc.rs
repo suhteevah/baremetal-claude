@@ -99,13 +99,32 @@ pub fn builtins() -> Vec<LibcFunc> {
 
 /// Format a printf-style format string with arguments.
 ///
-/// Supports: %d, %i, %u, %x, %X, %o, %s, %c, %p, %f, %e, %g, %ld, %lld, %lu, %llu, %zu, %%
+/// Implements a subset of the C `printf` format string specification:
 ///
-/// Arguments are passed as raw i64 values (as they would be in registers).
+/// | Specifier | Description                  | Argument type |
+/// |-----------|------------------------------|---------------|
+/// | `%d`, `%i`| Signed decimal integer       | `i64`         |
+/// | `%u`      | Unsigned decimal integer      | `u64`         |
+/// | `%x`      | Unsigned hex (lowercase)      | `u64`         |
+/// | `%X`      | Unsigned hex (uppercase)      | `u64`         |
+/// | `%o`      | Unsigned octal                | `u64`         |
+/// | `%s`      | String pointer (placeholder)  | ptr as `i64`  |
+/// | `%c`      | Character                     | `i64` -> `u8` |
+/// | `%p`      | Pointer (hex with `0x` prefix)| `u64`         |
+/// | `%f`,`%e`,`%g`| Floating-point (6 decimals)| f64 bits as `i64` |
+/// | `%%`      | Literal percent sign          | (none)        |
+///
+/// **Flags**: `0` (zero-pad), `-` (left-align)
+/// **Width**: Numeric field width (e.g., `%05d`)
+/// **Length modifiers**: `l`, `ll`, `z`, `h` (parsed but width/sign behavior simplified)
+///
+/// Arguments are passed as raw `i64` values, matching how they would appear
+/// in registers on the System V AMD64 ABI. For floats, the bits of the `f64`
+/// are reinterpreted via `f64::from_bits`.
 pub fn format_printf(fmt: &[u8], args: &[i64]) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut i = 0;
-    let mut arg_idx = 0;
+    let mut i = 0;        // cursor into the format string
+    let mut arg_idx = 0;  // index into the variadic arguments
 
     while i < fmt.len() {
         if fmt[i] == b'%' {
@@ -114,7 +133,7 @@ pub fn format_printf(fmt: &[u8], args: &[i64]) -> Vec<u8> {
                 break;
             }
 
-            // Flags
+            // Parse optional flags: '0' for zero-padding, '-' for left-align
             let mut zero_pad = false;
             let mut left_align = false;
             let mut width: usize = 0;
@@ -227,6 +246,8 @@ pub fn format_printf(fmt: &[u8], args: &[i64]) -> Vec<u8> {
     out
 }
 
+/// Format a signed integer in the given base as ASCII bytes.
+/// Handles negative numbers by prepending '-' and converting to unsigned.
 fn format_int(val: i64, base: u64, _upper: bool) -> Vec<u8> {
     if val == 0 {
         return alloc::vec![b'0'];
@@ -246,6 +267,8 @@ fn format_int(val: i64, base: u64, _upper: bool) -> Vec<u8> {
     buf
 }
 
+/// Format an unsigned integer in the given base (8, 10, or 16) as ASCII bytes.
+/// When `upper` is true, hex digits A-F are uppercase.
 fn format_uint(val: u64, base: u64, upper: bool) -> Vec<u8> {
     if val == 0 {
         return alloc::vec![b'0'];
@@ -268,8 +291,10 @@ fn format_uint(val: u64, base: u64, upper: bool) -> Vec<u8> {
     buf
 }
 
+/// Simple float formatting to 6 decimal places (matching printf's default precision).
+/// Splits the value into integer and fractional parts, formats each as decimal,
+/// and zero-pads the fractional part to exactly 6 digits.
 fn format_float(val: f64) -> Vec<u8> {
-    // Simple float formatting (6 decimal places)
     let mut buf = Vec::new();
     if val < 0.0 {
         buf.push(b'-');
@@ -290,6 +315,9 @@ fn format_float(val: f64) -> Vec<u8> {
     buf
 }
 
+/// Append formatted bytes `s` to `out`, applying width/padding/alignment.
+/// If `width > s.len()`, pads with spaces (or '0' if `zero_pad`) on the
+/// appropriate side (left for right-align, right for left-align).
 fn pad_and_push(out: &mut Vec<u8>, s: &[u8], width: usize, zero_pad: bool, left_align: bool) {
     if width > s.len() && !left_align {
         let pad = if zero_pad { b'0' } else { b' ' };
