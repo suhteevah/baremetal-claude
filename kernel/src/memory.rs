@@ -4,6 +4,7 @@
 //! and initializes linked_list_allocator as the global allocator.
 
 use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
+use core::sync::atomic::{AtomicBool, Ordering};
 use linked_list_allocator::LockedHeap;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
@@ -15,6 +16,10 @@ use x86_64::{PhysAddr, VirtAddr};
 /// (2560x1600x4x2 = 32 MiB at high res), and the 4 MiB kernel stack.
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 48 * 1024 * 1024; // 48 MiB (double-buffered 2560x1600 = ~32 MiB + kernel stack + buffers)
+
+/// Set to `true` once the heap allocator has been initialized.
+/// Logger checks this to avoid `format!` allocations before the heap exists.
+pub static HEAP_READY: AtomicBool = AtomicBool::new(false);
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -61,6 +66,7 @@ pub fn init(phys_mem_offset: u64, memory_regions: &'static MemoryRegions) {
     unsafe {
         ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE);
     }
+    HEAP_READY.store(true, Ordering::Release);
 
     log::info!(
         "[mem] heap initialized at {:#x}, size {} KiB",

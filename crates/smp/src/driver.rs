@@ -130,6 +130,8 @@ pub struct SmpController {
     ioapic_manager: IoApicManager,
     /// AP trampoline manager.
     trampoline: ApTrampoline,
+    /// Physical-to-virtual address offset (0 for identity-mapped).
+    phys_offset: u64,
     /// Number of APs (not including BSP).
     ap_count: u32,
     /// Total number of active cores (BSP + APs).
@@ -145,20 +147,27 @@ pub struct SmpController {
 impl SmpController {
     /// Create a new SMP controller.
     ///
-    /// `apic_base_vaddr` — virtual address of the local APIC MMIO registers
-    /// (typically 0xFEE0_0000 identity-mapped).
-    pub fn new(apic_base_vaddr: u64) -> Self {
-        log::info!("smp: creating SmpController, APIC base={:#X}", apic_base_vaddr);
+    /// `apic_base_vaddr` — virtual address of the local APIC MMIO registers.
+    /// `phys_offset` — offset added to physical addresses to get virtual addresses.
+    ///   Pass 0 for identity-mapped memory.
+    pub fn new(apic_base_vaddr: u64, phys_offset: u64) -> Self {
+        log::info!("smp: creating SmpController, APIC base={:#X}, phys_offset={:#X}",
+            apic_base_vaddr, phys_offset);
 
         let local_apic = LocalApic::new(apic_base_vaddr);
         let bsp_apic_id = local_apic.id();
         log::info!("smp: BSP APIC ID = {}", bsp_apic_id);
 
+        // Trampoline code lives at a fixed physical address; translate to virtual
+        let trampoline_vaddr = TRAMPOLINE_PHYS + phys_offset;
+        log::info!("smp: trampoline phys={:#X} virt={:#X}", TRAMPOLINE_PHYS, trampoline_vaddr);
+
         Self {
             bsp_apic_id,
             local_apic,
             ioapic_manager: IoApicManager::new(),
-            trampoline: ApTrampoline::new(TRAMPOLINE_PHYS),
+            trampoline: ApTrampoline::new(trampoline_vaddr),
+            phys_offset,
             ap_count: 0,
             total_cores: AtomicU32::new(1), // BSP counts as 1
             madt_info: None,
@@ -255,13 +264,16 @@ impl SmpController {
         log::info!("smp: configuring {} I/O APICs", madt_info.io_apics.len());
 
         for io_apic_info in &madt_info.io_apics {
+            // Translate I/O APIC MMIO address from physical to virtual
+            let ioapic_vaddr = io_apic_info.address + self.phys_offset;
             log::info!(
-                "smp: I/O APIC id={}, addr={:#X}, gsi_base={}",
+                "smp: I/O APIC id={}, phys={:#X}, virt={:#X}, gsi_base={}",
                 io_apic_info.id,
                 io_apic_info.address,
+                ioapic_vaddr,
                 io_apic_info.gsi_base
             );
-            let ioapic = IoApic::new(io_apic_info.address, io_apic_info.gsi_base);
+            let ioapic = IoApic::new(ioapic_vaddr, io_apic_info.gsi_base);
             // Mask all entries initially
             ioapic.mask_all();
             self.ioapic_manager.add(ioapic);

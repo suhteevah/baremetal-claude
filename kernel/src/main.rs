@@ -1054,62 +1054,9 @@ async fn main_async() {
                                 log::info!("[oauth] SAVE_CONV:{}", conv_id);
                             }
 
-                            // Step 2: Send a message
-                            log::info!("[claude.ai] sending test message...");
-                            let test_model = model_select::claude_ai_model_id();
-                            let msg_body = alloc::format!(
-                                r#"{{"prompt":"Say hello from bare metal! Keep it short.","timezone":"America/New_York","attachments":[],"files":[],"model":"{}","rendering_mode":"messages"}}"#,
-                                test_model
-                            );
-                            let msg_path = alloc::format!("/api/organizations/{}/chat_conversations/{}/completion", org_id, conv_id);
-                            let msg_req = claudio_net::http::HttpRequest::post(
-                                "claude.ai", &msg_path, msg_body.into_bytes(),
-                            )
-                            .header("Content-Type", "application/json")
-                            .header("Cookie", session_cookie)
-                            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
-                            .header("Accept", "text/event-stream")
-                            .header("Origin", "https://claude.ai")
-                            .header("Referer", "https://claude.ai/new")
-                            .header("Connection", "close");
-                            let seed2 = interrupts::tick_count();
-                            match claudio_net::https_request(
-                                &mut stack, "claude.ai", 443, &msg_req.to_bytes(), now, seed2,
-                            ) {
-                                Ok(resp) => {
-                                    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-                                    log::info!("[claude.ai] response: {} bytes", resp.len());
-
-                                    // Parse SSE events for text deltas
-                                    let mut full_text = alloc::string::String::new();
-                                    for line in resp_str.lines() {
-                                        if let Some(data) = line.strip_prefix("data: ") {
-                                            if data.contains("\"text_delta\"") {
-                                                if let Some(s) = data.find("\"text\":\"") {
-                                                    let rest = &data[s + 8..];
-                                                    if let Some(e) = rest.find('"') {
-                                                        full_text.push_str(&rest[..e]);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if !full_text.is_empty() {
-                                        log::info!("[claude.ai] ============================================");
-                                        log::info!("[claude.ai]   CLAUDE SAYS: {}", full_text);
-                                        log::info!("[claude.ai] ============================================");
-                                        log::info!("[claude.ai]   !! CLAUDE.AI MAX MODE WORKING !!");
-                                    } else {
-                                        // Show raw response for debugging
-                                        if let Some(pos) = resp_str.find("\r\n\r\n") {
-                                            let body = &resp_str[pos + 4..resp_str.len().min(pos + 500)];
-                                            log::info!("[claude.ai] raw: {}", body);
-                                        }
-                                    }
-                                }
-                                Err(e) => { log::error!("[claude.ai] completion failed: {:?}", e); }
-                            }
+                            // Skip the boot test message — it consumes a rate-limit
+                            // token and the agent session needs that capacity.
+                            log::info!("[claude.ai] skipping boot test (preserving rate limit for agent)");
 
                             // Set auth mode for the agent loop / dashboard
                             unsafe {

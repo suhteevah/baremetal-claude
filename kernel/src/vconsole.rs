@@ -356,17 +356,26 @@ pub fn process_scancode(scancode: u8) -> Option<usize> {
 }
 
 /// Check if Ctrl+Shift is currently held (for clipboard shortcuts).
+///
+/// Must disable interrupts while holding MODIFIERS to prevent deadlock
+/// with the keyboard ISR (which also locks MODIFIERS via process_scancode).
 pub fn ctrl_shift_held() -> bool {
-    let mods = MODIFIERS.lock();
-    mods.ctrl_held && mods.shift_held
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mods = MODIFIERS.lock();
+        mods.ctrl_held && mods.shift_held
+    })
 }
 
 /// Check if Ctrl is currently held.
 pub fn ctrl_held() -> bool {
-    MODIFIERS.lock().ctrl_held
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        MODIFIERS.lock().ctrl_held
+    })
 }
 
 /// Check if Shift is currently held.
 pub fn shift_held() -> bool {
-    MODIFIERS.lock().shift_held
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        MODIFIERS.lock().shift_held
+    })
 }

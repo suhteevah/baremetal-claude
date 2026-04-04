@@ -29,8 +29,13 @@ pub enum DnsError {
     NotFound,
 }
 
-/// QEMU SLIRP DNS is slow. At ~18 Hz PIT rate, 100k polls ≈ ~90 seconds.
-const DNS_TIMEOUT_POLLS: usize = 100_000;
+/// DNS timeout in milliseconds. QEMU SLIRP DNS typically responds in ~100-500ms.
+/// Keep this short to avoid blocking the executor (DNS resolve is synchronous).
+const DNS_TIMEOUT_MS: i64 = 10_000; // 10 seconds
+
+/// Maximum poll iterations as a safety valve (prevents infinite loop if
+/// the timestamp source is broken). At ~18 Hz PIT, 10M iterations ≈ minutes.
+const DNS_MAX_POLLS: usize = 10_000_000;
 
 /// Resolve a hostname to an IPv4 address.
 ///
@@ -82,10 +87,22 @@ where
     };
 
     // Poll until we get an answer or time out.
+    // Use a wall-clock timeout so this works regardless of optimization level.
     let mut result = Err(DnsError::Timeout);
+    let start = now();
+    let deadline_ms = start.total_millis() + DNS_TIMEOUT_MS;
+    log::info!("[dns] query start: {}ms, deadline: {}ms", start.total_millis(), deadline_ms);
 
-    for _ in 0..DNS_TIMEOUT_POLLS {
+    for poll_count in 0..DNS_MAX_POLLS {
         let ts = now();
+
+        // Time-based timeout (primary)
+        if ts.total_millis() >= deadline_ms {
+            log::warn!("[dns] query for {} timed out after {}ms ({} polls)",
+                name, DNS_TIMEOUT_MS, poll_count);
+            break;
+        }
+
         stack.iface.poll(ts, &mut stack.device, &mut stack.sockets);
 
         let socket = stack.sockets.get_mut::<DnsSocket>(dns_handle);
@@ -94,7 +111,7 @@ where
                 // Find the first IPv4 address.
                 for addr in addrs.iter() {
                     if let IpAddress::Ipv4(v4) = addr {
-                        log::info!("[dns] resolved {} -> {}", name, v4);
+                        log::info!("[dns] resolved {} -> {} ({} polls)", name, v4, poll_count);
                         result = Ok(*v4);
                         break;
                     }
@@ -106,7 +123,8 @@ where
                 break;
             }
             Err(dns::GetQueryResultError::Pending) => {
-                // Still waiting — continue polling.
+                // Still waiting — yield CPU briefly to let the NIC process frames.
+                core::hint::spin_loop();
                 continue;
             }
             Err(dns::GetQueryResultError::Failed) => {

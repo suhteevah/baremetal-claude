@@ -195,20 +195,16 @@ fn find_acpi_tables(rsdp_addr: Option<u64>) -> Result<AcpiTables, AcpiError> {
         let mapped_addr = addr + phys_offset;
         log::info!("[acpi] RSDP mapped address: {:#X} (phys={:#X} + offset={:#X})",
             mapped_addr, addr, phys_offset);
-        unsafe { claudio_acpi::init_from_rsdp_addr(mapped_addr) }
+        unsafe { claudio_acpi::init_from_rsdp_addr(mapped_addr, phys_offset) }
     } else {
         log::warn!("[acpi] no RSDP address from bootloader, searching BIOS memory regions");
         // On BIOS systems or if the bootloader didn't provide RSDP,
         // search the standard EBDA and BIOS ROM areas.
+        // The phys_offset is passed so the ACPI crate can translate addresses
+        // from ACPI structures (which are physical) to virtual addresses.
         let phys_offset = crate::PHYS_MEM_OFFSET.load(Ordering::Relaxed);
         log::info!("[acpi] physical memory offset: {:#X}", phys_offset);
-        // The BIOS memory regions need the physical offset applied too.
-        // However, the ACPI crate's search_bios() reads from raw physical addresses.
-        // Since we have a physical memory mapping, the addresses 0xE0000-0xFFFFF
-        // are mapped at phys_offset + 0xE0000.
-        // We'll try the direct BIOS search — the memory is identity-mapped by the
-        // bootloader's physical memory mapping.
-        unsafe { claudio_acpi::init_from_bios_search() }
+        unsafe { claudio_acpi::init_from_bios_search(phys_offset) }
     }
 }
 
@@ -271,7 +267,10 @@ fn parse_fadt(tables: &AcpiTables, info: &mut AcpiInfo) {
         }
     };
 
-    let dsdt_address = fadt.dsdt_address();
+    let dsdt_phys = fadt.dsdt_address();
+    // Translate DSDT physical address to virtual
+    let phys_offset = crate::PHYS_MEM_OFFSET.load(Ordering::Relaxed);
+    let dsdt_address = dsdt_phys.map(|a| a + phys_offset);
 
     info.fadt_info = Some(FadtInfo {
         sci_interrupt: fadt.sci_interrupt,
@@ -280,7 +279,7 @@ fn parse_fadt(tables: &AcpiTables, info: &mut AcpiInfo) {
         pm_timer_port: fadt.pm_timer_port(),
         pm_timer_32bit: fadt.pm_timer_is_32bit(),
         reset_supported: fadt.reset_supported(),
-        dsdt_address,
+        dsdt_address: dsdt_phys,
     });
 
     // Initialize the power manager for shutdown/reboot
@@ -324,13 +323,19 @@ fn parse_hpet(tables: &AcpiTables, info: &mut AcpiInfo) {
     };
 
     log::info!("[acpi] parsing HPET at {:#X}", hpet_addr);
-    let hpet = match unsafe { Hpet::from_address(hpet_addr) } {
+    let mut hpet = match unsafe { Hpet::from_address(hpet_addr) } {
         Ok(h) => h,
         Err(e) => {
             log::error!("[acpi] failed to parse HPET: {:?}", e);
             return;
         }
     };
+
+    // Translate HPET MMIO base from physical to virtual address
+    let phys_offset = crate::PHYS_MEM_OFFSET.load(Ordering::Relaxed);
+    let hpet_phys_base = hpet.base_address.address;
+    hpet.base_address.address += phys_offset;
+    log::info!("[acpi] HPET MMIO: phys {:#X} -> virt {:#X}", hpet_phys_base, hpet.base_address.address);
 
     // Read the HPET period from hardware registers
     let period_fs = unsafe { hpet.read_period_fs() };
@@ -348,7 +353,7 @@ fn parse_hpet(tables: &AcpiTables, info: &mut AcpiInfo) {
     log::info!("[acpi] HPET counter running: initial value={}", counter_val);
 
     info.hpet_info = Some(HpetInfo {
-        mmio_base: hpet.mmio_base(),
+        mmio_base: hpet_phys_base,
         num_comparators: hpet.num_comparators(),
         counter_64bit: hpet.counter_64bit,
         legacy_replacement: hpet.legacy_replacement,

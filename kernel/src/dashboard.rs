@@ -32,6 +32,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -171,11 +172,121 @@ struct ShellPaneState {
 }
 
 impl ShellPaneState {
-    fn new(id: usize, pane_id: usize) -> Self {
+    fn new(id: usize, pane_id: usize, stack: *mut NetworkStack, now: fn() -> Instant) -> Self {
+        let mut shell = Shell::new();
+        shell.set_ai_callback(Box::new(ClaudeAiShellCallback { stack: SendStackPtr(stack), now }));
         Self {
-            shell: Shell::new(),
+            shell,
             pane_id,
             id,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Claude AI callback for shell natural language processing
+// ---------------------------------------------------------------------------
+
+/// Implements `AiShellCallback` by sending queries to claude.ai via the
+/// same streaming path the agent panes use. Returns Claude's response as
+/// an `AiProposal` with the explanation text (no commands — the shell
+/// displays the response directly for natural language queries).
+struct SendStackPtr(*mut NetworkStack);
+unsafe impl Send for SendStackPtr {}
+unsafe impl Sync for SendStackPtr {}
+
+struct ClaudeAiShellCallback {
+    stack: SendStackPtr,
+    now: fn() -> Instant,
+}
+
+impl claudio_shell::ai::AiShellCallback for ClaudeAiShellCallback {
+    fn is_available(&self) -> bool {
+        crate::agent_loop::auth_mode().is_some()
+    }
+
+    fn interpret(
+        &mut self,
+        query: &str,
+        _context: &claudio_shell::ai::AiContext,
+    ) -> Result<claudio_shell::ai::AiProposal, String> {
+        use crate::agent_loop::{auth_mode, AuthMode};
+
+        let auth = auth_mode().ok_or("No auth mode configured")?;
+        let (session_cookie, org_id, conv_id) = match auth {
+            AuthMode::ClaudeAi { session_cookie, org_id, conv_id } => {
+                (session_cookie, org_id, conv_id)
+            }
+            _ => return Err(String::from("Shell AI requires claude.ai auth mode")),
+        };
+
+        let stack = unsafe { &mut *self.stack.0 };
+        let now = self.now;
+        let selected_model = crate::model_select::claude_ai_model_id();
+
+        // Build claude.ai request with the shell query as the prompt.
+        let claude_body = format!(
+            r#"{{"prompt":"{}","timezone":"America/New_York","personalized_styles":[{{"type":"default","key":"Default","name":"Normal","nameKey":"normal_style_name","prompt":"Normal\n","summary":"Default responses from Claude","summaryKey":"normal_style_summary","isDefault":true}}],"locale":"en-US","model":"{}","tools":[],"attachments":[],"files":[]}}"#,
+            query.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
+            selected_model
+        );
+
+        let path = format!(
+            "/api/organizations/{}/chat_conversations/{}/completion",
+            org_id, conv_id
+        );
+
+        let http_req = claudio_net::http::HttpRequest::post(
+            "claude.ai", &path, claude_body.into_bytes(),
+        )
+        .header("Content-Type", "application/json")
+        .header("Cookie", &session_cookie)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+        .header("Accept", "text/event-stream")
+        .header("Origin", "https://claude.ai")
+        .header("Referer", &format!("https://claude.ai/chat/{}", conv_id))
+        .header("anthropic-client-platform", "web_claude_ai")
+        .header("anthropic-device-id", "claudio-os-bare-metal")
+        .header("Connection", "close");
+
+        let req_bytes = http_req.to_bytes();
+
+        let seed = crate::interrupts::tick_count();
+        let ip = claudio_net::dns::resolve(stack, "claude.ai", || now())
+            .map_err(|e| format!("DNS failed: {:?}", e))?;
+
+        let mut tls = claudio_net::TlsStream::connect(stack, ip, 443, "claude.ai", now, seed)
+            .map_err(|e| format!("TLS connect failed: {:?}", e))?;
+
+        tls.send(stack, &req_bytes, now)
+            .map_err(|e| format!("TLS send failed: {:?}", e))?;
+
+        let mut response_text = String::new();
+        let result = crate::streaming::stream_sse_response(&mut tls, stack, now, |chunk| {
+            response_text.push_str(chunk);
+        });
+        tls.close(stack);
+
+        match result {
+            Ok(sr) => {
+                Ok(claudio_shell::ai::AiProposal {
+                    explanation: sr.text,
+                    commands: Vec::new(),
+                    confirmed: false,
+                })
+            }
+            Err(e) => {
+                if !response_text.is_empty() {
+                    // Got partial response before error — return what we have.
+                    Ok(claudio_shell::ai::AiProposal {
+                        explanation: response_text,
+                        commands: Vec::new(),
+                        confirmed: false,
+                    })
+                } else {
+                    Err(format!("claude.ai request failed: {}", e))
+                }
+            }
         }
     }
 }
@@ -467,7 +578,8 @@ pub async fn run_dashboard(
 
     // Create the first pane as a shell session.
     let first_pane_id = layout.focused_pane_id();
-    let shell_state = ShellPaneState::new(next_shell_id, first_pane_id);
+    let stack_send = SendStackPtr(stack as *mut NetworkStack);
+    let shell_state = ShellPaneState::new(next_shell_id, first_pane_id, stack_send.0, now);
     next_shell_id += 1;
     pane_types.push(PaneType::Shell(shell_state));
     input_buffers.push(InputBuffer::new(first_pane_id));
@@ -542,6 +654,8 @@ pub async fn run_dashboard(
                             &mut pane_types,
                             &mut input_buffers,
                             &mut next_shell_id,
+                            stack_send.0,
+                            now,
                         );
                         // Structural change — do a full render.
                         let focused_pane_id = layout.focused_pane_id();
@@ -765,6 +879,8 @@ fn handle_prefix_command(
     pane_types: &mut Vec<PaneType>,
     input_buffers: &mut Vec<InputBuffer>,
     next_shell_id: &mut usize,
+    stack_ptr: *mut NetworkStack,
+    now: fn() -> Instant,
 ) {
     match c {
         // Split horizontal: Ctrl+B then "
@@ -839,7 +955,7 @@ fn handle_prefix_command(
             log::info!("[dashboard] new shell pane (split horizontal)");
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
-            let shell_state = ShellPaneState::new(*next_shell_id, new_pane_id);
+            let shell_state = ShellPaneState::new(*next_shell_id, new_pane_id, stack_ptr, now);
             *next_shell_id += 1;
             pane_types.push(PaneType::Shell(shell_state));
             input_buffers.push(InputBuffer::new(new_pane_id));

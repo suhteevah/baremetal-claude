@@ -15,9 +15,12 @@ impl log::Log for KernelLogger {
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
             crate::serial_println!("[{:5}] {}", record.level(), record.args());
-            // Also push into the kernel log ring buffer for vconsole 6.
-            let line = format!("[{:5}] {}", record.level(), record.args());
-            crate::vconsole::push_kernel_log(&line);
+            // Only push to the kernel log ring buffer once the heap is available,
+            // because format!() allocates.
+            if crate::memory::HEAP_READY.load(core::sync::atomic::Ordering::Acquire) {
+                let line = format!("[{:5}] {}", record.level(), record.args());
+                crate::vconsole::push_kernel_log(&line);
+            }
         }
     }
 

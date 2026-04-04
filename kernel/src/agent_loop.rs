@@ -273,10 +273,31 @@ pub fn run_tool_loop_streaming(
             }
         };
 
-        // Try streaming path first.
-        let stream_result = send_streaming(stack, api_key, &body_bytes, now, |chunk| {
-            on_token(chunk);
-        });
+        // Try streaming path first, with retry on rate limit (HTTP 429).
+        const MAX_RETRIES: usize = 3;
+        const RETRY_DELAY_TICKS: u64 = 1100; // ~60 seconds at 18.2 Hz PIT
+
+        let mut stream_result = Err(alloc::string::String::from("not attempted"));
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                log::info!("[agent_loop] retry {}/{} after rate limit — waiting ~60s...", attempt, MAX_RETRIES);
+                on_token("\n[Rate limited — retrying in ~60 seconds...]\n");
+                let wait_until = crate::interrupts::tick_count() + RETRY_DELAY_TICKS;
+                while crate::interrupts::tick_count() < wait_until {
+                    core::hint::spin_loop();
+                }
+            }
+            stream_result = send_streaming(stack, api_key, &body_bytes, now, |chunk| {
+                on_token(chunk);
+            });
+            match &stream_result {
+                Err(e) if e.contains("429") || e.contains("rate_limit") || e.contains("Rate limit") => {
+                    log::warn!("[agent_loop] rate limited (attempt {})", attempt + 1);
+                    continue;
+                }
+                _ => break,
+            }
+        }
 
         match stream_result {
             Ok(result) => {
@@ -834,7 +855,7 @@ fn send_via_claude_ai(
 
     let selected_model = crate::model_select::claude_ai_model_id();
     let claude_body = alloc::format!(
-        r#"{{"prompt":"{}","timezone":"America/New_York","attachments":[],"files":[],"model":"{}","rendering_mode":"messages"}}"#,
+        r#"{{"prompt":"{}","timezone":"America/New_York","personalized_styles":[{{"type":"default","key":"Default","name":"Normal","nameKey":"normal_style_name","prompt":"Normal\n","summary":"Default responses from Claude","summaryKey":"normal_style_summary","isDefault":true}}],"locale":"en-US","model":"{}","tools":[],"attachments":[],"files":[]}}"#,
         prompt.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
         selected_model
     );
@@ -849,10 +870,12 @@ fn send_via_claude_ai(
     )
     .header("Content-Type", "application/json")
     .header("Cookie", session_cookie)
-    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
+    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
     .header("Accept", "text/event-stream")
     .header("Origin", "https://claude.ai")
-    .header("Referer", "https://claude.ai/new")
+    .header("Referer", &alloc::format!("https://claude.ai/chat/{}", conv_id))
+    .header("anthropic-client-platform", "web_claude_ai")
+    .header("anthropic-device-id", "claudio-os-bare-metal")
     .header("Connection", "close");
 
     let req_bytes = http_req.to_bytes();
@@ -984,7 +1007,7 @@ fn send_streaming_claude_ai(
 
     let selected_model = crate::model_select::claude_ai_model_id();
     let claude_body = alloc::format!(
-        r#"{{"prompt":"{}","timezone":"America/New_York","attachments":[],"files":[],"model":"{}","rendering_mode":"messages"}}"#,
+        r#"{{"prompt":"{}","timezone":"America/New_York","personalized_styles":[{{"type":"default","key":"Default","name":"Normal","nameKey":"normal_style_name","prompt":"Normal\n","summary":"Default responses from Claude","summaryKey":"normal_style_summary","isDefault":true}}],"locale":"en-US","model":"{}","tools":[],"attachments":[],"files":[]}}"#,
         prompt.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
         selected_model
     );
@@ -994,15 +1017,19 @@ fn send_streaming_claude_ai(
         org_id, conv_id
     );
 
+    // Match exact browser headers — captured from Playwright/Chrome.
+    // Missing `anthropic-client-platform` causes stricter rate limits.
     let http_req = claudio_net::http::HttpRequest::post(
         "claude.ai", &path, claude_body.into_bytes(),
     )
     .header("Content-Type", "application/json")
     .header("Cookie", session_cookie)
-    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
+    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
     .header("Accept", "text/event-stream")
     .header("Origin", "https://claude.ai")
-    .header("Referer", "https://claude.ai/new")
+    .header("Referer", &alloc::format!("https://claude.ai/chat/{}", conv_id))
+    .header("anthropic-client-platform", "web_claude_ai")
+    .header("anthropic-device-id", "claudio-os-bare-metal")
     .header("Connection", "close");
 
     let req_bytes = http_req.to_bytes();

@@ -107,7 +107,14 @@ panic = "abort"
 panic = "abort"
 lto = true
 codegen-units = 1
-opt-level = "z"
+opt-level = "s"
+strip = "debuginfo"
+debug = 1
+
+# Proc macros (serde_derive etc.) compile for the host — don't inject
+# debug flags that need msvcrt.lib on Windows.
+[profile.release.build-override]
+debug = false
 strip = true
 
 

@@ -66,19 +66,22 @@ pub fn init() {
     // ── Step 2: Ensure trampoline memory is accessible ──────────────────
     //
     // The AP trampoline must reside at physical address 0x8000 (below 1 MiB).
-    // With the bootloader's identity mapping of low memory, this should
-    // already be accessible. Verify with a test write.
-    log::info!("[smp] verifying trampoline page at phys {:#X}",
-        claudio_smp::trampoline::TRAMPOLINE_PHYS);
+    // The bootloader maps all physical memory at phys_offset, so the virtual
+    // address is phys_offset + 0x8000. Verify with a test write.
+    let phys_offset = crate::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+    let trampoline_phys = claudio_smp::trampoline::TRAMPOLINE_PHYS;
+    let trampoline_virt = trampoline_phys as u64 + phys_offset;
+    log::info!("[smp] verifying trampoline page at phys {:#X} (virt {:#X})",
+        trampoline_phys, trampoline_virt);
     unsafe {
-        let trampoline_ptr = claudio_smp::trampoline::TRAMPOLINE_PHYS as *mut u8;
+        let trampoline_ptr = trampoline_virt as *mut u8;
         // Verify the page is writable by doing a test write
         core::ptr::write_volatile(trampoline_ptr, 0xAA);
         let readback = core::ptr::read_volatile(trampoline_ptr);
         if readback != 0xAA {
             log::error!(
                 "[smp] trampoline page at {:#X} not writable (read {:#X}) — SMP disabled",
-                claudio_smp::trampoline::TRAMPOLINE_PHYS,
+                trampoline_virt,
                 readback,
             );
             return;
@@ -88,17 +91,34 @@ pub fn init() {
         log::info!("[smp] trampoline page verified writable");
     }
 
-    // ── Step 3: Disable legacy 8259 PIC ─────────────────────────────────
+    // ── Step 3: Check if we have APs to boot ────────────────────────────
     //
-    // The PIC was initialized in interrupts::init() for single-core boot.
-    // Now that we're switching to APIC mode, mask all PIC IRQs to prevent
-    // conflicts. The I/O APIC will take over interrupt routing.
+    // On a single-CPU system, skip APIC reconfiguration entirely. Enabling
+    // the local APIC changes how PIC interrupts are delivered (they must go
+    // through LINT0), and the I/O APIC masks all IRQs by default. This would
+    // kill keyboard (IRQ1), timer (IRQ0), and NIC (IRQ11) interrupts that
+    // are currently working via the legacy PIC + IDT.
+    let enabled_ap_count = madt_info.local_apics.iter()
+        .filter(|la| la.enabled && la.apic_id != 0)
+        .count();
+    if enabled_ap_count == 0 {
+        log::info!("[smp] single-CPU system — skipping APIC reconfiguration");
+        log::info!("[smp] legacy PIC remains active for IRQ routing");
+        log::info!("[smp] === SMP INITIALIZATION COMPLETE (single-core) ===");
+        return;
+    }
+
+    // ── Step 4: Multi-CPU path: switch to APIC mode ──────────────────
+
+    // Disable legacy PIC — I/O APIC takes over interrupt routing
     disable_legacy_pic();
 
-    // ── Step 4: Create SMP controller and boot all APs ──────────────────
-
-    let apic_base = madt_info.local_apic_addr;
-    let mut controller = SmpController::new(apic_base);
+    // APIC MMIO addresses from the MADT are physical — translate to virtual
+    // by adding phys_offset. The SmpController does the same for I/O APICs
+    // and the trampoline page internally.
+    let apic_base_virt = madt_info.local_apic_addr + phys_offset;
+    log::info!("[smp] LAPIC: phys {:#X} -> virt {:#X}", madt_info.local_apic_addr, apic_base_virt);
+    let mut controller = SmpController::new(apic_base_virt, phys_offset);
 
     // Run the full SMP init: BSP APIC setup, I/O APIC config, AP boot
     controller.init(madt_info);

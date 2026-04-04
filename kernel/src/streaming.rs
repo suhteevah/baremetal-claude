@@ -71,8 +71,11 @@ pub fn stream_sse_response(
             Ok(n) => n,
             Err(e) => {
                 // Any error after we've received data — treat as EOF.
-                if chunks_delivered > 0 || !accumulated_text.is_empty() {
-                    log::debug!("[streaming] TLS error after {} chunks, treating as EOF: {:?}", chunks_delivered, e);
+                // Check accumulated text, delivered chunks, OR leftover bytes
+                // (we may have received SSE data that hasn't been fully parsed yet).
+                if chunks_delivered > 0 || !accumulated_text.is_empty() || !leftover.is_empty() {
+                    log::debug!("[streaming] TLS error after {} chunks ({} bytes buffered), treating as EOF: {:?}",
+                        chunks_delivered, leftover.len(), e);
                     break;
                 }
                 return Err(alloc::format!("TLS error during streaming: {:?}", e));
@@ -139,7 +142,13 @@ pub fn stream_sse_response(
                     break;
                 }
 
-                // Try to extract text from content_block_delta events.
+                // Log first few SSE events for debugging format issues.
+                if chunks_delivered < 3 {
+                    log::debug!("[streaming] SSE data: {}", &data[..data.len().min(200)]);
+                }
+
+                // Try to extract text — supports both Anthropic API format
+                // ("text_delta") and claude.ai web format ("completion").
                 if let Some(text_chunk) = extract_text_delta(data) {
                     // Unescape JSON string escapes.
                     let unescaped = unescape_json_str(&text_chunk);
@@ -150,9 +159,20 @@ pub fn stream_sse_response(
                     }
                 }
 
-                // Check for message_stop event type in data.
-                if data.contains("\"type\":\"message_stop\"") {
+                // Check for end-of-stream markers (both API and claude.ai formats).
+                // claude.ai sends "stop_reason":null on every event until the last,
+                // where it becomes "stop_reason":"end_turn" or similar non-null value.
+                if data.contains("\"type\":\"message_stop\"")
+                    || data.contains("\"type\":\"message_limit\"")
+                {
                     finished = true;
+                }
+                // claude.ai: stop when stop_reason is a non-null string value
+                if let Some(pos) = data.find("\"stop_reason\":\"") {
+                    let after = &data[pos + 15..];
+                    if !after.starts_with("null") {
+                        finished = true;
+                    }
                 }
             }
         }
@@ -207,24 +227,29 @@ fn find_line_end(data: &[u8]) -> Option<usize> {
 /// The two-step approach (find "text_delta", then find "text" after it)
 /// avoids false positives from the `"type":"text_delta"` field itself.
 fn extract_text_delta(data: &str) -> Option<String> {
-    // Must be a content_block_delta with text_delta.
-    if !data.contains("\"text_delta\"") {
-        return None;
+    // Format 1: Anthropic Messages API — content_block_delta with text_delta.
+    if data.contains("\"text_delta\"") {
+        let delta_pos = data.find("\"text_delta\"")?;
+        let after_delta = &data[delta_pos..];
+        let text_key = after_delta.find("\"text\":\"")?;
+        let text_start = text_key + 8;
+        let rest = &after_delta[text_start..];
+        let end = find_json_string_end(rest)?;
+        return Some(String::from(&rest[..end]));
     }
 
-    // Find "text":" after "text_delta" — this is the actual text content.
-    // We need to find the delta's text field, not the type field.
-    let delta_pos = data.find("\"text_delta\"")?;
-    let after_delta = &data[delta_pos..];
+    // Format 2: claude.ai web — "completion":"<text>" field.
+    if data.contains("\"completion\":\"") {
+        let key_pos = data.find("\"completion\":\"")?;
+        let text_start = key_pos + 14; // skip past "completion":"
+        let rest = &data[text_start..];
+        let end = find_json_string_end(rest)?;
+        if end > 0 {
+            return Some(String::from(&rest[..end]));
+        }
+    }
 
-    // Find "text":"  after the text_delta marker.
-    let text_key = after_delta.find("\"text\":\"")?;
-    let text_start = text_key + 8; // skip past "text":"
-    let rest = &after_delta[text_start..];
-
-    // Find the closing quote, handling escaped quotes.
-    let end = find_json_string_end(rest)?;
-    Some(String::from(&rest[..end]))
+    None
 }
 
 /// Find the end of a JSON string value (the closing unescaped `"`).

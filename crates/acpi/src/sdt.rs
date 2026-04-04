@@ -217,12 +217,16 @@ pub struct AcpiTables {
 impl AcpiTables {
     /// Build the table collection from a validated RSDP.
     ///
+    /// `phys_offset` is added to all physical addresses from ACPI structures
+    /// to convert them to virtual addresses. Pass 0 for identity-mapped memory.
+    ///
     /// Prefers XSDT over RSDT when both are available.
     ///
     /// # Safety
     ///
-    /// All table pointers in the RSDT/XSDT must be mapped and readable.
-    pub unsafe fn from_rsdp(rsdp: &Rsdp) -> Result<Self, AcpiError> {
+    /// All table pointers in the RSDT/XSDT must be mapped and readable
+    /// at `physical_address + phys_offset`.
+    pub unsafe fn from_rsdp(rsdp: &Rsdp, phys_offset: u64) -> Result<Self, AcpiError> {
         let mut tables_out = AcpiTables {
             rsdt: None,
             xsdt: None,
@@ -230,59 +234,67 @@ impl AcpiTables {
         };
 
         // Prefer XSDT (64-bit pointers) over RSDT (32-bit pointers)
-        if let Some(xsdt_addr) = rsdp.xsdt_address {
-            log::info!("acpi: using XSDT at {:#X}", xsdt_addr);
-            let xsdt = unsafe { Xsdt::from_address(xsdt_addr)? };
+        if let Some(xsdt_phys) = rsdp.xsdt_address {
+            let xsdt_virt = xsdt_phys + phys_offset;
+            log::info!("acpi: using XSDT at phys {:#X} (virt {:#X})", xsdt_phys, xsdt_virt);
+            let xsdt = unsafe { Xsdt::from_address(xsdt_virt)? };
 
-            for &entry_addr in &xsdt.entries {
-                if entry_addr == 0 {
+            // XSDT entries are physical addresses — translate each one
+            for &entry_phys in &xsdt.entries {
+                if entry_phys == 0 {
                     continue;
                 }
-                match unsafe { SdtHeader::from_address(entry_addr) } {
+                let entry_virt = entry_phys + phys_offset;
+                match unsafe { SdtHeader::from_address(entry_virt) } {
                     Ok(header) => {
                         let sig = String::from(header.signature_str());
                         let hdr_length = header.length;
                         log::info!(
-                            "acpi: found table '{}' at {:#X} (len={})",
+                            "acpi: found table '{}' at phys {:#X} (virt {:#X}, len={})",
                             sig,
-                            entry_addr,
+                            entry_phys,
+                            entry_virt,
                             hdr_length,
                         );
-                        tables_out.tables.push((sig, entry_addr));
+                        // Store the virtual address so callers can use it directly
+                        tables_out.tables.push((sig, entry_virt));
                     }
                     Err(e) => {
-                        log::warn!("acpi: failed to read SDT header at {:#X}: {:?}", entry_addr, e);
+                        log::warn!("acpi: failed to read SDT header at {:#X}: {:?}", entry_virt, e);
                     }
                 }
             }
 
             tables_out.xsdt = Some(xsdt);
         } else {
-            let rsdt_addr = rsdp.rsdt_address as u64;
-            log::info!("acpi: using RSDT at {:#X}", rsdt_addr);
-            let rsdt = unsafe { Rsdt::from_address(rsdt_addr)? };
+            let rsdt_phys = rsdp.rsdt_address as u64;
+            let rsdt_virt = rsdt_phys + phys_offset;
+            log::info!("acpi: using RSDT at phys {:#X} (virt {:#X})", rsdt_phys, rsdt_virt);
+            let rsdt = unsafe { Rsdt::from_address(rsdt_virt)? };
 
+            // RSDT entries are physical addresses — translate each one
             for &entry_addr in &rsdt.entries {
                 if entry_addr == 0 {
                     continue;
                 }
-                let entry_addr_64 = entry_addr as u64;
-                match unsafe { SdtHeader::from_address(entry_addr_64) } {
+                let entry_virt = entry_addr as u64 + phys_offset;
+                match unsafe { SdtHeader::from_address(entry_virt) } {
                     Ok(header) => {
                         let sig = String::from(header.signature_str());
                         let hdr_length = header.length;
                         log::info!(
-                            "acpi: found table '{}' at {:#X} (len={})",
+                            "acpi: found table '{}' at phys {:#X} (virt {:#X}, len={})",
                             sig,
-                            entry_addr_64,
+                            entry_addr,
+                            entry_virt,
                             hdr_length,
                         );
-                        tables_out.tables.push((sig, entry_addr_64));
+                        tables_out.tables.push((sig, entry_virt));
                     }
                     Err(e) => {
                         log::warn!(
                             "acpi: failed to read SDT header at {:#X}: {:?}",
-                            entry_addr_64,
+                            entry_virt,
                             e,
                         );
                     }

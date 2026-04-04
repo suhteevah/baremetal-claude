@@ -50,25 +50,31 @@ pub enum AcpiError {
     IoError,
 }
 
-/// Initialize ACPI from a known RSDP physical address (e.g., from UEFI config table).
+/// Initialize ACPI from a known RSDP virtual address (e.g., from UEFI config table).
+///
+/// `phys_offset` is the offset that maps physical addresses to virtual addresses:
+/// `virtual = physical + phys_offset`. Pass 0 for identity-mapped memory.
 ///
 /// # Safety
 ///
-/// `rsdp_phys_addr` must point to a valid RSDP structure in mapped memory.
-pub unsafe fn init_from_rsdp_addr(rsdp_phys_addr: u64) -> Result<AcpiTables, AcpiError> {
-    log::info!("acpi: initializing from RSDP at {:#X}", rsdp_phys_addr);
-    let rsdp = Rsdp::from_address(rsdp_phys_addr)?;
-    AcpiTables::from_rsdp(&rsdp)
+/// `rsdp_virt_addr` must point to a valid RSDP structure in mapped memory.
+pub unsafe fn init_from_rsdp_addr(rsdp_virt_addr: u64, phys_offset: u64) -> Result<AcpiTables, AcpiError> {
+    log::info!("acpi: initializing from RSDP at {:#X} (phys_offset={:#X})", rsdp_virt_addr, phys_offset);
+    let rsdp = Rsdp::from_address(rsdp_virt_addr)?;
+    AcpiTables::from_rsdp(&rsdp, phys_offset)
 }
 
 /// Search for RSDP in standard BIOS memory regions and initialize ACPI tables.
 ///
+/// `phys_offset` is the offset that maps physical addresses to virtual addresses.
+/// Pass 0 for identity-mapped memory.
+///
 /// # Safety
 ///
 /// Reads from physical memory addresses in the EBDA and BIOS ROM area.
-/// These regions must be identity-mapped.
-pub unsafe fn init_from_bios_search() -> Result<AcpiTables, AcpiError> {
+/// These regions must be mapped at `physical + phys_offset`.
+pub unsafe fn init_from_bios_search(phys_offset: u64) -> Result<AcpiTables, AcpiError> {
     log::info!("acpi: searching for RSDP in BIOS memory regions");
     let rsdp = Rsdp::search_bios()?;
-    AcpiTables::from_rsdp(&rsdp)
+    AcpiTables::from_rsdp(&rsdp, phys_offset)
 }

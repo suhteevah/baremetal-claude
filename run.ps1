@@ -12,14 +12,18 @@ if ((Test-Path $credFile) -and ((Get-Content $credFile -Raw).Trim().Length -gt 0
 # Run QEMU with graphical window (framebuffer + PS/2 keyboard)
 # Serial output goes to stdout for logging
 # -display gtk,grab-on-hover=on ensures keyboard input reaches PS/2 controller
+$logFile = "target\serial.log"
+
+# Serial output goes to a log file (real-time, no buffering) so Claude can read it.
+# Watch the SDL window for the graphical dashboard.
 & "C:\Program Files\qemu\qemu-system-x86_64.exe" `
     -cpu Haswell `
     -drive "if=pflash,format=raw,readonly=on,file=C:\Program Files\qemu\share\edk2-x86_64-code.fd" `
-    -drive "format=raw,file=target\x86_64-claudio\debug\claudio-os-uefi.img" `
+    -drive "format=raw,file=target\x86_64-claudio\release\claudio-os-uefi.img" `
     -device virtio-net-pci,netdev=net0 `
     -netdev user,id=net0 `
-    -serial stdio `
-    -display gtk,grab-on-hover=on `
-    -m 1G `
+    -serial "file:$logFile" `
+    -display sdl `
+    -m 2G `
     -no-reboot `
     @fwCfgArgs
