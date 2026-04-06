@@ -386,6 +386,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "claudio-llm"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "claudio-lua-lite"
 version = "0.1.0"
 dependencies = [

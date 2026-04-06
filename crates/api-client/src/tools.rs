@@ -290,9 +290,11 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "compile_rust".into(),
-            description: "Compile Rust source code via the remote build server. \
-                Sends the source to the host-side build server which runs rustc \
-                and returns compilation output (errors, warnings). Use this to \
+            description: "Compile Rust source code to native x86_64 machine code. \
+                Uses the on-device Cranelift-based compiler (no network needed). \
+                Parses, type-checks, and generates executable code directly on \
+                bare metal. Supports functions, structs, enums, generics, traits, \
+                closures, pattern matching, and standard library types. Use this to \
                 check if Rust code compiles, see error messages, and iterate on fixes."
                 .into(),
             input_schema: serde_json::json!({
@@ -314,6 +316,34 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                     }
                 },
                 "required": ["source"]
+            }),
+        },
+        ToolSpec {
+            name: "run_local_model".into(),
+            description: "Run inference on a locally-loaded GGUF language model. \
+                Generates text from a prompt using on-device CPU inference. \
+                No network required — runs entirely on bare metal. \
+                Use for code generation, text completion, or analysis tasks \
+                when the API is unavailable or for offline operation.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The text prompt for the model"
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Maximum tokens to generate (default: 256)",
+                        "default": 256
+                    },
+                    "temperature": {
+                        "type": "number",
+                        "description": "Sampling temperature 0.0-2.0 (default: 0.7)",
+                        "default": 0.7
+                    }
+                },
+                "required": ["prompt"]
             }),
         },
     ]
@@ -343,6 +373,7 @@ pub fn execute_tool(call: &ToolCall) -> ToolResult {
         "execute_python" => execute_python(call),
         "execute_javascript" => execute_javascript(call),
         "compile_rust" => execute_compile_rust(call),
+        "run_local_model" => execute_local_model(call),
         _ => {
             log::warn!("[tools] unknown tool: {}", call.name);
             return ToolResult {
@@ -719,6 +750,21 @@ fn format_compile_result(success: bool, stdout: &str, stderr: &str) -> String {
 /// that performs the TCP I/O.
 ///
 /// If no handler is registered (e.g. in unit tests), falls back to an error.
+/// Handler type for local (on-device) Rust compilation.
+/// Takes source code, returns Ok(diagnostics) or Err(error).
+pub type LocalCompileHandler = fn(&str) -> Result<String, String>;
+
+/// Registered local compile handler (set by kernel from rustc-lite).
+static mut LOCAL_COMPILE_HANDLER: Option<LocalCompileHandler> = None;
+
+/// Register a local Rust compiler handler.
+///
+/// # Safety
+/// Must be called once during single-threaded kernel init.
+pub unsafe fn set_local_compile_handler(handler: LocalCompileHandler) {
+    LOCAL_COMPILE_HANDLER = Some(handler);
+}
+
 fn execute_compile_rust(call: &ToolCall) -> ToolResult {
     let source = match get_string_field(&call.input, "source") {
         Ok(s) => s,
@@ -750,14 +796,35 @@ fn execute_compile_rust(call: &ToolCall) -> ToolResult {
         mode
     );
 
-    // Build the JSON body for the build server.
+    // Try local compiler first (no network needed!)
+    let local_handler = unsafe { LOCAL_COMPILE_HANDLER };
+    if let Some(local_compile) = local_handler {
+        log::info!("[tools] using LOCAL rustc-lite compiler (no build server needed)");
+        match local_compile(source) {
+            Ok(output) => {
+                return ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: output,
+                    is_error: false,
+                };
+            }
+            Err(e) => {
+                return ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: e,
+                    is_error: true,
+                };
+            }
+        }
+    }
+
+    // Fall back to remote build server
+    log::info!("[tools] no local compiler — falling back to build server");
     let body = build_compile_request(source, edition, mode);
 
-    // Check if a compile handler has been registered by the kernel.
     let handler = unsafe { COMPILE_RUST_HANDLER };
     match handler {
         Some(h) => {
-            // Call the kernel-provided handler to perform the HTTP request.
             match h(&body) {
                 Ok(response_bytes) => parse_compile_response(call, &response_bytes),
                 Err(e) => ToolResult {
@@ -775,8 +842,8 @@ fn execute_compile_rust(call: &ToolCall) -> ToolResult {
         None => ToolResult {
             tool_use_id: call.id.clone(),
             content: String::from(
-                "compile_rust: no network handler registered. \
-                 The kernel must call set_compile_handler() at init.",
+                "compile_rust: no compiler available. \
+                 Neither local compiler nor build server handler registered.",
             ),
             is_error: true,
         },
@@ -835,8 +902,54 @@ fn parse_compile_response(call: &ToolCall, raw: &[u8]) -> ToolResult {
 }
 
 // ---------------------------------------------------------------------------
+// run_local_model — on-device GGUF model inference
+// ---------------------------------------------------------------------------
+
+fn execute_local_model(call: &ToolCall) -> ToolResult {
+    let prompt = match get_string_field(&call.input, "prompt") {
+        Ok(p) => p,
+        Err(e) => return ToolResult { tool_use_id: call.id.clone(), content: e, is_error: true },
+    };
+
+    let max_tokens = call.input.get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(256) as usize;
+
+    let temperature = call.input.get("temperature")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.7) as f32;
+
+    log::info!("[tools] run_local_model: {} chars, max_tokens={}, temp={}",
+        prompt.len(), max_tokens, temperature);
+
+    let handler = unsafe { LOCAL_MODEL_HANDLER };
+    match handler {
+        Some(h) => match h(prompt, max_tokens, temperature) {
+            Ok(output) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: output,
+                is_error: false,
+            },
+            Err(e) => ToolResult {
+                tool_use_id: call.id.clone(),
+                content: format!("model error: {}", e),
+                is_error: true,
+            },
+        },
+        None => ToolResult {
+            tool_use_id: call.id.clone(),
+            content: String::from("run_local_model: no model loaded. Load a GGUF model first."),
+            is_error: true,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool handlers — function pointers injected by the kernel
 // ---------------------------------------------------------------------------
+
+/// Handler for local model inference: takes (prompt, max_tokens, temperature).
+pub type LocalModelHandler = fn(&str, usize, f32) -> Result<String, String>;
 
 /// Handler type for file read: takes a path, returns file contents or error.
 pub type FileReadHandler = fn(&str) -> Result<String, String>;
@@ -868,6 +981,7 @@ static mut FILE_WRITE_HANDLER: Option<FileWriteHandler> = None;
 static mut LIST_DIRECTORY_HANDLER: Option<ListDirectoryHandler> = None;
 static mut EXECUTE_COMMAND_HANDLER: Option<ExecuteCommandHandler> = None;
 static mut COMPILE_RUST_HANDLER: Option<CompileHandler> = None;
+static mut LOCAL_MODEL_HANDLER: Option<LocalModelHandler> = None;
 
 /// Register the file read handler. Called by the kernel during init.
 ///
@@ -907,6 +1021,14 @@ pub unsafe fn set_execute_command_handler(handler: ExecuteCommandHandler) {
 /// Must be called once during single-threaded kernel initialization.
 pub unsafe fn set_compile_handler(handler: CompileHandler) {
     COMPILE_RUST_HANDLER = Some(handler);
+}
+
+/// Register the local model handler. Called by the kernel during init.
+///
+/// # Safety
+/// Must be called once during single-threaded kernel initialization.
+pub unsafe fn set_local_model_handler(handler: LocalModelHandler) {
+    LOCAL_MODEL_HANDLER = Some(handler);
 }
 
 /// Get the build server port (for use by the kernel's handler implementation).

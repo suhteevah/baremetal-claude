@@ -63,6 +63,10 @@ pub enum Delta {
     TextDelta { text: String },
     /// A chunk of tool-use input JSON (streamed incrementally).
     InputJsonDelta { partial_json: String },
+    /// A chunk of thinking content (extended thinking).
+    ThinkingDelta { thinking: String },
+    /// A chunk of thinking signature.
+    SignatureDelta { signature: String },
 }
 
 /// Token usage reported in a `message_delta` event.
@@ -133,6 +137,10 @@ struct DeltaRaw {
     text: Option<String>,
     /// Present when `type` == `"input_json_delta"`.
     partial_json: Option<String>,
+    /// Present when `type` == `"thinking_delta"`.
+    thinking: Option<String>,
+    /// Present when `type` == `"signature_delta"`.
+    signature: Option<String>,
 }
 
 /// `content_block_stop` event data.
@@ -338,6 +346,12 @@ fn deserialize_event(event_type: &str, data: &str) -> Option<StreamEvent> {
                 "input_json_delta" => Delta::InputJsonDelta {
                     partial_json: parsed.delta.partial_json.unwrap_or_default(),
                 },
+                "thinking_delta" => Delta::ThinkingDelta {
+                    thinking: parsed.delta.thinking.unwrap_or_default(),
+                },
+                "signature_delta" => Delta::SignatureDelta {
+                    signature: parsed.delta.signature.unwrap_or_default(),
+                },
                 other => {
                     log::warn!("Unknown delta type: {}", other);
                     return None;
@@ -482,6 +496,14 @@ impl StreamAccumulator {
                             index
                         );
                     }
+                }
+                Delta::ThinkingDelta { thinking: _ } => {
+                    // Extended thinking — log but don't accumulate into text
+                    log::trace!("thinking delta at block {}", index);
+                }
+                Delta::SignatureDelta { signature: _ } => {
+                    // Thinking signature — log only
+                    log::trace!("signature delta at block {}", index);
                 }
             },
 

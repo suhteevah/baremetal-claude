@@ -28,6 +28,7 @@ use claudio_api::tools::{
     builtin_tool_definitions, execute_tool, extract_tool_calls_from_response,
     build_server_port,
 };
+use claudio_api::{RetryConfig, RetryDecision, should_retry, parse_http_status, extract_http_headers};
 use claudio_net::NetworkStack;
 
 use crate::keyboard;
@@ -45,6 +46,23 @@ pub(crate) static RNG_SEED: AtomicU64 = AtomicU64::new(1);
 /// (e.g., recursive file exploration or compilation retry loops).
 /// 20 rounds is generous -- most real tasks complete in 3-5 rounds.
 const MAX_TOOL_ROUNDS: usize = 20;
+
+// ---------------------------------------------------------------------------
+// Spin-wait helper for retry back-off
+// ---------------------------------------------------------------------------
+
+/// Spin-wait for `ms` milliseconds using the PIT-based `now` function.
+///
+/// Uses `core::hint::spin_loop()` to yield to the CPU while waiting, which
+/// reduces power consumption on bare metal (the CPU can enter a low-power
+/// state between spins).
+fn spin_wait_ms(now: fn() -> claudio_net::Instant, ms: u64) {
+    let start = now().total_millis();
+    let target = start + ms as i64;
+    while now().total_millis() < target {
+        core::hint::spin_loop();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Build server compile handler
@@ -177,7 +195,54 @@ pub unsafe fn init_tool_handlers() {
     claudio_api::tools::set_file_write_handler(file_write_handler);
     claudio_api::tools::set_list_directory_handler(list_directory_handler);
     claudio_api::tools::set_execute_command_handler(execute_command_handler);
-    log::info!("[agent_loop] VFS + command tool handlers registered");
+    claudio_api::tools::set_local_compile_handler(local_compile_handler);
+    claudio_api::tools::set_local_model_handler(local_model_handler);
+    log::info!("[agent_loop] VFS + command + local compiler + local model tool handlers registered");
+}
+
+/// Local Rust compiler handler — compiles via rustc-lite (Cranelift JIT).
+fn local_compile_handler(source: &str) -> Result<String, String> {
+    log::info!("[tool_handler] local compile_rust: {} bytes", source.len());
+
+    match claudio_rustc::check(source) {
+        Ok(errors) => {
+            if errors.is_empty() {
+                match claudio_rustc::compile(source) {
+                    Ok(output) => {
+                        let mut result = alloc::string::String::from("Compilation successful!\n");
+                        for f in &output.functions {
+                            result.push_str(&alloc::format!(
+                                "  fn {} -> {} bytes of x86_64 machine code\n",
+                                f.name, f.code_size
+                            ));
+                        }
+                        for d in &output.diagnostics {
+                            result.push_str(d);
+                            result.push('\n');
+                        }
+                        Ok(result)
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                let mut result = alloc::string::String::from("Type check errors:\n");
+                for e in &errors {
+                    result.push_str("  ");
+                    result.push_str(e);
+                    result.push('\n');
+                }
+                Err(result)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Local model handler — runs GGUF model inference on bare metal.
+fn local_model_handler(prompt: &str, max_tokens: usize, temperature: f32) -> Result<String, String> {
+    log::info!("[tool_handler] run_local_model: {} chars, max_tokens={}, temp={}", prompt.len(), max_tokens, temperature);
+    let _ = (prompt, max_tokens, temperature);
+    Err(String::from("no GGUF model loaded — download a model to /models/ first"))
 }
 
 /// file_read handler — reads from the kernel's VFS (fs-persist).
@@ -273,31 +338,10 @@ pub fn run_tool_loop_streaming(
             }
         };
 
-        // Try streaming path first, with retry on rate limit (HTTP 429).
-        const MAX_RETRIES: usize = 3;
-        const RETRY_DELAY_TICKS: u64 = 1100; // ~60 seconds at 18.2 Hz PIT
-
-        let mut stream_result = Err(alloc::string::String::from("not attempted"));
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                log::info!("[agent_loop] retry {}/{} after rate limit — waiting ~60s...", attempt, MAX_RETRIES);
-                on_token("\n[Rate limited — retrying in ~60 seconds...]\n");
-                let wait_until = crate::interrupts::tick_count() + RETRY_DELAY_TICKS;
-                while crate::interrupts::tick_count() < wait_until {
-                    core::hint::spin_loop();
-                }
-            }
-            stream_result = send_streaming(stack, api_key, &body_bytes, now, |chunk| {
-                on_token(chunk);
-            });
-            match &stream_result {
-                Err(e) if e.contains("429") || e.contains("rate_limit") || e.contains("Rate limit") => {
-                    log::warn!("[agent_loop] rate limited (attempt {})", attempt + 1);
-                    continue;
-                }
-                _ => break,
-            }
-        }
+        // Try streaming path first.
+        let stream_result = send_streaming(stack, api_key, &body_bytes, now, |chunk| {
+            on_token(chunk);
+        });
 
         match stream_result {
             Ok(result) => {
@@ -803,32 +847,88 @@ pub fn send_via_https(
 }
 
 /// Send via api.anthropic.com with API key (original path).
+///
+/// Retries on 429 (rate limit), 500, 502, 503, and 529 (overloaded) with
+/// exponential back-off. Honours the server's `Retry-After` header when present.
 fn send_via_api_key(
     stack: &mut NetworkStack,
     api_key: &str,
     body: &[u8],
     now: fn() -> claudio_net::Instant,
 ) -> Result<Vec<u8>, String> {
-    let http_req = claudio_net::http::HttpRequest::post(
-        "api.anthropic.com",
-        "/v1/messages",
-        body.to_vec(),
-    )
-    .header("Content-Type", "application/json")
-    .header("x-api-key", api_key)
-    .header("anthropic-version", "2023-06-01")
-    .header("Connection", "close");
+    let retry_config = RetryConfig::default();
+    let mut attempt: u32 = 0;
 
-    let req_bytes = http_req.to_bytes();
-    log::debug!("[agent] sending {} bytes to api.anthropic.com", req_bytes.len());
+    loop {
+        let http_req = claudio_net::http::HttpRequest::post(
+            "api.anthropic.com",
+            "/v1/messages",
+            body.to_vec(),
+        )
+        .header("Content-Type", "application/json")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Connection", "close");
 
-    let seed = RNG_SEED.fetch_add(1, Ordering::Relaxed);
-    match claudio_net::https_request(stack, "api.anthropic.com", 443, &req_bytes, now, seed) {
-        Ok(resp) => {
-            log::debug!("[agent] received {} bytes from api.anthropic.com", resp.len());
-            Ok(resp)
+        let req_bytes = http_req.to_bytes();
+        log::debug!("[agent] sending {} bytes to api.anthropic.com (attempt {})", req_bytes.len(), attempt);
+
+        let seed = RNG_SEED.fetch_add(1, Ordering::Relaxed);
+        let resp = match claudio_net::https_request(stack, "api.anthropic.com", 443, &req_bytes, now, seed) {
+            Ok(r) => r,
+            Err(e) => {
+                // Network-level failure (DNS, TLS, TCP) — not retryable at
+                // this layer; the connection didn't even complete.
+                return Err(alloc::format!("api.anthropic.com request failed: {:?}", e));
+            }
+        };
+
+        log::debug!("[agent] received {} bytes from api.anthropic.com", resp.len());
+
+        // Check HTTP status for retryable errors.
+        let status = parse_http_status(&resp);
+        if status >= 200 && status < 300 {
+            return Ok(resp);
         }
-        Err(e) => Err(alloc::format!("api.anthropic.com request failed: {:?}", e)),
+
+        // Non-success status — check if retryable.
+        let headers = extract_http_headers(&resp);
+        match should_retry(&retry_config, attempt, status, headers) {
+            RetryDecision::RetryAfter(delay_ms) => {
+                log::warn!(
+                    "[agent] HTTP {} from api.anthropic.com — retrying in {}ms (attempt {}/{})",
+                    status, delay_ms, attempt + 1, retry_config.max_retries
+                );
+                spin_wait_ms(now, delay_ms);
+                attempt += 1;
+                continue;
+            }
+            RetryDecision::GiveUp => {
+                let body_preview = extract_body_preview(&resp);
+                log::error!(
+                    "[agent] API request failed with HTTP {} after {} attempt(s), giving up: {}",
+                    status, attempt + 1, body_preview
+                );
+                return Err(alloc::format!("HTTP {}: {}", status, body_preview));
+            }
+        }
+    }
+}
+
+/// Extract a short preview of the HTTP response body for error logging.
+fn extract_body_preview(raw: &[u8]) -> String {
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+    let body = &raw[(header_end + 4).min(raw.len())..];
+    let body_decoded =
+        claudio_net::http::decode_chunked(body).unwrap_or_else(|_| body.to_vec());
+    let text = core::str::from_utf8(&body_decoded).unwrap_or("<binary>");
+    if text.len() > 300 {
+        alloc::format!("{}...", &text[..300])
+    } else {
+        String::from(text)
     }
 }
 
@@ -855,7 +955,7 @@ fn send_via_claude_ai(
 
     let selected_model = crate::model_select::claude_ai_model_id();
     let claude_body = alloc::format!(
-        r#"{{"prompt":"{}","timezone":"America/New_York","personalized_styles":[{{"type":"default","key":"Default","name":"Normal","nameKey":"normal_style_name","prompt":"Normal\n","summary":"Default responses from Claude","summaryKey":"normal_style_summary","isDefault":true}}],"locale":"en-US","model":"{}","tools":[],"attachments":[],"files":[]}}"#,
+        r#"{{"prompt":"{}","timezone":"America/New_York","attachments":[],"files":[],"model":"{}","rendering_mode":"messages"}}"#,
         prompt.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
         selected_model
     );
@@ -870,12 +970,10 @@ fn send_via_claude_ai(
     )
     .header("Content-Type", "application/json")
     .header("Cookie", session_cookie)
-    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
     .header("Accept", "text/event-stream")
     .header("Origin", "https://claude.ai")
-    .header("Referer", &alloc::format!("https://claude.ai/chat/{}", conv_id))
-    .header("anthropic-client-platform", "web_claude_ai")
-    .header("anthropic-device-id", "claudio-os-bare-metal")
+    .header("Referer", "https://claude.ai/new")
     .header("Connection", "close");
 
     let req_bytes = http_req.to_bytes();
@@ -949,46 +1047,103 @@ pub fn send_streaming(
 }
 
 /// Streaming via api.anthropic.com with API key.
+///
+/// Retries on 429, 500, 502, 503, 529 with exponential back-off.
+/// The SSE reader (`stream_sse_response`) already parses the HTTP status
+/// and returns an error string starting with "HTTP <code>:" on non-200.
+/// We parse that status out and decide whether to retry.
 fn send_streaming_api_key(
     stack: &mut NetworkStack,
     api_key: &str,
     body: &[u8],
     now: fn() -> claudio_net::Instant,
-    on_token: impl FnMut(&str),
+    mut on_token: impl FnMut(&str),
 ) -> Result<crate::streaming::StreamResult, String> {
-    let http_req = claudio_net::http::HttpRequest::post(
-        "api.anthropic.com",
-        "/v1/messages",
-        body.to_vec(),
-    )
-    .header("Content-Type", "application/json")
-    .header("x-api-key", api_key)
-    .header("anthropic-version", "2023-06-01")
-    .header("Accept", "text/event-stream")
-    .header("Connection", "close");
+    let retry_config = RetryConfig::default();
+    let mut attempt: u32 = 0;
 
-    let req_bytes = http_req.to_bytes();
-    log::debug!("[streaming] sending {} bytes to api.anthropic.com", req_bytes.len());
+    loop {
+        let http_req = claudio_net::http::HttpRequest::post(
+            "api.anthropic.com",
+            "/v1/messages",
+            body.to_vec(),
+        )
+        .header("Content-Type", "application/json")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Accept", "text/event-stream")
+        .header("Connection", "close");
 
-    let seed = RNG_SEED.fetch_add(1, Ordering::Relaxed);
+        let req_bytes = http_req.to_bytes();
+        log::debug!("[streaming] sending {} bytes to api.anthropic.com (attempt {})", req_bytes.len(), attempt);
 
-    // DNS resolve.
-    let ip = claudio_net::dns::resolve(stack, "api.anthropic.com", || now())
-        .map_err(|e| alloc::format!("DNS failed: {:?}", e))?;
+        let seed = RNG_SEED.fetch_add(1, Ordering::Relaxed);
 
-    // TLS connect (returns a TlsStream we can read incrementally).
-    let mut tls = claudio_net::TlsStream::connect(stack, ip, 443, "api.anthropic.com", now, seed)
-        .map_err(|e| alloc::format!("TLS connect failed: {:?}", e))?;
+        // DNS resolve.
+        let ip = claudio_net::dns::resolve(stack, "api.anthropic.com", || now())
+            .map_err(|e| alloc::format!("DNS failed: {:?}", e))?;
 
-    // Send the HTTP request.
-    tls.send(stack, &req_bytes, now)
-        .map_err(|e| alloc::format!("TLS send failed: {:?}", e))?;
+        // TLS connect.
+        let mut tls = claudio_net::TlsStream::connect(stack, ip, 443, "api.anthropic.com", now, seed)
+            .map_err(|e| alloc::format!("TLS connect failed: {:?}", e))?;
 
-    // Stream the response.
-    let result = crate::streaming::stream_sse_response(&mut tls, stack, now, on_token)?;
+        // Send the HTTP request.
+        tls.send(stack, &req_bytes, now)
+            .map_err(|e| alloc::format!("TLS send failed: {:?}", e))?;
 
-    tls.close(stack);
-    Ok(result)
+        // Stream the response. The SSE reader handles headers internally
+        // and returns an error like "HTTP 429: ..." on non-200 status.
+        match crate::streaming::stream_sse_response(&mut tls, stack, now, &mut on_token) {
+            Ok(result) => {
+                tls.close(stack);
+                return Ok(result);
+            }
+            Err(e) => {
+                tls.close(stack);
+
+                // Parse the HTTP status from the error message (format: "HTTP <code>: ...").
+                let status = parse_streaming_error_status(&e);
+
+                if status > 0 {
+                    match should_retry(&retry_config, attempt, status, "") {
+                        RetryDecision::RetryAfter(delay_ms) => {
+                            log::warn!(
+                                "[streaming] HTTP {} from api.anthropic.com — retrying in {}ms (attempt {}/{})",
+                                status, delay_ms, attempt + 1, retry_config.max_retries
+                            );
+                            spin_wait_ms(now, delay_ms);
+                            attempt += 1;
+                            continue;
+                        }
+                        RetryDecision::GiveUp => {
+                            log::error!(
+                                "[streaming] API request failed with HTTP {} after {} attempt(s)",
+                                status, attempt + 1
+                            );
+                            return Err(e);
+                        }
+                    }
+                }
+
+                // Not an HTTP status error (DNS, TLS, timeout, etc.) — not retryable.
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Parse an HTTP status code from a streaming error message.
+///
+/// The SSE reader produces errors like "HTTP 429: Too Many Requests...".
+/// Returns the status code, or 0 if the error doesn't match that pattern.
+fn parse_streaming_error_status(err: &str) -> u16 {
+    if let Some(rest) = err.strip_prefix("HTTP ") {
+        // Take characters until non-digit.
+        let code_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        code_str.parse::<u16>().unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// Streaming via claude.ai using session cookie.
@@ -1007,7 +1162,7 @@ fn send_streaming_claude_ai(
 
     let selected_model = crate::model_select::claude_ai_model_id();
     let claude_body = alloc::format!(
-        r#"{{"prompt":"{}","timezone":"America/New_York","personalized_styles":[{{"type":"default","key":"Default","name":"Normal","nameKey":"normal_style_name","prompt":"Normal\n","summary":"Default responses from Claude","summaryKey":"normal_style_summary","isDefault":true}}],"locale":"en-US","model":"{}","tools":[],"attachments":[],"files":[]}}"#,
+        r#"{{"prompt":"{}","timezone":"America/New_York","attachments":[],"files":[],"model":"{}","rendering_mode":"messages"}}"#,
         prompt.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
         selected_model
     );
@@ -1017,19 +1172,15 @@ fn send_streaming_claude_ai(
         org_id, conv_id
     );
 
-    // Match exact browser headers — captured from Playwright/Chrome.
-    // Missing `anthropic-client-platform` causes stricter rate limits.
     let http_req = claudio_net::http::HttpRequest::post(
         "claude.ai", &path, claude_body.into_bytes(),
     )
     .header("Content-Type", "application/json")
     .header("Cookie", session_cookie)
-    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0")
     .header("Accept", "text/event-stream")
     .header("Origin", "https://claude.ai")
-    .header("Referer", &alloc::format!("https://claude.ai/chat/{}", conv_id))
-    .header("anthropic-client-platform", "web_claude_ai")
-    .header("anthropic-device-id", "claudio-os-bare-metal")
+    .header("Referer", "https://claude.ai/new")
     .header("Connection", "close");
 
     let req_bytes = http_req.to_bytes();

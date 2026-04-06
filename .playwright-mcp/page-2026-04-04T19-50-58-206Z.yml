@@ -1,0 +1,292 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e5]:
+      - navigation "Sidebar" [ref=e7]:
+        - generic [ref=e8]:
+          - link "Home" [ref=e10] [cursor=pointer]:
+            - /url: /new
+            - img "Claude" [ref=e11]
+          - button "Close sidebar" [pressed] [ref=e14] [cursor=pointer]:
+            - img [ref=e17]
+        - generic [ref=e19]:
+          - generic [ref=e20]:
+            - link "New chat" [ref=e23] [cursor=pointer]:
+              - /url: /new
+              - generic [ref=e24]:
+                - img [ref=e28]
+                - generic [ref=e31]: New chat
+                - generic [ref=e33]: Ctrl+⇧+O
+            - generic [ref=e34]:
+              - link "Search" [ref=e36] [cursor=pointer]:
+                - /url: "#"
+                - generic [ref=e37]:
+                  - img [ref=e40]
+                  - generic [ref=e43]: Search
+                  - generic [ref=e45]: Ctrl+K
+              - link "Customize" [ref=e48] [cursor=pointer]:
+                - /url: /customize
+                - generic [ref=e49]:
+                  - img [ref=e53]
+                  - generic [ref=e56]: Customize
+          - generic [ref=e57]:
+            - generic [ref=e58]:
+              - link "Chats" [ref=e60] [cursor=pointer]:
+                - /url: /recents
+                - generic [ref=e61]:
+                  - img [ref=e64]
+                  - generic [ref=e68]: Chats
+              - link "Projects" [ref=e70] [cursor=pointer]:
+                - /url: /projects
+                - generic [ref=e71]:
+                  - img [ref=e74]
+                  - generic [ref=e79]: Projects
+              - link "Artifacts" [ref=e82] [cursor=pointer]:
+                - /url: /artifacts
+                - generic [ref=e83]:
+                  - img [ref=e86]
+                  - generic [ref=e93]: Artifacts
+              - link "Code" [ref=e95] [cursor=pointer]:
+                - /url: /code
+                - generic [ref=e96]:
+                  - img [ref=e99]
+                  - generic [ref=e104]:
+                    - generic [ref=e105]: Code
+                    - img [ref=e107]
+            - generic [ref=e112]:
+              - button "Recents Hide" [expanded] [ref=e114] [cursor=pointer]:
+                - text: Recents
+                - generic [ref=e115]: Hide
+              - list [ref=e116]:
+                - listitem [ref=e117]:
+                  - link "ClaudioOS Main" [ref=e119] [cursor=pointer]:
+                    - /url: /chat/aa584d36-498c-4864-8fe0-26bdb1a4224b
+                    - generic [ref=e121]: ClaudioOS Main
+                - listitem [ref=e122]:
+                  - link "Eject retraction limit switch troubleshooting" [ref=e124] [cursor=pointer]:
+                    - /url: /chat/c23db96a-c5ad-4b88-8198-df01c41796b7
+                    - generic [ref=e126]: Eject retraction limit switch troubleshooting
+                - listitem [ref=e127]:
+                  - link "ClaudioOS Agent" [ref=e129] [cursor=pointer]:
+                    - /url: /chat/2fe79dd9-78e3-4567-921b-6e9e1370e9bc
+                    - generic [ref=e131]: ClaudioOS Agent
+                - listitem [ref=e132]:
+                  - generic [ref=e133]:
+                    - link "Hello from bare metal" [ref=e134] [cursor=pointer]:
+                      - /url: /chat/f1482767-951a-4281-98c3-0e443ebc19b2
+                      - generic [ref=e136]: Hello from bare metal
+                    - button "More options for Hello from bare metal" [ref=e1322] [cursor=pointer]:
+                      - img [ref=e1324]
+                - listitem [ref=e167]:
+                  - link "Untitled" [ref=e169] [cursor=pointer]:
+                    - /url: /chat/5c119a31-db5d-45e0-8761-77a4cdc2d4b5
+                    - generic [ref=e171]: Untitled
+                - listitem [ref=e172]:
+                  - link "Untitled" [ref=e174] [cursor=pointer]:
+                    - /url: /chat/aac8cfef-d209-4e8a-9541-3a32f7e2dd81
+                    - generic [ref=e176]: Untitled
+                - listitem [ref=e182]:
+                  - link "Untitled" [ref=e184] [cursor=pointer]:
+                    - /url: /chat/5f4f5385-26e3-4ed7-a6bf-d36fc99d02a5
+                    - generic [ref=e186]: Untitled
+                - listitem [ref=e187]:
+                  - link "Custom UEFI bootable environment for Claude agents" [ref=e189] [cursor=pointer]:
+                    - /url: /chat/fd01f7c7-3ac3-42c0-b063-a87f565c22d4
+                    - generic [ref=e191]: Custom UEFI bootable environment for Claude agents
+                - listitem [ref=e192]:
+                  - link "Do I love Clare" [ref=e194] [cursor=pointer]:
+                    - /url: /chat/44a0fef7-7560-4b8c-ba5c-3917b42b38c0
+                    - generic [ref=e196]: Do I love Clare
+                - listitem [ref=e197]:
+                  - link "Updating resume with GitHub and recent work experience" [ref=e199] [cursor=pointer]:
+                    - /url: /chat/a8ecae5c-d44d-49d1-93c4-2e573e2f7dff
+                    - generic [ref=e201]: Updating resume with GitHub and recent work experience
+                - listitem [ref=e202]:
+                  - link "Wraith browser program review and safety assessment" [ref=e204] [cursor=pointer]:
+                    - /url: /chat/91244c17-cad7-41fa-a8ba-3bbf9d269fe6
+                    - generic [ref=e206]: Wraith browser program review and safety assessment
+                - listitem [ref=e207]:
+                  - link "CAD to LightBurn measurement extraction for laser cutting" [ref=e209] [cursor=pointer]:
+                    - /url: /chat/84f6b235-f8ec-43a1-880b-a8535e1271d8
+                    - generic [ref=e211]: CAD to LightBurn measurement extraction for laser cutting
+                - listitem [ref=e212]:
+                  - link "AI-controlled Rust web browser architecture" [ref=e214] [cursor=pointer]:
+                    - /url: /chat/8ed6ee3e-1cf1-4ac4-80fd-4b0b624aed55
+                    - generic [ref=e216]: AI-controlled Rust web browser architecture
+                - listitem [ref=e217]:
+                  - link "Weekly performance assessment and graded review" [ref=e219] [cursor=pointer]:
+                    - /url: /chat/13ac78d3-bb22-4923-9e8d-103590a0c9d8
+                    - generic [ref=e221]: Weekly performance assessment and graded review
+                - listitem [ref=e222]:
+                  - link "Bypassing Indeed's scraping blocks with Android emulator" [ref=e224] [cursor=pointer]:
+                    - /url: /chat/0faf7ae6-b31d-4627-bbf3-b9e759c1f524
+                    - generic [ref=e226]: Bypassing Indeed's scraping blocks with Android emulator
+                - listitem [ref=e227]:
+                  - link "💬 Begin scaffolding our openclaw…" [ref=e229] [cursor=pointer]:
+                    - /url: /chat/1b818424-06ee-4684-bced-74cbaddb07a4
+                    - generic [ref=e231]: 💬 Begin scaffolding our openclaw…
+                - listitem [ref=e232]:
+                  - link "Cheapest way to join VATSIM" [ref=e234] [cursor=pointer]:
+                    - /url: /chat/ebecf9ec-c4e0-4fec-b517-288c282d38b4
+                    - generic [ref=e236]: Cheapest way to join VATSIM
+                - listitem [ref=e237]:
+                  - link "Personalized workout and keto meal prep plan" [ref=e239] [cursor=pointer]:
+                    - /url: /chat/381555d5-b6e1-4b27-a4db-46c493d19073
+                    - generic [ref=e241]: Personalized workout and keto meal prep plan
+                - listitem [ref=e242]:
+                  - link "Opus 4.6 world interaction mode" [ref=e244] [cursor=pointer]:
+                    - /url: /chat/177ea59e-0584-4abc-9c06-134ed2c68a94
+                    - generic [ref=e246]: Opus 4.6 world interaction mode
+                - listitem [ref=e247]:
+                  - link "Openclaw hosting infrastructure options" [ref=e249] [cursor=pointer]:
+                    - /url: /chat/73614799-0319-4926-822b-c28c07320be8
+                    - generic [ref=e251]: Openclaw hosting infrastructure options
+                - listitem [ref=e252]:
+                  - link "How compound interest works" [ref=e254] [cursor=pointer]:
+                    - /url: /chat/8dcd4eb3-2106-49d9-ac56-e6c38d124928
+                    - generic [ref=e256]: How compound interest works
+                - listitem [ref=e257]:
+                  - link "Grafana dashboard skill for client work" [ref=e259] [cursor=pointer]:
+                    - /url: /chat/ddd858a7-a9f5-4eb4-b729-27ed2d8771a8
+                    - generic [ref=e261]: Grafana dashboard skill for client work
+                - listitem [ref=e262]:
+                  - link "Building a 10-inch 3D printed rack" [ref=e264] [cursor=pointer]:
+                    - /url: /chat/469f0ce7-08b7-45c7-bd68-c4a73f3d23af
+                    - generic [ref=e266]: Building a 10-inch 3D printed rack
+                - listitem [ref=e267]:
+                  - link "Building Rust workspace with ocm-types crate" [ref=e269] [cursor=pointer]:
+                    - /url: /chat/e9f7a75b-2669-4e89-b191-72cf5107d905
+                    - generic [ref=e271]: Building Rust workspace with ocm-types crate
+              - link "All chats" [ref=e273] [cursor=pointer]:
+                - /url: /recents
+                - generic [ref=e274]:
+                  - img [ref=e275]
+                  - generic [ref=e277]: All chats
+          - button "Matt, Settings" [ref=e280] [cursor=pointer]:
+            - generic [ref=e283]: M
+            - generic [ref=e284]:
+              - generic [ref=e285]:
+                - generic [ref=e286]: Matt
+                - generic [ref=e287]: Max plan
+              - generic [ref=e288]:
+                - button "Get apps and extensions" [ref=e290]:
+                  - img [ref=e292]
+                - img [ref=e294]
+      - generic [ref=e1326]:
+        - generic [ref=e1327]:
+          - banner [ref=e1328]:
+            - generic [ref=e1332]:
+              - button "Hello from bare metal" [ref=e1333] [cursor=pointer]:
+                - generic [ref=e1335]: Hello from bare metal
+              - button "More options for Hello from bare metal" [ref=e1337] [cursor=pointer]:
+                - img [ref=e1339]
+          - generic [ref=e1343]:
+            - generic [ref=e1344]:
+              - generic [ref=e1347]:
+                - paragraph [ref=e1352]: Say hello from bare metal! Keep it short.
+                - group "Message actions" [ref=e1353]:
+                  - generic [ref=e1355]:
+                    - generic [ref=e1356]: Apr 2
+                    - generic [ref=e1357]:
+                      - button "Retry" [ref=e1359] [cursor=pointer]:
+                        - img [ref=e1361]
+                      - button "Edit" [ref=e1364] [cursor=pointer]:
+                        - img [ref=e1366]
+                    - button "Copy" [ref=e1369] [cursor=pointer]:
+                      - generic [ref=e1370]:
+                        - img [ref=e1372]
+                        - img [ref=e1375]
+              - generic [ref=e1378]:
+                - generic [ref=e1383]:
+                  - generic [ref=e1385]:
+                    - button "Recognized straightforward greeting request, formulated concise response" [ref=e1387] [cursor=pointer]:
+                      - generic [ref=e1388]:
+                        - generic [ref=e1389]: Recognized straightforward greeting request, formulated concise response
+                        - img [ref=e1392]
+                    - status [ref=e1394]: Recognized straightforward greeting request, formulated concise response
+                  - paragraph [ref=e1399]: Hey Matt! 👋 Hello from the bare metal — where the electrons don't lie and the kernel does what it's told. 🦀
+                - group "Message actions" [ref=e1400]:
+                  - generic [ref=e1402]:
+                    - button "Copy" [ref=e1404] [cursor=pointer]:
+                      - generic [ref=e1405]:
+                        - img [ref=e1407]
+                        - img [ref=e1410]
+                    - button "Give positive feedback" [ref=e1413] [cursor=pointer]:
+                      - img [ref=e1415]
+                    - button "Give negative feedback" [ref=e1418] [cursor=pointer]:
+                      - img [ref=e1420]
+                    - button "Retry" [ref=e1424] [cursor=pointer]:
+                      - img [ref=e1426]
+              - img [ref=e1433]
+            - generic [ref=e1437]:
+              - button:
+                - generic:
+                  - img
+                - generic:
+                  - img
+              - group [ref=e1439]:
+                - generic:
+                  - status
+                - generic [ref=e1442]:
+                  - textbox "Write your prompt to Claude" [ref=e1445]:
+                    - paragraph [ref=e1446]: Reply...
+                  - generic [ref=e1447]:
+                    - button "Add files, connectors, and more" [ref=e1450] [cursor=pointer]:
+                      - img [ref=e1452]
+                    - button "Sonnet 4.6 Extended" [ref=e1456] [cursor=pointer]:
+                      - generic [ref=e1457]:
+                        - generic [ref=e1459]: Sonnet 4.6
+                        - generic [ref=e1460]: Extended
+                      - img [ref=e1462]
+                    - button "Use voice mode" [ref=e1467] [cursor=pointer]:
+                      - img [ref=e1470]
+              - note [ref=e1477]:
+                - link "Claude is AI and can make mistakes. Please double-check responses." [ref=e1478] [cursor=pointer]:
+                  - /url: https://support.anthropic.com/en/articles/8525154-claude-is-providing-incorrect-or-misleading-responses-what-s-going-on
+        - button "Share" [ref=e1480] [cursor=pointer]
+    - region "Notifications (F8)":
+      - list [ref=e1204]:
+        - status [ref=e1205]:
+          - generic [ref=e1207]:
+            - generic [ref=e1208]:
+              - img "Info" [ref=e1211]
+              - generic [ref=e1214]: Chat deleted
+            - button "Close" [ref=e1215] [cursor=pointer]:
+              - img [ref=e1217]
+        - status [ref=e1220]:
+          - generic [ref=e1222]:
+            - generic [ref=e1223]:
+              - img "Info" [ref=e1226]
+              - generic [ref=e1229]: Chat deleted
+            - button "Close" [ref=e1230] [cursor=pointer]:
+              - img [ref=e1232]
+        - status [ref=e1234]:
+          - generic [ref=e1236]:
+            - generic [ref=e1237]:
+              - img "Info" [ref=e1240]
+              - generic [ref=e1243]: Chat deleted
+            - button "Close" [ref=e1244] [cursor=pointer]:
+              - img [ref=e1246]
+        - status [ref=e1248]:
+          - generic [ref=e1250]:
+            - generic [ref=e1251]:
+              - img "Info" [ref=e1254]
+              - generic [ref=e1257]: Chat deleted
+            - button "Close" [ref=e1258] [cursor=pointer]:
+              - img [ref=e1260]
+        - status [ref=e1481]:
+          - generic [ref=e1483]:
+            - generic [ref=e1484]:
+              - img "Info" [ref=e1487]
+              - generic [ref=e1490]: Chat deleted
+            - button "Close" [ref=e1491] [cursor=pointer]:
+              - img [ref=e1493]
+        - status [ref=e1495]:
+          - generic [ref=e1497]:
+            - generic [ref=e1498]:
+              - img "Info" [ref=e1501]
+              - generic [ref=e1504]: Chat deleted
+            - button "Close" [ref=e1505] [cursor=pointer]:
+              - img [ref=e1507]
+  - iframe [ref=e409]:
+    
+  - status [ref=e1509]: Notification Chat deleted

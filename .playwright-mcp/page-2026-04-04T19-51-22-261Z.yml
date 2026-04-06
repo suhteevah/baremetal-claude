@@ -1,0 +1,201 @@
+- generic [ref=e2]:
+  - generic [ref=e5]:
+    - navigation "Sidebar" [ref=e7]:
+      - generic [ref=e8]:
+        - link "Home" [ref=e10] [cursor=pointer]:
+          - /url: /new
+          - img "Claude" [ref=e11]
+        - button "Close sidebar" [pressed] [ref=e14] [cursor=pointer]:
+          - img [ref=e17]
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - link "New chat" [ref=e23] [cursor=pointer]:
+            - /url: /new
+            - generic [ref=e24]:
+              - img [ref=e28]
+              - generic [ref=e31]: New chat
+              - generic [ref=e33]: Ctrl+⇧+O
+          - generic [ref=e34]:
+            - link "Search" [ref=e36] [cursor=pointer]:
+              - /url: "#"
+              - generic [ref=e37]:
+                - img [ref=e40]
+                - generic [ref=e43]: Search
+                - generic [ref=e45]: Ctrl+K
+            - link "Customize" [ref=e48] [cursor=pointer]:
+              - /url: /customize
+              - generic [ref=e49]:
+                - img [ref=e53]
+                - generic [ref=e56]: Customize
+        - generic [ref=e57]:
+          - generic [ref=e58]:
+            - link "Chats" [ref=e60] [cursor=pointer]:
+              - /url: /recents
+              - generic [ref=e61]:
+                - img [ref=e64]
+                - generic [ref=e68]: Chats
+            - link "Projects" [ref=e70] [cursor=pointer]:
+              - /url: /projects
+              - generic [ref=e71]:
+                - img [ref=e74]
+                - generic [ref=e79]: Projects
+            - link "Artifacts" [ref=e82] [cursor=pointer]:
+              - /url: /artifacts
+              - generic [ref=e83]:
+                - img [ref=e86]
+                - generic [ref=e93]: Artifacts
+            - link "Code" [ref=e95] [cursor=pointer]:
+              - /url: /code
+              - generic [ref=e96]:
+                - img [ref=e99]
+                - generic [ref=e104]:
+                  - generic [ref=e105]: Code
+                  - img [ref=e107]
+          - generic [ref=e112]:
+            - button "Recents Hide" [expanded] [ref=e114] [cursor=pointer]:
+              - text: Recents
+              - generic [ref=e115]: Hide
+            - list [ref=e116]:
+              - listitem [ref=e117]:
+                - generic [ref=e118]:
+                  - link "ClaudioOS Main" [ref=e119] [cursor=pointer]:
+                    - /url: /chat/aa584d36-498c-4864-8fe0-26bdb1a4224b
+                    - generic [ref=e121]: ClaudioOS Main
+                  - button "More options for ClaudioOS Main" [ref=e123] [cursor=pointer]:
+                    - img [ref=e125]
+              - listitem [ref=e127]:
+                - link "Eject retraction limit switch troubleshooting" [ref=e129] [cursor=pointer]:
+                  - /url: /chat/c23db96a-c5ad-4b88-8198-df01c41796b7
+                  - generic [ref=e131]: Eject retraction limit switch troubleshooting
+              - listitem [ref=e132]:
+                - link "ClaudioOS Agent" [ref=e134] [cursor=pointer]:
+                  - /url: /chat/2fe79dd9-78e3-4567-921b-6e9e1370e9bc
+                  - generic [ref=e136]: ClaudioOS Agent
+              - listitem [ref=e137]:
+                - link "Hello from bare metal" [ref=e139] [cursor=pointer]:
+                  - /url: /chat/f1482767-951a-4281-98c3-0e443ebc19b2
+                  - generic [ref=e141]: Hello from bare metal
+              - listitem [ref=e142]:
+                - link "Untitled" [ref=e144] [cursor=pointer]:
+                  - /url: /chat/aac8cfef-d209-4e8a-9541-3a32f7e2dd81
+                  - generic [ref=e146]: Untitled
+              - listitem [ref=e147]:
+                - link "Untitled" [ref=e149] [cursor=pointer]:
+                  - /url: /chat/5f4f5385-26e3-4ed7-a6bf-d36fc99d02a5
+                  - generic [ref=e151]: Untitled
+              - listitem [ref=e152]:
+                - link "Custom UEFI bootable environment for Claude agents" [ref=e154] [cursor=pointer]:
+                  - /url: /chat/fd01f7c7-3ac3-42c0-b063-a87f565c22d4
+                  - generic [ref=e156]: Custom UEFI bootable environment for Claude agents
+              - listitem [ref=e157]:
+                - link "Do I love Clare" [ref=e159] [cursor=pointer]:
+                  - /url: /chat/44a0fef7-7560-4b8c-ba5c-3917b42b38c0
+                  - generic [ref=e161]: Do I love Clare
+              - listitem [ref=e162]:
+                - link "Updating resume with GitHub and recent work experience" [ref=e164] [cursor=pointer]:
+                  - /url: /chat/a8ecae5c-d44d-49d1-93c4-2e573e2f7dff
+                  - generic [ref=e166]: Updating resume with GitHub and recent work experience
+              - listitem [ref=e167]:
+                - link "Wraith browser program review and safety assessment" [ref=e169] [cursor=pointer]:
+                  - /url: /chat/91244c17-cad7-41fa-a8ba-3bbf9d269fe6
+                  - generic [ref=e171]: Wraith browser program review and safety assessment
+              - listitem [ref=e172]:
+                - link "CAD to LightBurn measurement extraction for laser cutting" [ref=e174] [cursor=pointer]:
+                  - /url: /chat/84f6b235-f8ec-43a1-880b-a8535e1271d8
+                  - generic [ref=e176]: CAD to LightBurn measurement extraction for laser cutting
+              - listitem [ref=e177]:
+                - link "AI-controlled Rust web browser architecture" [ref=e179] [cursor=pointer]:
+                  - /url: /chat/8ed6ee3e-1cf1-4ac4-80fd-4b0b624aed55
+                  - generic [ref=e181]: AI-controlled Rust web browser architecture
+              - listitem [ref=e182]:
+                - link "Weekly performance assessment and graded review" [ref=e184] [cursor=pointer]:
+                  - /url: /chat/13ac78d3-bb22-4923-9e8d-103590a0c9d8
+                  - generic [ref=e186]: Weekly performance assessment and graded review
+              - listitem [ref=e187]:
+                - link "Bypassing Indeed's scraping blocks with Android emulator" [ref=e189] [cursor=pointer]:
+                  - /url: /chat/0faf7ae6-b31d-4627-bbf3-b9e759c1f524
+                  - generic [ref=e191]: Bypassing Indeed's scraping blocks with Android emulator
+              - listitem [ref=e192]:
+                - link "💬 Begin scaffolding our openclaw…" [ref=e194] [cursor=pointer]:
+                  - /url: /chat/1b818424-06ee-4684-bced-74cbaddb07a4
+                  - generic [ref=e196]: 💬 Begin scaffolding our openclaw…
+              - listitem [ref=e197]:
+                - link "Cheapest way to join VATSIM" [ref=e199] [cursor=pointer]:
+                  - /url: /chat/ebecf9ec-c4e0-4fec-b517-288c282d38b4
+                  - generic [ref=e201]: Cheapest way to join VATSIM
+              - listitem [ref=e202]:
+                - link "Personalized workout and keto meal prep plan" [ref=e204] [cursor=pointer]:
+                  - /url: /chat/381555d5-b6e1-4b27-a4db-46c493d19073
+                  - generic [ref=e206]: Personalized workout and keto meal prep plan
+              - listitem [ref=e207]:
+                - link "Opus 4.6 world interaction mode" [ref=e209] [cursor=pointer]:
+                  - /url: /chat/177ea59e-0584-4abc-9c06-134ed2c68a94
+                  - generic [ref=e211]: Opus 4.6 world interaction mode
+              - listitem [ref=e212]:
+                - link "Openclaw hosting infrastructure options" [ref=e214] [cursor=pointer]:
+                  - /url: /chat/73614799-0319-4926-822b-c28c07320be8
+                  - generic [ref=e216]: Openclaw hosting infrastructure options
+              - listitem [ref=e217]:
+                - link "How compound interest works" [ref=e219] [cursor=pointer]:
+                  - /url: /chat/8dcd4eb3-2106-49d9-ac56-e6c38d124928
+                  - generic [ref=e221]: How compound interest works
+              - listitem [ref=e222]:
+                - link "Grafana dashboard skill for client work" [ref=e224] [cursor=pointer]:
+                  - /url: /chat/ddd858a7-a9f5-4eb4-b729-27ed2d8771a8
+                  - generic [ref=e226]: Grafana dashboard skill for client work
+              - listitem [ref=e227]:
+                - link "Building a 10-inch 3D printed rack" [ref=e229] [cursor=pointer]:
+                  - /url: /chat/469f0ce7-08b7-45c7-bd68-c4a73f3d23af
+                  - generic [ref=e231]: Building a 10-inch 3D printed rack
+              - listitem [ref=e232]:
+                - link "Building Rust workspace with ocm-types crate" [ref=e234] [cursor=pointer]:
+                  - /url: /chat/e9f7a75b-2669-4e89-b191-72cf5107d905
+                  - generic [ref=e236]: Building Rust workspace with ocm-types crate
+            - link "All chats" [ref=e238] [cursor=pointer]:
+              - /url: /recents
+              - generic [ref=e239]:
+                - img [ref=e240]
+                - generic [ref=e242]: All chats
+        - button "Matt, Settings" [ref=e245] [cursor=pointer]:
+          - generic [ref=e248]: M
+          - generic [ref=e249]:
+            - generic [ref=e250]:
+              - generic [ref=e251]: Matt
+              - generic [ref=e252]: Max plan
+            - generic [ref=e253]:
+              - button "Get apps and extensions" [ref=e255]:
+                - img [ref=e257]
+              - img [ref=e259]
+    - generic [ref=e263]:
+      - banner [ref=e264]
+      - generic [ref=e287]:
+        - button:
+          - generic:
+            - img
+          - generic:
+            - img
+        - group [ref=e289]:
+          - generic:
+            - status
+          - generic [ref=e292]:
+            - textbox "Write your prompt to Claude" [active] [ref=e295]:
+              - paragraph [ref=e296]: Reply...
+            - generic [ref=e297]:
+              - generic [ref=e299]:
+                - button "Add files, connectors, and more" [disabled]:
+                  - generic:
+                    - img
+              - generic [ref=e301]:
+                - button "Sonnet 4.6" [disabled]:
+                  - generic:
+                    - generic:
+                      - generic: Sonnet 4.6
+                  - generic:
+                    - img
+              - button "Use voice mode" [ref=e305] [cursor=pointer]:
+                - img [ref=e308]
+        - note [ref=e315]:
+          - link "Claude is AI and can make mistakes. Please double-check responses." [ref=e316] [cursor=pointer]:
+            - /url: https://support.anthropic.com/en/articles/8525154-claude-is-providing-incorrect-or-misleading-responses-what-s-going-on
+  - region "Notifications (F8)":
+    - list
