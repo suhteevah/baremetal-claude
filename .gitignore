@@ -46,6 +46,9 @@ models/
 # Secrets — never commit
 .claude/.env
 
+# Telegram poller offset (per-machine state)
+.claude/telegram-offset.txt
+
 # Session/credentials (NEVER commit)
 target/session.txt
 target/credentials.img
