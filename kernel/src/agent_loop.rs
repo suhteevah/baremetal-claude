@@ -29,7 +29,9 @@ use claudio_api::tools::{
     build_server_port,
 };
 use claudio_api::{RetryConfig, RetryDecision, should_retry, parse_http_status, extract_http_headers};
+use claudio_llm::{LoadedModel, ModelConfig};
 use claudio_net::NetworkStack;
+use spin::Mutex;
 
 use crate::keyboard;
 
@@ -238,11 +240,35 @@ fn local_compile_handler(source: &str) -> Result<String, String> {
     }
 }
 
+/// Global registry for the local GGUF-loaded model. Set once via
+/// `init_local_model_from_bytes()` (e.g. from a build-time `include_bytes!`
+/// or once FAT32 reads land), then `local_model_handler` consults it.
+static LOCAL_MODEL: Mutex<Option<LoadedModel>> = Mutex::new(None);
+
+/// Parse a GGUF buffer and install it as the local model. The byte slice
+/// can be dropped after this call returns — weights are copied/dequantized
+/// into owned storage by `LoadedModel::from_bytes`.
+pub fn init_local_model_from_bytes(data: &[u8]) -> Result<(), String> {
+    log::info!("[llm] init_local_model_from_bytes: {} bytes", data.len());
+    let cfg = ModelConfig::default();
+    let loaded = LoadedModel::from_bytes(data, &cfg)?;
+    *LOCAL_MODEL.lock() = Some(loaded);
+    log::info!("[llm] local model installed");
+    Ok(())
+}
+
 /// Local model handler — runs GGUF model inference on bare metal.
 fn local_model_handler(prompt: &str, max_tokens: usize, temperature: f32) -> Result<String, String> {
     log::info!("[tool_handler] run_local_model: {} chars, max_tokens={}, temp={}", prompt.len(), max_tokens, temperature);
-    let _ = (prompt, max_tokens, temperature);
-    Err(String::from("no GGUF model loaded — download a model to /models/ first"))
+    let guard = LOCAL_MODEL.lock();
+    let model = guard.as_ref().ok_or_else(|| {
+        String::from("no GGUF model loaded — call init_local_model_from_bytes() at boot, or download a model to /models/ once FAT32 is mounted")
+    })?;
+    let cfg = ModelConfig {
+        temperature,
+        ..ModelConfig::default()
+    };
+    model.generate(prompt, max_tokens, &cfg)
 }
 
 /// file_read handler — reads from the kernel's VFS (fs-persist).

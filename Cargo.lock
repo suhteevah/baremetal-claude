@@ -456,6 +456,7 @@ dependencies = [
  "claudio-intel-nic",
  "claudio-jvm-lite",
  "claudio-linux-compat",
+ "claudio-llm",
  "claudio-lua-lite",
  "claudio-net",
  "claudio-ntfs",

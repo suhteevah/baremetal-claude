@@ -18,12 +18,40 @@
 #![no_std]
 extern crate alloc;
 
+use alloc::string::String;
+
 pub mod gguf;
 pub mod tensor;
 pub mod tokenizer;
 pub mod transformer;
 pub mod sampler;
 pub mod generate;
+
+/// A fully-loaded model: parsed weights + tokenizer, ready for inference.
+///
+/// `from_bytes` parses a GGUF buffer once and copies all weights/vocab into
+/// owned storage. The input buffer can be dropped after construction.
+pub struct LoadedModel {
+    pub model: transformer::TransformerModel,
+    pub tokenizer: tokenizer::Tokenizer,
+}
+
+impl LoadedModel {
+    /// Parse a GGUF buffer and build a runnable model + tokenizer.
+    pub fn from_bytes(data: &[u8], config: &ModelConfig) -> Result<Self, String> {
+        let gguf = gguf::GgufFile::parse(data)
+            .map_err(|e| alloc::format!("gguf parse failed: {:?}", e))?;
+        log::info!("[llm] loaded GGUF: {} tensors, arch={}", gguf.tensors.len(), gguf.architecture());
+        let model = transformer::TransformerModel::from_gguf(&gguf, config)?;
+        let tokenizer = tokenizer::Tokenizer::from_gguf(&gguf)?;
+        Ok(Self { model, tokenizer })
+    }
+
+    /// Generate text from a prompt. Convenience wrapper over `generate::generate`.
+    pub fn generate(&self, prompt: &str, max_tokens: usize, config: &ModelConfig) -> Result<String, String> {
+        generate::generate(&self.model, &self.tokenizer, prompt, max_tokens, config)
+    }
+}
 
 /// Configuration for model loading and inference.
 pub struct ModelConfig {
