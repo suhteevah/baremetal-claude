@@ -43,6 +43,9 @@ models/
 # Local worktrees (ephemeral)
 .claude/worktrees/
 
+# Secrets — never commit
+.claude/.env
+
 # Session/credentials (NEVER commit)
 target/session.txt
 target/credentials.img
