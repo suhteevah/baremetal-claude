@@ -18,6 +18,7 @@ Usage:
     python tools/export-gguf.py
 """
 
+import argparse
 import json
 import os
 import sys
@@ -57,7 +58,7 @@ MERGED_DIR = REPO_ROOT / "models" / "claudio-coder-7b-merged"
 LORA_R = 16                    # LoRA rank — 16 is good quality/memory tradeoff
 LORA_ALPHA = 32                # LoRA scaling factor (usually 2x rank)
 LORA_DROPOUT = 0.05            # Small dropout to prevent overfitting
-MAX_SEQ_LEN = 1024             # Dropped from 2048 — activation spikes on long
+MAX_SEQ_LEN = 512              # Dropped 1024 → 512 after VRAM spill (44s→147s climb, 2026-04-08)
                                # samples were spilling VRAM→sysRAM and BSOD'd
                                # the machine at ~step 3 of the 7B run.
 BATCH_SIZE = 1                 # Must be 1 for 8GB VRAM
@@ -186,13 +187,20 @@ def setup_model():
 # Training
 # ---------------------------------------------------------------------------
 
-def train(model, tokenizer, dataset):
-    """Run QLoRA fine-tuning."""
+def train(model, tokenizer, dataset, num_epochs: int, resume: bool):
+    """Run QLoRA fine-tuning.
+
+    num_epochs: total epochs for THIS run (e.g. 1 for a per-epoch session).
+    resume:     if True and a checkpoint exists in OUTPUT_DIR, resume from it.
+                Trainer restores optimizer state, LR schedule position, and
+                dataloader position — mathematically identical to an
+                uninterrupted run, just spread across sessions.
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     training_args = SFTConfig(
         output_dir=str(OUTPUT_DIR),
-        num_train_epochs=NUM_EPOCHS,
+        num_train_epochs=num_epochs,
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUM,
         learning_rate=LEARNING_RATE,
@@ -221,11 +229,18 @@ def train(model, tokenizer, dataset):
         args=training_args,
     )
 
-    print(f"\nStarting training: {NUM_EPOCHS} epochs, {len(dataset)} examples")
-    print(f"Effective batch size: {BATCH_SIZE * GRADIENT_ACCUM}")
-    print(f"Output: {OUTPUT_DIR}\n")
+    # Detect existing checkpoint for resume
+    has_checkpoint = any(
+        p.name.startswith("checkpoint-") for p in OUTPUT_DIR.iterdir()
+    ) if OUTPUT_DIR.exists() else False
+    should_resume = resume and has_checkpoint
 
-    trainer.train()
+    print(f"\nStarting training: {num_epochs} epoch(s), {len(dataset)} examples")
+    print(f"Effective batch size: {BATCH_SIZE * GRADIENT_ACCUM}")
+    print(f"Output: {OUTPUT_DIR}")
+    print(f"Resume from checkpoint: {should_resume}\n")
+
+    trainer.train(resume_from_checkpoint=should_resume)
     trainer.save_model(str(OUTPUT_DIR))
     tokenizer.save_pretrained(str(OUTPUT_DIR))
 
@@ -236,12 +251,35 @@ def train(model, tokenizer, dataset):
 # Main
 # ---------------------------------------------------------------------------
 
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="QLoRA fine-tune Qwen2.5-Coder-7B on ClaudioOS data."
+    )
+    p.add_argument(
+        "--epochs",
+        type=int,
+        default=NUM_EPOCHS,
+        help=f"Epochs to run THIS session (default: {NUM_EPOCHS}). "
+             "For per-epoch sessions use --epochs 1 and rely on auto-resume.",
+    )
+    p.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore existing checkpoints and start fresh. "
+             "Default is to always resume if a checkpoint exists.",
+    )
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print("=" * 60)
     print("ClaudioOS Model Fine-Tuning")
     print(f"Base model: {BASE_MODEL}")
     print(f"Training data: {TRAINING_DATA}")
     print(f"Target GPU: RTX 3070 Ti (8GB VRAM)")
+    print(f"Epochs this session: {args.epochs}  |  Resume: {not args.no_resume}")
     print("=" * 60)
 
     # Check CUDA
@@ -260,7 +298,7 @@ def main():
 
     dataset = load_training_data()
     model, tokenizer = setup_model()
-    train(model, tokenizer, dataset)
+    train(model, tokenizer, dataset, num_epochs=args.epochs, resume=not args.no_resume)
 
     print(f"\nNext steps:")
     print(f"  1. Merge LoRA weights:  python tools/export-gguf.py")
