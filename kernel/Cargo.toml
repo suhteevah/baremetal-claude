@@ -43,6 +43,7 @@ claudio-gpu = { path = "../crates/gpu" }
 claudio-sshd = { path = "../crates/sshd" }
 claudio-vfs = { path = "../crates/vfs" }
 claudio-shell = { path = "../crates/shell" }
+terminal-core = { path = "../crates/terminal-core" }
 claudio-editor = { path = "../crates/editor" }
 claudio-usb-storage = { path = "../crates/usb-storage" }
 claudio-bluetooth = { path = "../crates/bluetooth" }

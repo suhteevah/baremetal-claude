@@ -42,6 +42,7 @@ use claudio_agent::{AgentState, Dashboard};
 use claudio_net::{Instant, NetworkStack};
 use claudio_shell::{Shell, Vfs, SystemInfo};
 use claudio_terminal::{Layout, SplitDirection, FONT_HEIGHT};
+use terminal_core::{InputRouter, RouterOutcome, DashboardCommand as CoreCommand, KeyEvent as CoreKeyEvent, KeyCode as CoreKeyCode};
 
 use crate::filemanager::{self, FileManagerState, FileManagerAction};
 use crate::ipc;
@@ -677,22 +678,16 @@ impl InputBuffer {
 // Prefix key state machine
 // ---------------------------------------------------------------------------
 
-/// Two-state machine for the tmux-style prefix key system.
-///
-/// In Normal mode, all keypresses go to the focused pane's input buffer.
-/// When the user presses Ctrl+B, we enter AwaitingCommand mode.  The NEXT
-/// keypress is interpreted as a pane management command (e.g., `"` = split
-/// horizontal, `c` = new agent, `x` = close pane, `n`/`p` = cycle focus).
-/// After the command key, we return to Normal mode.
-///
-/// This mirrors tmux's prefix key behavior so users with tmux muscle memory
-/// can operate the dashboard without learning new keybindings.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PrefixState {
-    /// Normal mode — keys go to the focused pane.
-    Normal,
-    /// Prefix key (Ctrl+B) was pressed — next key is a command.
-    AwaitingCommand,
+/// Convert a Unicode character from pc-keyboard into a terminal-core KeyEvent.
+/// pc-keyboard with HandleControl::MapLettersToUnicode delivers Ctrl+letter
+/// as Unicode control codes (e.g., Ctrl+B = 0x02).
+fn to_core_key_event(c: char) -> CoreKeyEvent {
+    if c <= '\x1a' && c != '\n' && c != '\r' && c != '\t' && c != '\x08' {
+        let letter = (c as u8 + b'a' - 1) as char;
+        CoreKeyEvent::ctrl(letter)
+    } else {
+        CoreKeyEvent::plain(CoreKeyCode::Char(c))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -764,7 +759,8 @@ pub async fn run_dashboard(
     // -- Keyboard event loop ------------------------------------------------
 
     let stream = ScancodeStream::new();
-    let mut prefix_state = PrefixState::Normal;
+    let mut router = InputRouter::new();
+    // Add sysmon binding: Ctrl+B m → SysMonitor (no CoreCommand variant; handled below)
     let mut last_sysmon_tick: u64 = crate::interrupts::tick_count();
 
     loop {
@@ -940,11 +936,144 @@ pub async fn run_dashboard(
 
         match key {
             DecodedKey::Unicode(c) => {
-                match prefix_state {
-                    PrefixState::AwaitingCommand => {
-                        prefix_state = PrefixState::Normal;
-                        handle_prefix_command(
-                            c,
+                // Clipboard shortcuts bypass the router (modifier tracking via scancode).
+                if crate::vconsole::shift_held() {
+                    match c {
+                        '\x03' => {
+                            // Ctrl+Shift+C — copy current input buffer to clipboard.
+                            let focused_pane_id = layout.focused_pane_id();
+                            if let Some(buf) = input_buffers.iter().find(|b| b.pane_id == focused_pane_id) {
+                                let text = buf.as_str();
+                                if !text.is_empty() {
+                                    crate::clipboard::copy(text);
+                                    if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                                        pane.write_str("\x1b[90m[copied]\x1b[0m");
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        '\x16' => {
+                            // Ctrl+Shift+V — paste clipboard into current input buffer.
+                            let focused_pane_id = layout.focused_pane_id();
+                            let text = crate::clipboard::paste();
+                            if !text.is_empty() {
+                                if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
+                                    for ch in text.chars() {
+                                        if !ch.is_control() || ch == '\t' {
+                                            buf.push(ch);
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        '\x08' => {
+                            // Ctrl+Shift+H — cycle clipboard history, paste selection.
+                            let focused_pane_id = layout.focused_pane_id();
+                            let text = crate::clipboard::cycle_history();
+                            if !text.is_empty() {
+                                if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
+                                    // Replace current input with the history entry.
+                                    buf.drain();
+                                    for ch in text.chars() {
+                                        if !ch.is_control() || ch == '\t' {
+                                            buf.push(ch);
+                                        }
+                                    }
+                                }
+                                if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                                    let preview = if text.len() > 40 {
+                                        &text[..40]
+                                    } else {
+                                        &text
+                                    };
+                                    pane.write_str(&format!("\x1b[90m[clipboard: {}...]\x1b[0m", preview));
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Handle sysmon prefix command (Ctrl+B m) — not in CoreCommand.
+                // We intercept the raw '\x02' (Ctrl+B) + 'm' sequence before routing.
+                if router.is_awaiting_command() && c == 'm' {
+                    // consume via router so it returns to Normal mode
+                    let _ = router.handle_key(to_core_key_event(c));
+                    log::info!("[dashboard] new sysmon pane (split horizontal)");
+                    {
+                        let layout = &mut layout;
+                        let pane_types = &mut pane_types;
+                        let input_buffers = &mut input_buffers;
+                        layout.split(SplitDirection::Horizontal);
+                        let new_pane_id = layout.focused_pane_id();
+                        pane_types.push(PaneType::SysMonitor(new_pane_id));
+                        input_buffers.push(InputBuffer::new(new_pane_id));
+                        let stats = crate::sysmon::collect_stats(&dashboard);
+                        let rendered = crate::sysmon::render_to_string(&stats);
+                        if let Some(pane) = layout.pane_by_id_mut(new_pane_id) {
+                            pane.write_str(&rendered);
+                        }
+                    }
+                    let focused_pane_id = layout.focused_pane_id();
+                    render_prompt_for_pane(&mut layout, &pane_types, &input_buffers, focused_pane_id, &dashboard);
+                    render_full(&mut layout);
+                    continue;
+                }
+
+                // Handle rename prefix command (Ctrl+B ,) — not in CoreCommand.
+                if router.is_awaiting_command() && c == ',' {
+                    // consume via router so it returns to Normal mode
+                    let _ = router.handle_key(to_core_key_event(c));
+                    let focused_pane_id = layout.focused_pane_id();
+                    if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
+                        let new_name = buf.drain();
+                        if !new_name.is_empty() {
+                            if let Some(pt) = pane_types.iter().find(|pt| match pt {
+                                PaneType::Agent(aid) => {
+                                    dashboard.session_by_id(*aid).map(|s| s.pane_id) == Some(focused_pane_id)
+                                }
+                                _ => false,
+                            }) {
+                                if let PaneType::Agent(aid) = pt {
+                                    let aid = *aid;
+                                    if let Some(session) = dashboard.session_by_id_mut(aid) {
+                                        let old_name = session.name.clone();
+                                        session.name = new_name.clone();
+                                        ipc::IPC.lock().bus.rename_agent(aid, new_name.clone());
+                                        log::info!("[dashboard] renamed agent {} -> \"{}\"", old_name, new_name);
+                                        if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                                            pane.write_str(&format!(
+                                                "\r\n\x1b[93mRenamed: {} -> {}\x1b[0m\r\n",
+                                                old_name, new_name
+                                            ));
+                                        }
+                                    }
+                                }
+                            } else {
+                                if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                                    pane.write_str("\r\n\x1b[31mRename only works on agent panes.\x1b[0m\r\n");
+                                }
+                            }
+                        } else {
+                            if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
+                                pane.write_str("\r\n\x1b[90mRename: type a name first, then Ctrl+B ,\x1b[0m\r\n");
+                            }
+                        }
+                    }
+                    let focused_pane_id = layout.focused_pane_id();
+                    render_prompt_for_pane(&mut layout, &pane_types, &input_buffers, focused_pane_id, &dashboard);
+                    render_full(&mut layout);
+                    continue;
+                }
+
+                let core_key = to_core_key_event(c);
+                match router.handle_key(core_key) {
+                    RouterOutcome::Command(cmd) => {
+                        apply_command(
+                            cmd,
                             &mut layout,
                             &mut dashboard,
                             &mut pane_types,
@@ -953,84 +1082,12 @@ pub async fn run_dashboard(
                             stack_send.0,
                             now,
                         );
-                        // Structural change — do a full render.
                         let focused_pane_id = layout.focused_pane_id();
                         render_prompt_for_pane(&mut layout, &pane_types, &input_buffers, focused_pane_id, &dashboard);
                         render_full(&mut layout);
                         continue;
                     }
-                    PrefixState::Normal => {
-                        // Ctrl+B detection: pc-keyboard with HandleControl::MapLettersToUnicode
-                        // delivers Ctrl+letter as the Unicode control code. Ctrl+B = 0x02.
-                        if c == '\x02' {
-                            prefix_state = PrefixState::AwaitingCommand;
-                            log::debug!("[dashboard] prefix key (Ctrl+B) pressed");
-                            continue;
-                        }
-
-                        // Clipboard shortcuts (Ctrl+Shift detected via scancode modifier tracking):
-                        // Ctrl+C (0x03) with Shift held = copy, Ctrl+V (0x16) with Shift held = paste,
-                        // Ctrl+H (0x08) with Shift held = cycle clipboard history.
-                        if crate::vconsole::shift_held() {
-                            match c {
-                                '\x03' => {
-                                    // Ctrl+Shift+C — copy current input buffer to clipboard.
-                                    let focused_pane_id = layout.focused_pane_id();
-                                    if let Some(buf) = input_buffers.iter().find(|b| b.pane_id == focused_pane_id) {
-                                        let text = buf.as_str();
-                                        if !text.is_empty() {
-                                            crate::clipboard::copy(text);
-                                            if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
-                                                pane.write_str("\x1b[90m[copied]\x1b[0m");
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
-                                '\x16' => {
-                                    // Ctrl+Shift+V — paste clipboard into current input buffer.
-                                    let focused_pane_id = layout.focused_pane_id();
-                                    let text = crate::clipboard::paste();
-                                    if !text.is_empty() {
-                                        if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
-                                            for ch in text.chars() {
-                                                if !ch.is_control() || ch == '\t' {
-                                                    buf.push(ch);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
-                                '\x08' => {
-                                    // Ctrl+Shift+H — cycle clipboard history, paste selection.
-                                    let focused_pane_id = layout.focused_pane_id();
-                                    let text = crate::clipboard::cycle_history();
-                                    if !text.is_empty() {
-                                        if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
-                                            // Replace current input with the history entry.
-                                            buf.drain();
-                                            for ch in text.chars() {
-                                                if !ch.is_control() || ch == '\t' {
-                                                    buf.push(ch);
-                                                }
-                                            }
-                                        }
-                                        if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
-                                            let preview = if text.len() > 40 {
-                                                &text[..40]
-                                            } else {
-                                                &text
-                                            };
-                                            pane.write_str(&format!("\x1b[90m[clipboard: {}...]\x1b[0m", preview));
-                                        }
-                                    }
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-
+                    RouterOutcome::ForwardToPane => {
                         let focused_pane_id = layout.focused_pane_id();
 
                         // Browser pane — route all keys to the browser.
@@ -1106,12 +1163,16 @@ pub async fn run_dashboard(
                             }
                         }
                     }
+                    RouterOutcome::Swallow => {
+                        continue;
+                    }
                 }
             }
             DecodedKey::RawKey(k) => {
-                // If we were waiting for a prefix command and got a raw key, cancel.
-                if prefix_state == PrefixState::AwaitingCommand {
-                    prefix_state = PrefixState::Normal;
+                // If we were waiting for a prefix command and got a raw key, cancel via router.
+                if router.is_awaiting_command() {
+                    // Feed a dummy key to reset to Normal state, then discard.
+                    let _ = router.handle_key(CoreKeyEvent::plain(CoreKeyCode::Unknown(0)));
                     log::debug!("[dashboard] prefix cancelled by raw key: {:?}", k);
                 }
                 // Route raw keys to browser if focused.
@@ -1195,9 +1256,9 @@ pub async fn run_dashboard(
 // Prefix command dispatch
 // ---------------------------------------------------------------------------
 
-/// Handle the key pressed after Ctrl+B.
-fn handle_prefix_command(
-    c: char,
+/// Dispatch a dashboard command from the InputRouter.
+fn apply_command(
+    cmd: CoreCommand,
     layout: &mut Layout,
     dashboard: &mut Dashboard,
     pane_types: &mut Vec<PaneType>,
@@ -1206,9 +1267,9 @@ fn handle_prefix_command(
     stack_ptr: *mut NetworkStack,
     now: fn() -> Instant,
 ) {
-    match c {
+    match cmd {
         // Split horizontal: Ctrl+B then "
-        '"' => {
+        CoreCommand::SplitHorizontal => {
             log::info!("[dashboard] split horizontal (agent)");
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
@@ -1224,7 +1285,7 @@ fn handle_prefix_command(
         }
 
         // Split vertical: Ctrl+B then %
-        '%' => {
+        CoreCommand::SplitVertical => {
             log::info!("[dashboard] split vertical (agent)");
             layout.split(SplitDirection::Vertical);
             let new_pane_id = layout.focused_pane_id();
@@ -1240,19 +1301,19 @@ fn handle_prefix_command(
         }
 
         // Focus next pane: Ctrl+B then n
-        'n' => {
+        CoreCommand::FocusNext => {
             log::info!("[dashboard] focus next");
             layout.focus_next();
         }
 
         // Focus previous pane: Ctrl+B then p
-        'p' => {
+        CoreCommand::FocusPrev => {
             log::info!("[dashboard] focus prev");
             layout.focus_prev();
         }
 
         // New agent session: Ctrl+B then c
-        'c' => {
+        CoreCommand::SpawnAgent => {
             log::info!("[dashboard] new agent pane (split horizontal)");
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
@@ -1275,7 +1336,7 @@ fn handle_prefix_command(
         }
 
         // New shell session: Ctrl+B then s
-        's' => {
+        CoreCommand::SpawnShell => {
             log::info!("[dashboard] new shell pane (split horizontal)");
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
@@ -1292,7 +1353,7 @@ fn handle_prefix_command(
         }
 
         // Close focused pane: Ctrl+B then x
-        'x' => {
+        CoreCommand::ClosePane => {
             if layout.pane_count() <= 1 {
                 log::warn!("[dashboard] cannot close last pane");
                 return;
@@ -1329,24 +1390,8 @@ fn handle_prefix_command(
             layout.close_focused();
         }
 
-        // System monitor: Ctrl+B then m
-        'm' => {
-            log::info!("[dashboard] new sysmon pane (split horizontal)");
-            layout.split(SplitDirection::Horizontal);
-            let new_pane_id = layout.focused_pane_id();
-            pane_types.push(PaneType::SysMonitor(new_pane_id));
-            input_buffers.push(InputBuffer::new(new_pane_id));
-
-            // Render initial monitor content.
-            let stats = crate::sysmon::collect_stats(dashboard);
-            let rendered = crate::sysmon::render_to_string(&stats);
-            if let Some(pane) = layout.pane_by_id_mut(new_pane_id) {
-                pane.write_str(&rendered);
-            }
-        }
-
         // File manager: Ctrl+B then f
-        'f' => {
+        CoreCommand::OpenFiles => {
             log::info!("[dashboard] new file manager pane (split horizontal)");
             layout.split(SplitDirection::Horizontal);
             let new_pane_id = layout.focused_pane_id();
@@ -1362,50 +1407,20 @@ fn handle_prefix_command(
             input_buffers.push(InputBuffer::new(new_pane_id));
         }
 
-        // Rename focused agent: Ctrl+B then ,
-        // Consumes the current input buffer as the new name.
-        ',' => {
-            let focused_pane_id = layout.focused_pane_id();
-            if let Some(buf) = input_buffers.iter_mut().find(|b| b.pane_id == focused_pane_id) {
-                let new_name = buf.drain();
-                if !new_name.is_empty() {
-                    // Find agent for this pane.
-                    if let Some(pt) = pane_types.iter().find(|pt| match pt {
-                        PaneType::Agent(aid) => {
-                            dashboard.session_by_id(*aid).map(|s| s.pane_id) == Some(focused_pane_id)
-                        }
-                        _ => false,
-                    }) {
-                        if let PaneType::Agent(aid) = pt {
-                            let aid = *aid;
-                            if let Some(session) = dashboard.session_by_id_mut(aid) {
-                                let old_name = session.name.clone();
-                                session.name = new_name.clone();
-                                ipc::IPC.lock().bus.rename_agent(aid, new_name.clone());
-                                log::info!("[dashboard] renamed agent {} -> \"{}\"", old_name, new_name);
-                                if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
-                                    pane.write_str(&format!(
-                                        "\r\n\x1b[93mRenamed: {} -> {}\x1b[0m\r\n",
-                                        old_name, new_name
-                                    ));
-                                }
-                            }
-                        }
-                    } else {
-                        if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
-                            pane.write_str("\r\n\x1b[31mRename only works on agent panes.\x1b[0m\r\n");
-                        }
-                    }
-                } else {
-                    if let Some(pane) = layout.pane_by_id_mut(focused_pane_id) {
-                        pane.write_str("\r\n\x1b[90mRename: type a name first, then Ctrl+B ,\x1b[0m\r\n");
-                    }
-                }
-            }
+        CoreCommand::OpenBrowser => {
+            log::info!("[dashboard] open browser (reserved)");
         }
 
-        other => {
-            log::debug!("[dashboard] unknown prefix command: {:?}", other);
+        CoreCommand::ToggleStatusBar => {
+            log::info!("[dashboard] toggle status bar");
+        }
+
+        CoreCommand::NextLayout | CoreCommand::PreviousLayout => {
+            log::info!("[dashboard] layout switch");
+        }
+
+        CoreCommand::Quit => {
+            log::info!("[dashboard] quit requested");
         }
     }
 }
