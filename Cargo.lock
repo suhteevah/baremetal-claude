@@ -547,6 +547,8 @@ version = "0.1.0"
 dependencies = [
  "log",
  "spin",
+ "terminal-core",
+ "terminal-fb",
  "vte",
 ]
 

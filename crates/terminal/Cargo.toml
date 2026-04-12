@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+terminal-core = { path = "../terminal-core" }
+terminal-fb = { path = "../terminal-fb" }
 vte = { workspace = true }
 log = { workspace = true }
 spin = { workspace = true }
