@@ -1,5 +1,7 @@
 mod cli;
 mod config;
+mod conpty;
+mod host;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
