@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEvent as CtKeyEvent, KeyCode as CtKeyCode, KeyModifiers},
+    event::{self, Event, KeyEvent as CtKeyEvent, KeyEventKind, KeyCode as CtKeyCode, KeyModifiers},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -40,7 +40,13 @@ impl Host {
             loop {
                 match event::read() {
                     Ok(Event::Key(ct_key)) => {
+                        // Only process key PRESS events — crossterm 0.28 also
+                        // sends Release and Repeat which would double every key.
+                        if ct_key.kind != KeyEventKind::Press {
+                            continue;
+                        }
                         if let Some(key) = convert_key(ct_key) {
+                            tracing::debug!("key: {:?} (ct: code={:?} mods={:?})", key, ct_key.code, ct_key.modifiers);
                             if key_tx.blocking_send(key).is_err() {
                                 break;
                             }

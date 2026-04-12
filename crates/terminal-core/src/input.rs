@@ -82,7 +82,9 @@ impl InputRouter {
             Mode::AwaitingCommand => {
                 self.mode = Mode::Normal;
                 match key.code {
-                    KeyCode::Char(c) if key.mods == Modifiers::empty() => {
+                    // Accept command keys with no mods OR with only SHIFT
+                    // (since characters like " % require Shift to type).
+                    KeyCode::Char(c) if key.mods.difference(Modifiers::SHIFT).is_empty() => {
                         match self.bindings.get(&c) {
                             Some(&cmd) => RouterOutcome::Command(cmd),
                             None => RouterOutcome::Swallow,
@@ -216,5 +218,31 @@ mod tests {
         );
         // Back to normal after swallow
         assert_eq!(router.handle_key(key('a')), RouterOutcome::ForwardToPane);
+    }
+
+    #[test]
+    fn shifted_command_keys_work() {
+        // " requires Shift to type — crossterm sends Char('"') with SHIFT modifier.
+        let mut router = InputRouter::new();
+        assert_eq!(router.handle_key(ctrl_b()), RouterOutcome::Swallow);
+        let shifted_quote = KeyEvent {
+            code: KeyCode::Char('"'),
+            mods: Modifiers::SHIFT,
+        };
+        assert_eq!(
+            router.handle_key(shifted_quote),
+            RouterOutcome::Command(DashboardCommand::SplitHorizontal),
+        );
+
+        // % also requires Shift.
+        assert_eq!(router.handle_key(ctrl_b()), RouterOutcome::Swallow);
+        let shifted_percent = KeyEvent {
+            code: KeyCode::Char('%'),
+            mods: Modifiers::SHIFT,
+        };
+        assert_eq!(
+            router.handle_key(shifted_percent),
+            RouterOutcome::Command(DashboardCommand::SplitVertical),
+        );
     }
 }

@@ -30,18 +30,23 @@ pub async fn run(config: Config, session_name: String) -> Result<()> {
             // in raw mode and forwarded to the focused shell pane. Use Ctrl+B q to quit.
 
             Some(key) = key_rx.recv() => {
-                match session.router.handle_key(key) {
+                let outcome = session.router.handle_key(key);
+                tracing::info!("key: {:?} → {:?}", key, outcome);
+                match outcome {
                     RouterOutcome::Command(DashboardCommand::Quit) => {
                         tracing::info!("quit command");
                         break;
                     }
                     RouterOutcome::Command(cmd) => {
+                        tracing::info!("executing command: {:?}", cmd);
                         session.apply_command(cmd, &pty_tx).await?;
                     }
                     RouterOutcome::ForwardToPane => {
                         session.forward_to_focused(key).await?;
                     }
-                    RouterOutcome::Swallow => {}
+                    RouterOutcome::Swallow => {
+                        tracing::info!("swallowed (prefix key?)");
+                    }
                 }
             }
 
