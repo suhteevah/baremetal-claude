@@ -26,6 +26,8 @@
 use alloc::alloc::{alloc_zeroed, Layout};
 use core::ptr;
 
+use crate::VirtToPhys;
+
 // ---------------------------------------------------------------------------
 // FIS types
 // ---------------------------------------------------------------------------
@@ -316,9 +318,9 @@ pub const CMD_TABLE_PRDT_OFFSET: usize = 128;
 
 /// Allocate a Command Table with space for `prdt_count` PRDT entries.
 ///
-/// The Command Table must be 128-byte aligned. Returns the physical address
-/// of the allocated table.
-pub fn allocate_cmd_table(prdt_count: usize) -> Option<u64> {
+/// The Command Table must be 128-byte aligned. Returns `(virt, phys)` —
+/// the virtual address (for CPU writes) and the physical address (for CTBA).
+pub fn allocate_cmd_table(prdt_count: usize, virt_to_phys: VirtToPhys) -> Option<(u64, u64)> {
     let size = CMD_TABLE_HEADER_SIZE + prdt_count * core::mem::size_of::<PrdtEntry>();
     let layout = match Layout::from_size_align(size, 128) {
         Ok(l) => l,
@@ -332,11 +334,13 @@ pub fn allocate_cmd_table(prdt_count: usize) -> Option<u64> {
         log::error!("[ahci] failed to allocate command table ({} bytes)", size);
         return None;
     }
+    let virt = ptr as u64;
+    let phys = virt_to_phys(ptr as usize);
     log::trace!(
-        "[ahci] allocated command table at {:#x} ({} bytes, {} PRDT entries)",
-        ptr as u64, size, prdt_count
+        "[ahci] allocated command table virt={:#x} phys={:#x} ({} bytes, {} PRDT entries)",
+        virt, phys, size, prdt_count
     );
-    Some(ptr as u64)
+    Some((virt, phys))
 }
 
 /// Write a FIS_REG_H2D into the CFIS area of a Command Table.
@@ -371,155 +375,161 @@ pub fn write_prdt(cmd_table_addr: u64, index: usize, entry: &PrdtEntry) {
 /// Build a READ DMA EXT command (ATA command 0x25).
 ///
 /// Reads `count` sectors starting at `lba` into the buffer at `buf_phys_addr`.
-/// Sector size is assumed to be 512 bytes.
+/// `buf_phys_addr` must already be a physical address (caller translates).
 ///
-/// Returns `(cmd_header, cmd_table_addr)`.
+/// Returns `(cmd_header, cmd_table_virt)` — the command table virtual address
+/// is returned so the caller can deallocate it later if needed.
 pub fn build_read_dma_ext(
     lba: u64,
     count: u16,
     buf_phys_addr: u64,
     sector_size: u32,
+    virt_to_phys: VirtToPhys,
 ) -> Option<(CommandHeader, u64)> {
     log::trace!(
-        "[ahci] build READ DMA EXT: LBA={}, count={}, buf={:#x}",
+        "[ahci] build READ DMA EXT: LBA={}, count={}, buf_phys={:#x}",
         lba, count, buf_phys_addr
     );
 
     let byte_count = count as u32 * sector_size;
     let prdt_count = prdt_entries_needed(byte_count);
-    let ct_addr = allocate_cmd_table(prdt_count)?;
+    let (ct_virt, ct_phys) = allocate_cmd_table(prdt_count, virt_to_phys)?;
 
-    // Build FIS
+    // Build FIS — write to virtual address (CPU access)
     let mut fis = FisRegH2d::new();
     fis.set_command_bit();
     fis.command = ATA_CMD_READ_DMA_EXT;
     fis.set_lba(lba);
     fis.set_count(count);
-    write_cfis(ct_addr, &fis);
+    write_cfis(ct_virt, &fis);
 
     // Build PRDT entries (split across 4 MiB boundaries if needed)
+    // PRDT entries contain physical addresses for the HBA to DMA into.
     let mut remaining = byte_count;
     let mut addr = buf_phys_addr;
     for i in 0..prdt_count {
         let chunk = core::cmp::min(remaining, 4 * 1024 * 1024);
         let ioc = i == prdt_count - 1; // IOC on last entry
-        write_prdt(ct_addr, i, &PrdtEntry::new(addr, chunk, ioc));
+        write_prdt(ct_virt, i, &PrdtEntry::new(addr, chunk, ioc));
         addr += chunk as u64;
         remaining -= chunk;
     }
 
-    // Build Command Header
+    // Build Command Header — CTBA is physical (HBA fetches command table via DMA)
     let mut hdr = CommandHeader::zeroed();
     hdr.set_cfl(5); // FIS_REG_H2D is 5 DWORDs (20 bytes)
     hdr.set_prdtl(prdt_count as u16);
     hdr.set_write(false); // Read = D2H
-    hdr.set_ctba(ct_addr);
+    hdr.set_ctba(ct_phys);
 
-    Some((hdr, ct_addr))
+    Some((hdr, ct_virt))
 }
 
 /// Build a WRITE DMA EXT command (ATA command 0x35).
 ///
 /// Writes `count` sectors starting at `lba` from the buffer at `buf_phys_addr`.
+/// `buf_phys_addr` must already be a physical address (caller translates).
 ///
-/// Returns `(cmd_header, cmd_table_addr)`.
+/// Returns `(cmd_header, cmd_table_virt)`.
 pub fn build_write_dma_ext(
     lba: u64,
     count: u16,
     buf_phys_addr: u64,
     sector_size: u32,
+    virt_to_phys: VirtToPhys,
 ) -> Option<(CommandHeader, u64)> {
     log::trace!(
-        "[ahci] build WRITE DMA EXT: LBA={}, count={}, buf={:#x}",
+        "[ahci] build WRITE DMA EXT: LBA={}, count={}, buf_phys={:#x}",
         lba, count, buf_phys_addr
     );
 
     let byte_count = count as u32 * sector_size;
     let prdt_count = prdt_entries_needed(byte_count);
-    let ct_addr = allocate_cmd_table(prdt_count)?;
+    let (ct_virt, ct_phys) = allocate_cmd_table(prdt_count, virt_to_phys)?;
 
-    // Build FIS
+    // Build FIS — write to virtual address (CPU access)
     let mut fis = FisRegH2d::new();
     fis.set_command_bit();
     fis.command = ATA_CMD_WRITE_DMA_EXT;
     fis.set_lba(lba);
     fis.set_count(count);
-    write_cfis(ct_addr, &fis);
+    write_cfis(ct_virt, &fis);
 
-    // Build PRDT entries
+    // Build PRDT entries — physical addresses for HBA DMA
     let mut remaining = byte_count;
     let mut addr = buf_phys_addr;
     for i in 0..prdt_count {
         let chunk = core::cmp::min(remaining, 4 * 1024 * 1024);
         let ioc = i == prdt_count - 1;
-        write_prdt(ct_addr, i, &PrdtEntry::new(addr, chunk, ioc));
+        write_prdt(ct_virt, i, &PrdtEntry::new(addr, chunk, ioc));
         addr += chunk as u64;
         remaining -= chunk;
     }
 
-    // Build Command Header
+    // Build Command Header — CTBA is physical (HBA fetches command table via DMA)
     let mut hdr = CommandHeader::zeroed();
     hdr.set_cfl(5);
     hdr.set_prdtl(prdt_count as u16);
     hdr.set_write(true); // Write = H2D
-    hdr.set_ctba(ct_addr);
+    hdr.set_ctba(ct_phys);
 
-    Some((hdr, ct_addr))
+    Some((hdr, ct_virt))
 }
 
 /// Build an ATA IDENTIFY DEVICE command (0xEC).
 ///
-/// Returns 512 bytes of device identification data.
+/// `identify_buf_phys` must be the physical address of the 512-byte
+/// IDENTIFY receive buffer (caller translates).
 ///
-/// Returns `(cmd_header, cmd_table_addr, identify_buf_addr)`.
-pub fn build_identify(identify_buf_addr: u64) -> Option<(CommandHeader, u64)> {
+/// Returns `(cmd_header, cmd_table_virt)`.
+pub fn build_identify(identify_buf_phys: u64, virt_to_phys: VirtToPhys) -> Option<(CommandHeader, u64)> {
     log::trace!(
-        "[ahci] build IDENTIFY DEVICE: buf={:#x}",
-        identify_buf_addr
+        "[ahci] build IDENTIFY DEVICE: buf_phys={:#x}",
+        identify_buf_phys
     );
 
-    let ct_addr = allocate_cmd_table(1)?; // 1 PRDT entry for 512 bytes
+    let (ct_virt, ct_phys) = allocate_cmd_table(1, virt_to_phys)?; // 1 PRDT entry for 512 bytes
 
-    // Build FIS
+    // Build FIS — write to virtual address (CPU access)
     let mut fis = FisRegH2d::new();
     fis.set_command_bit();
     fis.command = ATA_CMD_IDENTIFY;
     fis.device = 0; // No LBA for IDENTIFY
-    write_cfis(ct_addr, &fis);
+    write_cfis(ct_virt, &fis);
 
-    // Single PRDT entry: 512 bytes of IDENTIFY data
-    write_prdt(ct_addr, 0, &PrdtEntry::new(identify_buf_addr, 512, true));
+    // Single PRDT entry: 512 bytes of IDENTIFY data — physical address for HBA
+    write_prdt(ct_virt, 0, &PrdtEntry::new(identify_buf_phys, 512, true));
 
-    // Build Command Header
+    // Build Command Header — CTBA is physical
     let mut hdr = CommandHeader::zeroed();
     hdr.set_cfl(5);
     hdr.set_prdtl(1);
     hdr.set_write(false); // IDENTIFY is D2H
-    hdr.set_ctba(ct_addr);
+    hdr.set_ctba(ct_phys);
 
-    Some((hdr, ct_addr))
+    Some((hdr, ct_virt))
 }
 
 /// Build a FLUSH CACHE EXT command (0xEA).
 ///
-/// Returns `(cmd_header, cmd_table_addr)`.
-pub fn build_flush_cache() -> Option<(CommandHeader, u64)> {
+/// Returns `(cmd_header, cmd_table_virt)`.
+pub fn build_flush_cache(virt_to_phys: VirtToPhys) -> Option<(CommandHeader, u64)> {
     log::trace!("[ahci] build FLUSH CACHE EXT");
 
-    let ct_addr = allocate_cmd_table(0)?; // No data transfer
+    let (ct_virt, ct_phys) = allocate_cmd_table(0, virt_to_phys)?; // No data transfer
 
     let mut fis = FisRegH2d::new();
     fis.set_command_bit();
     fis.command = ATA_CMD_FLUSH_CACHE_EXT;
-    write_cfis(ct_addr, &fis);
+    write_cfis(ct_virt, &fis);
 
     let mut hdr = CommandHeader::zeroed();
     hdr.set_cfl(5);
     hdr.set_prdtl(0);
     hdr.set_write(false);
-    hdr.set_ctba(ct_addr);
+    hdr.set_ctba(ct_phys);
 
-    Some((hdr, ct_addr))
+    Some((hdr, ct_virt))
 }
 
 /// Calculate how many PRDT entries are needed for a given byte count.

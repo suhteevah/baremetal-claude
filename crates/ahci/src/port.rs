@@ -7,6 +7,7 @@
 use alloc::alloc::{alloc_zeroed, Layout};
 
 use crate::hba::*;
+use crate::VirtToPhys;
 
 /// The type of device attached to an AHCI port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,8 +165,13 @@ pub fn wait_port_idle(hba: &HbaRegs, port: u32) {
 ///
 /// The FIS Receive area must be 256-byte aligned and is 256 bytes.
 ///
-/// Returns `(cmd_list_addr, fis_addr)` as physical addresses.
-pub fn allocate_port_memory(hba: &HbaRegs, port: u32) -> Option<(u64, u64)> {
+/// `virt_to_phys` translates heap virtual addresses to physical addresses
+/// for programming DMA registers.
+///
+/// Returns `(cmd_list_virt, fis_virt)` as *virtual* addresses (for CPU
+/// access to the command list / FIS). The HBA registers are programmed with
+/// the translated *physical* addresses.
+pub fn allocate_port_memory(hba: &HbaRegs, port: u32, virt_to_phys: VirtToPhys) -> Option<(u64, u64)> {
     log::debug!(
         "[ahci] port {}: allocating command list and FIS receive area",
         port
@@ -184,7 +190,8 @@ pub fn allocate_port_memory(hba: &HbaRegs, port: u32) -> Option<(u64, u64)> {
         log::error!("[ahci] port {}: failed to allocate command list", port);
         return None;
     }
-    let cmd_list_addr = cmd_list_ptr as u64;
+    let cmd_list_virt = cmd_list_ptr as u64;
+    let cmd_list_phys = virt_to_phys(cmd_list_ptr as usize);
 
     // FIS receive area: 256 bytes, 256-byte aligned.
     let fis_layout = match Layout::from_size_align(256, 256) {
@@ -199,20 +206,22 @@ pub fn allocate_port_memory(hba: &HbaRegs, port: u32) -> Option<(u64, u64)> {
         log::error!("[ahci] port {}: failed to allocate FIS receive area", port);
         return None;
     }
-    let fis_addr = fis_ptr as u64;
+    let fis_virt = fis_ptr as u64;
+    let fis_phys = virt_to_phys(fis_ptr as usize);
 
-    // Program the port registers with these addresses.
-    hba.port_write_clb(port, cmd_list_addr as u32);
-    hba.port_write_clbu(port, (cmd_list_addr >> 32) as u32);
-    hba.port_write_fb(port, fis_addr as u32);
-    hba.port_write_fbu(port, (fis_addr >> 32) as u32);
+    // Program the port registers with PHYSICAL addresses (HBA reads via DMA).
+    hba.port_write_clb(port, cmd_list_phys as u32);
+    hba.port_write_clbu(port, (cmd_list_phys >> 32) as u32);
+    hba.port_write_fb(port, fis_phys as u32);
+    hba.port_write_fbu(port, (fis_phys >> 32) as u32);
 
     log::info!(
-        "[ahci] port {}: CLB={:#x}, FB={:#x}",
-        port, cmd_list_addr, fis_addr
+        "[ahci] port {}: CLB virt={:#x} phys={:#x}, FB virt={:#x} phys={:#x}",
+        port, cmd_list_virt, cmd_list_phys, fis_virt, fis_phys
     );
 
-    Some((cmd_list_addr, fis_addr))
+    // Return virtual addresses — the CPU writes command headers here.
+    Some((cmd_list_virt, fis_virt))
 }
 
 /// Perform a COMRESET on a port via the SControl register.
@@ -294,15 +303,15 @@ pub fn port_reset(hba: &HbaRegs, port: u32) -> bool {
 
 /// Initialize a port: stop engine, allocate DMA memory, reset, start engine.
 ///
-/// Returns `(cmd_list_addr, fis_addr)` if successful, or `None` if no device.
-pub fn init_port(hba: &HbaRegs, port: u32) -> Option<(u64, u64)> {
+/// Returns `(cmd_list_virt, fis_virt)` if successful, or `None` if no device.
+pub fn init_port(hba: &HbaRegs, port: u32, virt_to_phys: VirtToPhys) -> Option<(u64, u64)> {
     log::info!("[ahci] port {}: initializing", port);
 
     // Stop any existing command processing.
     stop_cmd_engine(hba, port);
 
     // Allocate DMA buffers.
-    let (clb, fb) = allocate_port_memory(hba, port)?;
+    let (clb, fb) = allocate_port_memory(hba, port, virt_to_phys)?;
 
     // Clear pending interrupts and errors.
     hba.port_write_serr(port, 0xFFFF_FFFF);

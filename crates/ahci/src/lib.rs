@@ -26,4 +26,9 @@ pub mod command;
 pub mod identify;
 pub mod driver;
 
+/// Callback to translate virtual addresses to physical addresses for DMA.
+/// The kernel provides this at init time by walking CR3 page tables.
+/// Heap addresses are NOT identity-mapped, so `ptr as u64` is wrong for DMA.
+pub type VirtToPhys = fn(usize) -> u64;
+
 pub use driver::{AhciController, AhciDisk, AhciError};

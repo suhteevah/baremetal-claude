@@ -37,6 +37,7 @@ use crate::command::{self, CommandHeader};
 use crate::hba::{HbaRegs, *};
 use crate::identify::IdentifyData;
 use crate::port::{self, PortDeviceType};
+use crate::VirtToPhys;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -77,10 +78,12 @@ pub struct AhciDisk {
     pub sector_count: u64,
     /// Logical sector size in bytes (typically 512).
     pub sector_size: u32,
-    /// Physical address of this port's Command List.
-    cmd_list_addr: u64,
-    /// Physical address of this port's FIS Receive area.
-    _fis_addr: u64,
+    /// Virtual address of this port's Command List (CPU writes command headers here).
+    cmd_list_virt: u64,
+    /// Virtual address of this port's FIS Receive area (kept for dealloc).
+    _fis_virt: u64,
+    /// Callback to translate virtual heap addresses to physical for DMA.
+    virt_to_phys: VirtToPhys,
 }
 
 /// Top-level AHCI controller.
@@ -95,6 +98,8 @@ pub struct AhciController {
     pub num_cmd_slots: u32,
     /// Detected drives (one per active ATA port).
     pub disks: Vec<AhciDisk>,
+    /// Callback to translate virtual heap addresses to physical for DMA.
+    virt_to_phys: VirtToPhys,
 }
 
 impl AhciController {
@@ -106,11 +111,15 @@ impl AhciController {
     /// 3. Initialize each implemented port
     /// 4. Detect and IDENTIFY attached drives
     ///
+    /// `virt_to_phys` is called to translate heap virtual addresses into
+    /// physical addresses for DMA registers. The kernel provides this by
+    /// walking CR3 page tables.
+    ///
     /// # Safety
     ///
-    /// `pci_bar5_addr` must be the physical address of the AHCI ABAR, and
-    /// that region must be identity-mapped in the page tables.
-    pub unsafe fn init(pci_bar5_addr: u64) -> Result<Self, AhciError> {
+    /// `pci_bar5_addr` must be the virtual address of the AHCI ABAR (mapped
+    /// via the bootloader's physical memory window).
+    pub unsafe fn init(pci_bar5_addr: u64, virt_to_phys: VirtToPhys) -> Result<Self, AhciError> {
         log::info!("[ahci] initializing AHCI controller at ABAR={:#x}", pci_bar5_addr);
 
         // SAFETY: Caller guarantees the address is valid identity-mapped MMIO.
@@ -174,6 +183,7 @@ impl AhciController {
             ports_implemented: pi,
             num_cmd_slots,
             disks: Vec::new(),
+            virt_to_phys,
         };
 
         // Initialize each implemented port and detect drives.
@@ -200,7 +210,7 @@ impl AhciController {
             }
 
             // Initialize the port (allocate DMA buffers, start engine).
-            let Some((clb, fb)) = port::init_port(&controller.hba, port_num) else {
+            let Some((clb, fb)) = port::init_port(&controller.hba, port_num, virt_to_phys) else {
                 log::warn!("[ahci] port {}: init_port failed", port_num);
                 continue;
             };
@@ -233,11 +243,14 @@ impl AhciController {
     }
 
     /// Issue an IDENTIFY DEVICE command to a port and parse the result.
+    ///
+    /// `cmd_list_virt` and `fis_virt` are virtual addresses returned by
+    /// `allocate_port_memory` — the CPU writes command headers to `cmd_list_virt`.
     fn identify_drive(
         &self,
         port_num: u32,
-        cmd_list_addr: u64,
-        fis_addr: u64,
+        cmd_list_virt: u64,
+        fis_virt: u64,
     ) -> Result<AhciDisk, AhciError> {
         log::debug!("[ahci] port {}: issuing IDENTIFY DEVICE", port_num);
 
@@ -254,19 +267,24 @@ impl AhciController {
             log::error!("[ahci] port {}: failed to allocate IDENTIFY buffer", port_num);
             return Err(AhciError::InitFailed);
         }
-        let id_buf_addr = id_buf as u64;
+        // Translate the IDENTIFY buffer address to physical for HBA DMA.
+        let id_buf_phys = (self.virt_to_phys)(id_buf as usize);
+        log::trace!(
+            "[ahci] port {}: IDENTIFY buf virt={:#x} phys={:#x}",
+            port_num, id_buf as u64, id_buf_phys
+        );
 
-        // Build the IDENTIFY command.
-        let (cmd_hdr, _ct_addr) = match command::build_identify(id_buf_addr) {
+        // Build the IDENTIFY command (receives physical buffer address).
+        let (cmd_hdr, _ct_virt) = match command::build_identify(id_buf_phys, self.virt_to_phys) {
             Some(v) => v,
             None => return Err(AhciError::InitFailed),
         };
 
-        // Write the command header to slot 0 in the Command List.
+        // Write the command header to slot 0 in the Command List (virtual address).
         unsafe {
             ptr::copy_nonoverlapping(
                 &cmd_hdr as *const CommandHeader as *const u8,
-                cmd_list_addr as *mut u8,
+                cmd_list_virt as *mut u8,
                 core::mem::size_of::<CommandHeader>(),
             );
         }
@@ -274,7 +292,7 @@ impl AhciController {
         // Issue the command by setting bit 0 in CI (Command Issue).
         self.issue_command_and_wait(port_num, 0)?;
 
-        // Parse the IDENTIFY response.
+        // Parse the IDENTIFY response (read from virtual address — CPU access).
         let id_bytes: &[u8; 512] = unsafe { &*(id_buf as *const [u8; 512]) };
         let identify = IdentifyData::parse(id_bytes);
 
@@ -286,8 +304,9 @@ impl AhciController {
             identify,
             sector_count,
             sector_size,
-            cmd_list_addr,
-            _fis_addr: fis_addr,
+            cmd_list_virt,
+            _fis_virt: fis_virt,
+            virt_to_phys: self.virt_to_phys,
         })
     }
 
@@ -362,9 +381,9 @@ impl AhciController {
 impl AhciDisk {
     /// Read `count` sectors starting at `lba` into `buf`.
     ///
-    /// `buf` must be at least `count * sector_size` bytes. The buffer address
-    /// is used directly for DMA, so it must be in identity-mapped physical memory
-    /// (which is the case for all heap allocations in ClaudioOS).
+    /// `buf` must be at least `count * sector_size` bytes. The buffer's
+    /// virtual address is translated to physical via the `virt_to_phys`
+    /// callback before being programmed into PRDT entries for HBA DMA.
     pub fn read_sectors(&self, hba: &HbaRegs, lba: u64, count: u16, buf: &mut [u8]) -> Result<(), AhciError> {
         let expected_len = count as usize * self.sector_size as usize;
         if buf.len() < expected_len {
@@ -388,23 +407,23 @@ impl AhciDisk {
             self.port, lba, count
         );
 
-        let buf_addr = buf.as_mut_ptr() as u64;
+        // Translate buffer virtual address to physical for HBA DMA.
+        let buf_phys = (self.virt_to_phys)(buf.as_mut_ptr() as usize);
 
         // Build the READ DMA EXT command.
-        let (cmd_hdr, _ct_addr) = command::build_read_dma_ext(lba, count, buf_addr, self.sector_size)
+        let (cmd_hdr, _ct_virt) = command::build_read_dma_ext(lba, count, buf_phys, self.sector_size, self.virt_to_phys)
             .ok_or(AhciError::IoError)?;
 
-        // Write command header to slot 0.
+        // Write command header to slot 0 (virtual address — CPU access).
         unsafe {
             ptr::copy_nonoverlapping(
                 &cmd_hdr as *const CommandHeader as *const u8,
-                self.cmd_list_addr as *mut u8,
+                self.cmd_list_virt as *mut u8,
                 core::mem::size_of::<CommandHeader>(),
             );
         }
 
         // Issue and wait.
-        // We construct a temporary HBA handle for command issuance.
         issue_and_wait(hba, self.port, 0)?;
 
         log::trace!(
@@ -440,17 +459,18 @@ impl AhciDisk {
             self.port, lba, count
         );
 
-        let buf_addr = buf.as_ptr() as u64;
+        // Translate buffer virtual address to physical for HBA DMA.
+        let buf_phys = (self.virt_to_phys)(buf.as_ptr() as usize);
 
         // Build the WRITE DMA EXT command.
-        let (cmd_hdr, _ct_addr) = command::build_write_dma_ext(lba, count, buf_addr, self.sector_size)
+        let (cmd_hdr, _ct_virt) = command::build_write_dma_ext(lba, count, buf_phys, self.sector_size, self.virt_to_phys)
             .ok_or(AhciError::IoError)?;
 
-        // Write command header to slot 0.
+        // Write command header to slot 0 (virtual address — CPU access).
         unsafe {
             ptr::copy_nonoverlapping(
                 &cmd_hdr as *const CommandHeader as *const u8,
-                self.cmd_list_addr as *mut u8,
+                self.cmd_list_virt as *mut u8,
                 core::mem::size_of::<CommandHeader>(),
             );
         }
@@ -468,13 +488,13 @@ impl AhciDisk {
     pub fn flush(&self, hba: &HbaRegs) -> Result<(), AhciError> {
         log::debug!("[ahci] port {}: flushing write cache", self.port);
 
-        let (cmd_hdr, _ct_addr) = command::build_flush_cache()
+        let (cmd_hdr, _ct_virt) = command::build_flush_cache(self.virt_to_phys)
             .ok_or(AhciError::IoError)?;
 
         unsafe {
             ptr::copy_nonoverlapping(
                 &cmd_hdr as *const CommandHeader as *const u8,
-                self.cmd_list_addr as *mut u8,
+                self.cmd_list_virt as *mut u8,
                 core::mem::size_of::<CommandHeader>(),
             );
         }

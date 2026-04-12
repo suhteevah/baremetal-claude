@@ -128,3 +128,75 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         frame
     }
 }
+
+/// Translate a virtual address to its physical address by walking the CR3
+/// page tables.
+///
+/// This is used by DMA-capable drivers (AHCI, NVMe) to convert heap virtual
+/// addresses into physical addresses the hardware can DMA to/from. Heap pages
+/// are NOT identity-mapped — they live at `0x4444_4444_0000+` with physical
+/// frames assigned by `BootInfoFrameAllocator`.
+///
+/// Panics if the address is not mapped (unmapped pages are a kernel bug).
+pub fn virt_to_phys(virt_addr: usize) -> u64 {
+    let phys_mem_offset = crate::PHYS_MEM_OFFSET.load(Ordering::Relaxed);
+    let virt = VirtAddr::new(virt_addr as u64);
+    let offset_virt = VirtAddr::new(phys_mem_offset);
+
+    // Read CR3 to get the level-4 page table physical address.
+    let (l4_frame, _) = x86_64::registers::control::Cr3::read();
+    let l4_phys = l4_frame.start_address();
+    let l4_virt = offset_virt + l4_phys.as_u64();
+    let l4_table = unsafe {
+        &*(l4_virt.as_ptr() as *const PageTable)
+    };
+
+    // Level 4
+    let l4_entry = &l4_table[virt.p4_index()];
+    if l4_entry.is_unused() {
+        panic!("[memory] virt_to_phys: L4 entry unused for {:#x}", virt_addr);
+    }
+
+    let l3_virt = offset_virt + l4_entry.addr().as_u64();
+    let l3_table = unsafe {
+        &*(l3_virt.as_ptr() as *const PageTable)
+    };
+
+    // Level 3
+    let l3_entry = &l3_table[virt.p3_index()];
+    if l3_entry.is_unused() {
+        panic!("[memory] virt_to_phys: L3 entry unused for {:#x}", virt_addr);
+    }
+    if l3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        let base = l3_entry.addr().as_u64();
+        return base + (virt_addr as u64 & 0x3FFF_FFFF);
+    }
+
+    let l2_virt = offset_virt + l3_entry.addr().as_u64();
+    let l2_table = unsafe {
+        &*(l2_virt.as_ptr() as *const PageTable)
+    };
+
+    // Level 2
+    let l2_entry = &l2_table[virt.p2_index()];
+    if l2_entry.is_unused() {
+        panic!("[memory] virt_to_phys: L2 entry unused for {:#x}", virt_addr);
+    }
+    if l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        let base = l2_entry.addr().as_u64();
+        return base + (virt_addr as u64 & 0x1F_FFFF);
+    }
+
+    let l1_virt = offset_virt + l2_entry.addr().as_u64();
+    let l1_table = unsafe {
+        &*(l1_virt.as_ptr() as *const PageTable)
+    };
+
+    // Level 1
+    let l1_entry = &l1_table[virt.p1_index()];
+    if l1_entry.is_unused() {
+        panic!("[memory] virt_to_phys: L1 entry unused for {:#x}", virt_addr);
+    }
+    let frame_phys = l1_entry.addr().as_u64();
+    frame_phys + (virt_addr as u64 & 0xFFF)
+}
