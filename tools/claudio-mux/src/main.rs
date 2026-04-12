@@ -4,6 +4,9 @@ mod conpty;
 mod host;
 mod pane_state;
 mod session;
+mod app;
+mod render;
+mod layouts;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -35,8 +38,8 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!("claudio-mux starting, session={}", cli.session);
 
-    println!("claudio-mux v0.1 \u{2014} session: {}", cli.session);
-    println!("Runtime not yet wired. Use --help for options.");
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(app::run(config, cli.session))?;
 
     Ok(())
 }
