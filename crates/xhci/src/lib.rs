@@ -34,6 +34,11 @@ pub mod driver;
 pub use driver::XhciController;
 pub use hid::KeyEvent;
 
+/// Callback to translate a virtual address to a physical DMA address.
+/// In ClaudioOS, heap addresses are NOT identity-mapped, so every pointer
+/// destined for hardware DMA must go through this translation.
+pub type VirtToPhys = fn(usize) -> u64;
+
 /// Errors from xHCI controller operations.
 #[derive(Debug)]
 pub enum XhciError {

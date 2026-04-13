@@ -411,7 +411,7 @@ impl InputContext {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new(ctx_size: usize) -> Option<Self> {
+    pub unsafe fn new(ctx_size: usize, virt_to_phys: crate::VirtToPhys) -> Option<Self> {
         let total_size = 33 * ctx_size;
         let layout = match Layout::from_size_align(total_size, 64) {
             Ok(l) => l,
@@ -426,11 +426,11 @@ impl InputContext {
             return None;
         }
 
-        let phys = buffer as u64;
+        let phys = virt_to_phys(buffer as usize);
 
         log::debug!(
-            "xhci: input context allocated at {:#x} ({}*{} = {} bytes)",
-            phys, 33, ctx_size, total_size
+            "xhci: input context allocated at VA={:#x} PA={:#x} ({}*{} = {} bytes)",
+            buffer as usize, phys, 33, ctx_size, total_size
         );
 
         Some(Self {
@@ -539,7 +539,7 @@ impl Dcbaa {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new(max_slots: u8, ctx_size: usize, scratchpad_count: u32) -> Option<Self> {
+    pub unsafe fn new(max_slots: u8, ctx_size: usize, scratchpad_count: u32, virt_to_phys: crate::VirtToPhys) -> Option<Self> {
         let entry_count = max_slots as usize + 1; // slot 0 = scratchpad
         let array_size = entry_count * 8; // 8 bytes per entry (u64 pointer)
         let layout = match Layout::from_size_align(array_size, 64) {
@@ -555,11 +555,11 @@ impl Dcbaa {
             return None;
         }
 
-        let phys = buffer as u64;
+        let phys = virt_to_phys(buffer as usize);
 
         log::info!(
-            "xhci: DCBAA allocated at {:#x} ({} entries, {} bytes)",
-            phys, entry_count, array_size
+            "xhci: DCBAA allocated at VA={:#x} PA={:#x} ({} entries, {} bytes)",
+            buffer as usize, phys, entry_count, array_size
         );
 
         // Allocate scratchpad buffers if needed
@@ -595,12 +595,12 @@ impl Dcbaa {
                     log::error!("xhci: scratchpad page {} alloc failed", i);
                     return None;
                 }
-                ptr::write_volatile(sp_array.add(i), page as u64);
+                ptr::write_volatile(sp_array.add(i), virt_to_phys(page as usize));
             }
 
             // Entry 0 of DCBAA = scratchpad buffer array pointer
-            ptr::write_volatile(buffer, sp_array as u64);
-            log::debug!("xhci: scratchpad buffer array at {:#x}", sp_array as u64);
+            ptr::write_volatile(buffer, virt_to_phys(sp_array as usize));
+            log::debug!("xhci: scratchpad buffer array at PA={:#x}", virt_to_phys(sp_array as usize));
         }
 
         let mut device_contexts = Vec::with_capacity(entry_count);
@@ -625,7 +625,7 @@ impl Dcbaa {
     ///
     /// # Safety
     /// Memory must be identity-mapped.
-    pub unsafe fn alloc_device_context(&mut self, slot_id: u8, ctx_size: usize) -> Option<u64> {
+    pub unsafe fn alloc_device_context(&mut self, slot_id: u8, ctx_size: usize, virt_to_phys: crate::VirtToPhys) -> Option<u64> {
         if slot_id < 1 || slot_id > self.max_slots {
             log::error!("xhci: invalid slot_id {}", slot_id);
             return None;
@@ -645,7 +645,7 @@ impl Dcbaa {
             return None;
         }
 
-        let phys = va as u64;
+        let phys = virt_to_phys(va as usize);
 
         // Write the physical address into the DCBAA entry
         ptr::write_volatile(self.buffer.add(slot_id as usize), phys);

@@ -102,7 +102,7 @@ pub fn init() {
     log::info!("[usb] xHCI MMIO virtual address: {:#x}", mmio_virt);
 
     // Initialise the xHCI controller
-    let mut controller = match unsafe { claudio_xhci::XhciController::init(mmio_virt as usize) } {
+    let mut controller = match unsafe { claudio_xhci::XhciController::init(mmio_virt as usize, crate::memory::virt_to_phys) } {
         Ok(c) => c,
         Err(e) => {
             log::error!("[usb] xHCI controller init failed: {:?}", e);

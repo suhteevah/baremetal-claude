@@ -379,7 +379,7 @@ impl CommandRing {
     /// # Safety
     /// The returned physical address must be identity-mapped or the caller must
     /// ensure the xHCI controller can DMA to it.
-    pub unsafe fn new() -> Option<Self> {
+    pub unsafe fn new(virt_to_phys: crate::VirtToPhys) -> Option<Self> {
         let layout = match Layout::from_size_align(RING_SEGMENT_SIZE, 64) {
             Ok(l) => l,
             Err(_) => {
@@ -394,8 +394,7 @@ impl CommandRing {
         }
 
         let ring_va = ptr as *mut Trb;
-        // In ClaudioOS, virtual == physical (identity mapped)
-        let ring_phys = ptr as u64;
+        let ring_phys = virt_to_phys(ptr as usize);
 
         log::info!(
             "xhci: command ring allocated at VA={:#x} PA={:#x} ({} TRBs)",
@@ -537,7 +536,7 @@ impl EventRing {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new() -> Option<Self> {
+    pub unsafe fn new(virt_to_phys: crate::VirtToPhys) -> Option<Self> {
         // Allocate the event ring segment
         let ring_layout = match Layout::from_size_align(RING_SEGMENT_SIZE, 64) {
             Ok(l) => l,
@@ -553,7 +552,7 @@ impl EventRing {
         }
 
         let ring_va = ring_ptr as *const Trb;
-        let ring_phys = ring_ptr as u64;
+        let ring_phys = virt_to_phys(ring_ptr as usize);
 
         // Allocate the Event Ring Segment Table (one entry)
         let erst_layout = match Layout::from_size_align(
@@ -573,7 +572,7 @@ impl EventRing {
         }
 
         let erst_va = erst_ptr as *mut EventRingSegmentTableEntry;
-        let erst_phys = erst_ptr as u64;
+        let erst_phys = virt_to_phys(erst_ptr as usize);
 
         // Fill in the segment table entry
         ptr::write_volatile(
@@ -693,7 +692,7 @@ impl TransferRing {
     ///
     /// # Safety
     /// Memory must be identity-mapped for DMA.
-    pub unsafe fn new() -> Option<Self> {
+    pub unsafe fn new(virt_to_phys: crate::VirtToPhys) -> Option<Self> {
         let layout = match Layout::from_size_align(RING_SEGMENT_SIZE, 64) {
             Ok(l) => l,
             Err(_) => {
@@ -708,7 +707,7 @@ impl TransferRing {
         }
 
         let ring_va = ptr as *mut Trb;
-        let ring_phys = ptr as u64;
+        let ring_phys = virt_to_phys(ptr as usize);
 
         log::debug!(
             "xhci: transfer ring allocated at VA={:#x} PA={:#x} ({} TRBs)",

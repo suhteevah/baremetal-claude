@@ -532,7 +532,7 @@ impl ParsedConfiguration {
 ///
 /// # Safety
 /// Caller must ensure the buffer is not freed while DMA is in progress.
-pub unsafe fn alloc_dma_buffer(size: usize) -> Option<(*mut u8, u64)> {
+pub unsafe fn alloc_dma_buffer(size: usize, virt_to_phys: crate::VirtToPhys) -> Option<(*mut u8, u64)> {
     let align = if size >= 4096 { 4096 } else { 64 };
     let layout = match Layout::from_size_align(size, align) {
         Ok(l) => l,
@@ -546,8 +546,8 @@ pub unsafe fn alloc_dma_buffer(size: usize) -> Option<(*mut u8, u64)> {
         log::error!("xhci: DMA buffer allocation failed ({} bytes)", size);
         return None;
     }
-    let phys = ptr as u64;
-    log::trace!("xhci: DMA buffer allocated: {} bytes at {:#x}", size, phys);
+    let phys = virt_to_phys(ptr as usize);
+    log::trace!("xhci: DMA buffer allocated: {} bytes at VA={:#x} PA={:#x}", size, ptr as usize, phys);
     Some((ptr, phys))
 }
 

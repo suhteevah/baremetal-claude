@@ -88,6 +88,8 @@ pub struct XhciController {
     transfer_rings: Vec<Vec<Option<TransferRing>>>,
     /// HID keyboard state (if a keyboard is found)
     keyboard: Option<KeyboardInfo>,
+    /// Virtual-to-physical address translation callback for DMA
+    virt_to_phys: crate::VirtToPhys,
 }
 
 /// Keyboard-specific state bundled together.
@@ -123,7 +125,7 @@ impl XhciController {
     ///
     /// # Safety
     /// `pci_bar0` must be a valid, identity-mapped MMIO address for an xHCI controller.
-    pub unsafe fn init(pci_bar0: usize) -> Result<Self, XhciError> {
+    pub unsafe fn init(pci_bar0: usize, virt_to_phys: crate::VirtToPhys) -> Result<Self, XhciError> {
         log::info!("xhci: initializing controller at BAR0={:#x}", pci_bar0);
 
         // --- Step 1: Read capability registers ---
@@ -213,7 +215,7 @@ impl XhciController {
         log::debug!("xhci: CONFIG.MaxSlotsEn = {}", max_slots);
 
         // --- Step 5: Allocate DCBAA ---
-        let dcbaa = match Dcbaa::new(max_slots, ctx_size, scratchpad) {
+        let dcbaa = match Dcbaa::new(max_slots, ctx_size, scratchpad, virt_to_phys) {
             Some(d) => d,
             None => return Err(XhciError::AllocFailed("DCBAA")),
         };
@@ -221,7 +223,7 @@ impl XhciController {
         log::debug!("xhci: DCBAAP = {:#x}", dcbaa.phys_addr());
 
         // --- Step 6: Allocate Command Ring ---
-        let cmd_ring = match CommandRing::new() {
+        let cmd_ring = match CommandRing::new(virt_to_phys) {
             Some(r) => r,
             None => return Err(XhciError::AllocFailed("command ring")),
         };
@@ -229,7 +231,7 @@ impl XhciController {
         log::debug!("xhci: CRCR = {:#x}", cmd_ring.phys_addr_with_cycle());
 
         // --- Step 7: Allocate Event Ring for interrupter 0 ---
-        let evt_ring = match EventRing::new() {
+        let evt_ring = match EventRing::new(virt_to_phys) {
             Some(r) => r,
             None => return Err(XhciError::AllocFailed("event ring")),
         };
@@ -296,6 +298,7 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboard: None,
+            virt_to_phys,
         })
     }
 
@@ -445,7 +448,7 @@ impl XhciController {
         log::info!("xhci: slot {} enabled", slot_id);
 
         // Allocate device context in DCBAA
-        if unsafe { self.dcbaa.alloc_device_context(slot_id, self.ctx_size) }.is_none() {
+        if unsafe { self.dcbaa.alloc_device_context(slot_id, self.ctx_size, self.virt_to_phys) }.is_none() {
             log::error!("xhci: failed to allocate device context for slot {}", slot_id);
             return None;
         }
@@ -545,7 +548,7 @@ impl XhciController {
         let ctx_size = self.ctx_size;
 
         // Allocate EP0 transfer ring
-        let ep0_ring = match unsafe { TransferRing::new() } {
+        let ep0_ring = match unsafe { TransferRing::new(self.virt_to_phys) } {
             Some(r) => r,
             None => {
                 log::error!("xhci: failed to allocate EP0 transfer ring for slot {}", slot_id);
@@ -556,7 +559,7 @@ impl XhciController {
         self.transfer_rings[slot_id as usize][1] = Some(ep0_ring);
 
         // Build Input Context
-        let input_ctx = match unsafe { InputContext::new(ctx_size) } {
+        let input_ctx = match unsafe { InputContext::new(ctx_size, self.virt_to_phys) } {
             Some(c) => c,
             None => {
                 log::error!("xhci: failed to allocate input context for slot {}", slot_id);
@@ -616,7 +619,7 @@ impl XhciController {
         log::debug!("xhci: GET_DESCRIPTOR(Device) slot={}", slot_id);
 
         let buf_size = DeviceDescriptor::SIZE;
-        let (buf_va, buf_phys) = unsafe { alloc_dma_buffer(buf_size) }?;
+        let (buf_va, buf_phys) = unsafe { alloc_dma_buffer(buf_size, self.virt_to_phys) }?;
 
         let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
         ring.enqueue_control_transfer(
@@ -660,7 +663,7 @@ impl XhciController {
 
         // First, get just the header to learn wTotalLength
         let header_size = 9;
-        let (hdr_va, hdr_phys) = unsafe { alloc_dma_buffer(header_size) }?;
+        let (hdr_va, hdr_phys) = unsafe { alloc_dma_buffer(header_size, self.virt_to_phys) }?;
 
         let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
         ring.enqueue_control_transfer(
@@ -689,7 +692,7 @@ impl XhciController {
         log::debug!("xhci: config descriptor total length = {}", total_len);
 
         // Now get the full descriptor set
-        let (full_va, full_phys) = unsafe { alloc_dma_buffer(total_len) }?;
+        let (full_va, full_phys) = unsafe { alloc_dma_buffer(total_len, self.virt_to_phys) }?;
 
         let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
         ring.enqueue_control_transfer(
@@ -763,7 +766,7 @@ impl XhciController {
 
         // Now issue xHCI Configure Endpoint command with all non-EP0 endpoints
         let ctx_size = self.ctx_size;
-        let input_ctx = match unsafe { InputContext::new(ctx_size) } {
+        let input_ctx = match unsafe { InputContext::new(ctx_size, self.virt_to_phys) } {
             Some(c) => c,
             None => {
                 log::error!("xhci: failed to allocate input context for configure endpoint");
@@ -785,7 +788,7 @@ impl XhciController {
             add_flags |= 1 << dci;
 
             // Allocate transfer ring for this endpoint
-            let tr = match unsafe { TransferRing::new() } {
+            let tr = match unsafe { TransferRing::new(self.virt_to_phys) } {
                 Some(r) => r,
                 None => {
                     log::error!("xhci: failed to allocate transfer ring for DCI {}", dci);
@@ -936,7 +939,7 @@ impl XhciController {
         }
 
         // Allocate report buffer for interrupt transfers
-        let (report_va, report_phys) = match unsafe { alloc_dma_buffer(8) } {
+        let (report_va, report_phys) = match unsafe { alloc_dma_buffer(8, self.virt_to_phys) } {
             Some(b) => b,
             None => {
                 log::error!("xhci: failed to allocate keyboard report buffer");
