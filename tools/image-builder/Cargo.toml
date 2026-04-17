@@ -4,11 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 # This is a HOST-side tool (runs on your dev machine, not bare-metal).
-# It takes the compiled kernel binary and wraps it in a bootable UEFI disk image.
+# It takes the compiled kernel ELF + the Limine bootloader binaries and
+# wraps them into a bootable UEFI disk image.
 
 [dependencies]
-# UEFI only — BIOS stages fail to build on Windows host (bootloader's
-# build.rs panics in the cargo-install bootstrap of the
-# bootloader-x86_64-bios-* crates), and CLAUDE.md only documents the
-# UEFI/OVMF QEMU path anyway.
-bootloader = { version = "0.11", default-features = false, features = ["uefi"] }
+# FAT32 writer used to populate the ESP.
+# IMPORTANT: we need `lfn` (long filename) support — without it, files like
+# `limine.conf` get truncated to the 8.3 DOS name `LIMINE~1.CON`, which
+# Limine's UEFI stub does NOT match when scanning for its config (it looks
+# for the literal long filename `limine.conf`). Resulting symptom: Limine
+# loads, clears screen, then silently sits at its menu because no config
+# was found.
+fatfs = "0.3"
+# GPT partition table writer so the resulting image is bootable on real
+# UEFI firmware that expects a proper GPT-labeled ESP.
+gpt = "3"

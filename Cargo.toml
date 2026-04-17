@@ -63,8 +63,7 @@ repository = "https://github.com/suhteevah/claudio-os"
 [workspace.dependencies]
 # Kernel foundations
 x86_64 = "0.15"
-bootloader_api = "0.11"
-bootloader = "0.11"
+limine = "0.5"
 linked_list_allocator = "0.10"
 spin = "0.9"
 log = "0.4"

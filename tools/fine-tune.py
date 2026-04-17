@@ -45,14 +45,26 @@ except ImportError as e:
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Base model — best coding model that fits in 8GB VRAM with QLoRA
-BASE_MODEL = "Qwen/Qwen2.5-Coder-7B"
+# Base model — selected via --size flag (default 7B, best coding model in 8GB w/ QLoRA)
+SIZE_CONFIG = {
+    "1.5b": {
+        "base_model": "Qwen/Qwen2.5-Coder-1.5B",
+        "output_subdir": "claudio-coder-1.5b-lora",
+        "merged_subdir": "claudio-coder-1.5b-merged",
+    },
+    "7b": {
+        "base_model": "Qwen/Qwen2.5-Coder-7B",
+        "output_subdir": "claudio-coder-7b-lora",
+        "merged_subdir": "claudio-coder-7b-merged",
+    },
+}
 
-# Paths
+# Module-level defaults; overridden in main() after arg parsing
+BASE_MODEL = SIZE_CONFIG["7b"]["base_model"]
 REPO_ROOT = Path(__file__).parent.parent
 TRAINING_DATA = REPO_ROOT / "tools" / "training-data.jsonl"
-OUTPUT_DIR = REPO_ROOT / "models" / "claudio-coder-7b-lora"
-MERGED_DIR = REPO_ROOT / "models" / "claudio-coder-7b-merged"
+OUTPUT_DIR = REPO_ROOT / "models" / SIZE_CONFIG["7b"]["output_subdir"]
+MERGED_DIR = REPO_ROOT / "models" / SIZE_CONFIG["7b"]["merged_subdir"]
 
 # Training hyperparameters (tuned for 3070 Ti 8GB)
 LORA_R = 16                    # LoRA rank — 16 is good quality/memory tradeoff
@@ -253,7 +265,19 @@ def train(model, tokenizer, dataset, num_epochs: int, resume: bool):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="QLoRA fine-tune Qwen2.5-Coder-7B on ClaudioOS data."
+        description="QLoRA fine-tune Qwen2.5-Coder on ClaudioOS data."
+    )
+    p.add_argument(
+        "--size",
+        choices=list(SIZE_CONFIG.keys()),
+        default="7b",
+        help="Model size to train. 1.5b trains fast, 7b is stronger. Default: 7b.",
+    )
+    p.add_argument(
+        "--output-suffix",
+        default="",
+        help="Optional suffix on the output LoRA dir (e.g. '-v2'). "
+             "Lets you train a fresh LoRA without clobbering a previous run.",
     )
     p.add_argument(
         "--epochs",
@@ -274,10 +298,18 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Resolve per-size paths, allowing an output-dir suffix for v2/v3/etc.
+    global BASE_MODEL, OUTPUT_DIR, MERGED_DIR
+    cfg = SIZE_CONFIG[args.size]
+    BASE_MODEL = cfg["base_model"]
+    OUTPUT_DIR = REPO_ROOT / "models" / f"{cfg['output_subdir']}{args.output_suffix}"
+    MERGED_DIR = REPO_ROOT / "models" / f"{cfg['merged_subdir']}{args.output_suffix}"
+
     print("=" * 60)
     print("ClaudioOS Model Fine-Tuning")
-    print(f"Base model: {BASE_MODEL}")
+    print(f"Size: {args.size}   Base model: {BASE_MODEL}")
     print(f"Training data: {TRAINING_DATA}")
+    print(f"Output LoRA:   {OUTPUT_DIR}")
     print(f"Target GPU: RTX 3070 Ti (8GB VRAM)")
     print(f"Epochs this session: {args.epochs}  |  Resume: {not args.no_resume}")
     print("=" * 60)

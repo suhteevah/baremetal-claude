@@ -93,6 +93,9 @@ pub struct HpetInfo {
 ///
 /// Call this after heap init but before networking.
 pub fn init(rsdp_addr: Option<u64>) {
+    use crate::fb_checkpoint;
+    // Magenta checkpoints (240, 20/n, 240) — we're inside ACPI.
+    fb_checkpoint(20, (255, 0, 255)); // magenta: entered acpi_init
     log::info!("[acpi] ============================================");
     log::info!("[acpi]   ACPI Hardware Discovery");
     log::info!("[acpi] ============================================");
@@ -103,9 +106,11 @@ pub fn init(rsdp_addr: Option<u64>) {
         Err(e) => {
             log::error!("[acpi] failed to parse ACPI tables: {:?}", e);
             log::warn!("[acpi] continuing boot without ACPI — hardware discovery limited");
+            fb_checkpoint(21, (255, 128, 0)); // orange: tables parse failed
             return;
         }
     };
+    fb_checkpoint(22, (255, 0, 255)); // magenta: tables found
 
     let mut info = AcpiInfo {
         cpu_count: 0,
@@ -121,15 +126,19 @@ pub fn init(rsdp_addr: Option<u64>) {
 
     // Step 2: Parse MADT (Multiple APIC Description Table)
     parse_madt(&tables, &mut info);
+    fb_checkpoint(23, (255, 0, 255)); // MADT done
 
     // Step 3: Parse FADT (Fixed ACPI Description Table) + power management
     parse_fadt(&tables, &mut info);
+    fb_checkpoint(24, (255, 0, 255)); // FADT done
 
     // Step 4: Parse HPET (High Precision Event Timer)
     parse_hpet(&tables, &mut info);
+    fb_checkpoint(25, (255, 0, 255)); // HPET done
 
     // Step 5: Parse MCFG (PCIe Enhanced Configuration)
     parse_mcfg(&tables, &mut info);
+    fb_checkpoint(26, (255, 0, 255)); // MCFG done
 
     // Summary
     log::info!("[acpi] ============================================");
@@ -187,15 +196,15 @@ pub fn init(rsdp_addr: Option<u64>) {
 /// then falls back to BIOS memory region search.
 fn find_acpi_tables(rsdp_addr: Option<u64>) -> Result<AcpiTables, AcpiError> {
     if let Some(addr) = rsdp_addr {
-        log::info!("[acpi] RSDP address from bootloader: {:#X}", addr);
-        // The bootloader_api provides the physical address of the RSDP.
-        // With physical memory mapping enabled, we can read it directly
-        // by adding the physical memory offset.
+        log::info!("[acpi] RSDP address from Limine: {:#X}", addr);
+        // Limine hands us an HHDM-mapped virtual address already — unlike
+        // bootloader 0.11 which returned the physical address. Passing it
+        // through as-is is correct; adding phys_offset on top (as the old
+        // code did) produces an out-of-range virtual address that page-faults
+        // silently on real hardware. QEMU got away with it because its
+        // memory layout happened to keep the double-offset in mapped range.
         let phys_offset = crate::PHYS_MEM_OFFSET.load(Ordering::Relaxed);
-        let mapped_addr = addr + phys_offset;
-        log::info!("[acpi] RSDP mapped address: {:#X} (phys={:#X} + offset={:#X})",
-            mapped_addr, addr, phys_offset);
-        unsafe { claudio_acpi::init_from_rsdp_addr(mapped_addr, phys_offset) }
+        unsafe { claudio_acpi::init_from_rsdp_addr(addr, phys_offset) }
     } else {
         log::warn!("[acpi] no RSDP address from bootloader, searching BIOS memory regions");
         // On BIOS systems or if the bootloader didn't provide RSDP,

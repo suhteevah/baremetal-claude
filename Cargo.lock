@@ -137,12 +137,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bootloader_api"
-version = "0.11.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c074a3d1075b26ed77e502d6af8ab1263abbdc3d026c166e46480f973287293"
-
-[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -437,7 +431,6 @@ dependencies = [
 name = "claudio-os"
 version = "0.1.0"
 dependencies = [
- "bootloader_api",
  "claudio-acpi",
  "claudio-agent",
  "claudio-ahci",
@@ -480,6 +473,7 @@ dependencies = [
  "claudio-winrt",
  "claudio-xhci",
  "conquer-once",
+ "limine",
  "linked_list_allocator",
  "log",
  "pc-keyboard",
@@ -1228,6 +1222,15 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "limine"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af6d2ee42712e7bd2c787365cd1dab06ef59a61becbf87bec7b32b970bd2594b"
+dependencies = [
+ "bitflags 2.11.0",
+]
 
 [[package]]
 name = "linked_list_allocator"

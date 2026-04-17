@@ -90,108 +90,281 @@ mod linux_compat;
 mod win32_compat;
 mod dotnet_compat;
 
-use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
+use limine::request::{
+    FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, RequestsEndMarker,
+    RequestsStartMarker, RsdpRequest, StackSizeRequest,
+};
+use limine::BaseRevision;
 
 /// Physical memory offset provided by the bootloader, stored globally so that
 /// subsystems initialised after boot (e.g. networking, xHCI, Intel NIC) can
 /// translate between virtual and physical addresses.
 ///
-/// The bootloader maps all physical memory at `virtual = physical + offset`.
+/// The Limine HHDM maps all physical memory at `virtual = physical + offset`.
 /// This means any physical address P is accessible at virtual address P + offset.
 /// This is essential for MMIO register access (PCI BARs, xHCI, E1000) and DMA
 /// buffer address translation.
 static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Return the bootloader-supplied physical memory offset.
-///
-/// Physical addresses are mapped at `virtual = physical + phys_mem_offset()`,
-/// so any MMIO driver that wants to dereference a physical BAR must add
-/// this offset first. Populated in `kernel_main` Phase 2 from
-/// `boot_info.physical_memory_offset`.
 pub fn phys_mem_offset() -> u64 {
     PHYS_MEM_OFFSET.load(Ordering::Relaxed)
 }
 
-/// Bootloader configuration — tells the bootloader what we need before it
-/// hands off to kernel_main.  Key settings:
-/// - Physical memory mapping (Dynamic) so we can access any physical address
-/// - 128 KiB kernel stack (interrupt handlers + log formatting are stack-heavy)
-/// - 1920x1080 minimum framebuffer resolution for the terminal dashboard
-static BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
-    // Request a larger kernel stack — default is too small for interrupt handlers
-    // with the log crate's formatting. 128 KiB should be plenty.
-    config.kernel_stack_size = 128 * 1024;
-    // Request 1920×1080 framebuffer resolution (or the highest available).
-    // The bootloader will pick the closest GOP mode that meets these minimums,
-    // falling back to a smaller mode if the display doesn't support 1080p.
-    #[allow(deprecated)]
-    {
-        config.frame_buffer.minimum_framebuffer_width = Some(1920);
-        config.frame_buffer.minimum_framebuffer_height = Some(1080);
-    }
-    config
-};
+// ── Limine requests ────────────────────────────────────────────────────
+//
+// These static requests are scanned for by the Limine bootloader before it
+// hands off control to us. The `#[used]` + `#[link_section]` attributes
+// place them in the `.requests` section so the linker script can bracket
+// them with start/end markers. The `BaseRevision` tag tells the bootloader
+// which revision of the protocol we understand (3 = latest as of limine 0.5).
+//
+// NOTE: these must be `#[used]` or the compiler may strip them in release
+// builds where the kernel never references them by name.
 
-entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+/// Base revision tag — asks for the latest Limine protocol revision. Without
+/// this tag, Limine assumes revision 0 which is missing HHDM responses etc.
+#[used]
+#[unsafe(link_section = ".requests")]
+static BASE_REVISION: BaseRevision = BaseRevision::with_revision(2);
 
-/// Primary kernel entry point — called by the bootloader after UEFI handoff.
+/// Stack size request — ask for a 128 KiB initial stack. Interrupt handlers
+/// + log formatting are stack-heavy; the 64 KiB default would overflow.
+/// (We still switch to a 4 MiB heap-allocated stack later in boot for the
+/// async executor + TLS handshake, but that happens after the heap is up.)
+#[used]
+#[unsafe(link_section = ".requests")]
+static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(128 * 1024);
+
+/// Framebuffer request — we need a GOP framebuffer for the dashboard UI.
+#[used]
+#[unsafe(link_section = ".requests")]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+/// HHDM request — returns the "higher-half direct map" offset.
+/// Equivalent to `bootloader 0.11`'s `physical_memory_offset`.
+#[used]
+#[unsafe(link_section = ".requests")]
+static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+/// Memory map request — returns the bootloader's view of physical RAM.
+/// Equivalent to `bootloader 0.11`'s `memory_regions`.
+#[used]
+#[unsafe(link_section = ".requests")]
+static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+
+/// RSDP request — returns the physical address of the ACPI RSDP table.
+#[used]
+#[unsafe(link_section = ".requests")]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+
+/// Module request — lets us pick up extra files (e.g. `model.gguf`) that
+/// Limine loaded alongside the kernel. Equivalent to bootloader 0.11's
+/// `ramdisk_addr`/`ramdisk_len`.
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+
+// Start/end markers bracket the .requests section so the bootloader knows
+// where to stop scanning. The linker script's KEEP() calls ensure they're
+// preserved even in LTO builds.
+#[used]
+#[unsafe(link_section = ".requests_start_marker")]
+static REQUESTS_START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
+
+#[used]
+#[unsafe(link_section = ".requests_end_marker")]
+static REQUESTS_END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
+
+/// Primary kernel entry point — called by Limine after UEFI handoff.
 ///
-/// At this point we have:
-/// - Identity-mapped kernel code/data
-/// - Physical memory offset mapping
-/// - A GOP framebuffer
-/// - A memory map from UEFI
-/// - Interrupts disabled
-fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+/// Limine has already:
+/// - Loaded our ELF at the linker-script-specified higher-half address
+/// - Set up 4-level paging with the HHDM mapping active
+/// - Populated all our request responses
+/// - Enabled long mode, SSE, and basic CPU state
+///
+/// Interrupts are disabled at entry. We pull the boot info we need out of
+/// the static request responses at the top of this function and then run
+/// the same phase-by-phase init the old bootloader 0.11 path used.
+/// Write a zero-terminated byte string to serial port 0x3F8. Used for
+/// dead-simple proof-of-life probes before any init.
+#[inline(always)]
+fn early_serial(msg: &[u8]) {
+    unsafe {
+        let mut port = x86_64::instructions::port::Port::<u8>::new(0x3F8);
+        for &b in msg {
+            port.write(b);
+        }
+    }
+}
+
+/// Cached framebuffer pointer + geometry, populated the first time Phase -2
+/// runs. Used by `fb_checkpoint` to draw small status squares below the
+/// rainbow bars so we can visually trace how far boot got on real hardware
+/// where serial is invisible.
+static mut FB_CHECKPOINT_BUF: *mut u8 = core::ptr::null_mut();
+static mut FB_CHECKPOINT_PITCH: usize = 0;
+static mut FB_CHECKPOINT_BPP: usize = 0;
+static mut FB_CHECKPOINT_WIDTH: usize = 0;
+static mut FB_CHECKPOINT_HEIGHT: usize = 0;
+
+/// Paint the Nth 20x20 checkpoint square in a horizontal row directly under
+/// the rainbow bars. `color_rgb` is (R, G, B). No-op if the framebuffer
+/// pointer hasn't been cached yet.
+///
+/// The row starts at y=260 (just below the 6*40-px bars). Squares are laid
+/// out left-to-right with 8 px gaps, so up to ~40 fit on a 1280-wide panel.
+pub fn fb_checkpoint(n: usize, color_rgb: (u8, u8, u8)) {
+    unsafe {
+        if FB_CHECKPOINT_BUF.is_null() {
+            return;
+        }
+        let pitch = FB_CHECKPOINT_PITCH;
+        let bpp = FB_CHECKPOINT_BPP;
+        let width = FB_CHECKPOINT_WIDTH;
+        let height = FB_CHECKPOINT_HEIGHT;
+        let buf_len = pitch * height;
+        let sq = 20usize;
+        let gap = 8usize;
+        let y0 = 260usize;
+        let x0 = 10 + n * (sq + gap);
+        if x0 + sq > width || y0 + sq > height {
+            return;
+        }
+        for yy in 0..sq {
+            for xx in 0..sq {
+                let off = (y0 + yy) * pitch + (x0 + xx) * bpp;
+                if off + 3 <= buf_len {
+                    let p = FB_CHECKPOINT_BUF.add(off);
+                    core::ptr::write_volatile(p, color_rgb.2); // B
+                    core::ptr::write_volatile(p.add(1), color_rgb.1); // G
+                    core::ptr::write_volatile(p.add(2), color_rgb.0); // R
+                    if bpp > 3 {
+                        core::ptr::write_volatile(p.add(3), 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    // Proof-of-life immediately at handoff — confirms Limine jumped here
+    // before we touch framebuffer or request responses.
+    early_serial(b"[claudio] Limine handoff reached\r\n");
+
+    // Enable SSE/SSE2/XSAVE/AVX before anything else. Limine hands off with
+    // SSE disabled in CR0/CR4, which causes #UD for any generated SSE insn
+    // (including ones emitted by the `limine` crate's Framebuffer accessors
+    // and by Rust's `memchr` auto-vectorization). We need this to be the
+    // very first thing in Rust code so even the RGB proof-of-life bars
+    // below can run on real hardware.
+    //
+    // SAFETY: ring 0, writing CR0/CR4/XCR0 per Intel SDM Vol. 3A §13.5.
+    unsafe {
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0);
+        cr0 &= !(1 << 2); // clear EM
+        cr0 |= 1 << 1;    // set MP
+        core::arch::asm!("mov cr0, {}", in(reg) cr0);
+
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4);
+        cr4 |= (1 << 9) | (1 << 10); // OSFXSR + OSXMMEXCPT
+
+        let cpuid = core::arch::x86_64::__cpuid(1).ecx;
+        let xsave = (cpuid & (1 << 26)) != 0;
+        let avx = (cpuid & (1 << 28)) != 0;
+        if xsave && avx {
+            cr4 |= 1 << 18; // OSXSAVE
+            core::arch::asm!("mov cr4, {}", in(reg) cr4);
+            let xcr0: u64 = 0b111; // x87 + SSE + AVX
+            core::arch::asm!(
+                "xsetbv",
+                in("ecx") 0u32,
+                in("edx") (xcr0 >> 32) as u32,
+                in("eax") xcr0 as u32,
+            );
+        } else {
+            core::arch::asm!("mov cr4, {}", in(reg) cr4);
+        }
+    }
+
+    early_serial(b"[claudio] SSE enabled\r\n");
+    kernel_main()
+}
+
+fn kernel_main() -> ! {
     // ── Phase -2: Visual proof-of-life on framebuffer ──────────────────
-    // Write colored pixels directly to the bootloader's framebuffer mapping
-    // BEFORE any other init. This is the only way to get visible output on
-    // real hardware (no serial port). If you see colored bars, kernel_main
-    // was reached. If screen stays black, the bootloader didn't jump here.
-    if let Some(fb) = boot_info.framebuffer.as_mut() {
-        let info = fb.info();
-        let buf = fb.buffer_mut();
-        let bpp = info.bytes_per_pixel;
-        let stride = info.stride * bpp;
-        // Draw 3 colored bars at the top: red, green, blue (10 pixels tall each)
-        for y in 0..10 {
-            for x in 0..info.width.min(400) {
-                let offset = y * stride + x * bpp;
-                if offset + 3 <= buf.len() {
-                    // BGR format (UEFI GOP default)
-                    buf[offset] = 0;        // B
-                    buf[offset + 1] = 0;    // G
-                    buf[offset + 2] = 255;  // R
-                    if bpp > 3 { buf[offset + 3] = 0; }
-                }
+    // On real hardware (no serial), this is the only way to prove kernel_main
+    // was reached. Paint 6 full-width bands so the user can eyeball progress
+    // even before any driver init. A completely black screen after this means
+    // Limine's FB response was not provided (run with `KERNEL_PATH=` + no
+    // framebuffer in limine.cfg?) or the HHDM-mapped FB address faulted.
+    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.get_response() {
+        if let Some(fb) = fb_resp.framebuffers().next() {
+            let width = fb.width() as usize;
+            let height = fb.height() as usize;
+            let pitch = fb.pitch() as usize;
+            let bpp = ((fb.bpp() as usize) + 7) / 8;
+            let addr = fb.addr();
+            let buf_len = pitch * height;
+            let buf: &mut [u8] =
+                unsafe { core::slice::from_raw_parts_mut(addr, buf_len) };
+
+            // Cache for fb_checkpoint() — lets later phases draw status
+            // squares below the bars without re-walking Limine's response.
+            unsafe {
+                FB_CHECKPOINT_BUF = addr;
+                FB_CHECKPOINT_PITCH = pitch;
+                FB_CHECKPOINT_BPP = bpp;
+                FB_CHECKPOINT_WIDTH = width;
+                FB_CHECKPOINT_HEIGHT = height;
             }
-        }
-        for y in 10..20 {
-            for x in 0..info.width.min(400) {
-                let offset = y * stride + x * bpp;
-                if offset + 3 <= buf.len() {
-                    buf[offset] = 0;
-                    buf[offset + 1] = 255;  // G
-                    buf[offset + 2] = 0;
-                    if bpp > 3 { buf[offset + 3] = 0; }
+
+            // 6 bands, each BAND_H pixels tall, full screen width, distinct
+            // colors so a missing band tells you how far we got:
+            //   red, orange, yellow, green, cyan, blue
+            const BANDS: [[u8; 3]; 6] = [
+                [0, 0, 255],   // red
+                [0, 128, 255], // orange
+                [0, 255, 255], // yellow
+                [0, 255, 0],   // green
+                [255, 255, 0], // cyan
+                [255, 0, 0],   // blue
+            ];
+            let band_h = 40;
+            for (i, c) in BANDS.iter().enumerate() {
+                let y0 = i * band_h;
+                let y1 = ((i + 1) * band_h).min(height);
+                for y in y0..y1 {
+                    let row = y * pitch;
+                    for x in 0..width {
+                        let off = row + x * bpp;
+                        if off + 3 <= buf.len() {
+                            buf[off] = c[0];
+                            buf[off + 1] = c[1];
+                            buf[off + 2] = c[2];
+                            if bpp > 3 {
+                                buf[off + 3] = 0;
+                            }
+                        }
+                    }
                 }
+                // Emit a serial marker per band so even over QEMU we can
+                // confirm the loop ran.
+                early_serial(b"[fb-band]\r\n");
             }
+            early_serial(b"[fb-done]\r\n");
+        } else {
+            early_serial(b"[fb-no-framebuffers]\r\n");
         }
-        for y in 20..30 {
-            for x in 0..info.width.min(400) {
-                let offset = y * stride + x * bpp;
-                if offset + 3 <= buf.len() {
-                    buf[offset] = 255;      // B
-                    buf[offset + 1] = 0;
-                    buf[offset + 2] = 0;
-                    if bpp > 3 { buf[offset + 3] = 0; }
-                }
-            }
-        }
+    } else {
+        early_serial(b"[fb-no-response]\r\n");
     }
 
     // ── Phase -1: Bare minimum proof-of-life (VGA text mode + raw serial) ──
@@ -208,204 +381,215 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
 
-    // ── Phase 0: Enable SSE/SSE2/AVX — required for crypto + memchr ──
-    // memchr uses runtime CPUID to detect AVX2 and will crash if AVX
-    // isn't enabled in the OS. We enable the full SSE+AVX stack.
-    //
-    // SAFETY: We are running in ring 0 with full privilege. Writing CR0, CR4,
-    // and XCR0 is required to enable SIMD instructions. CPUID is always safe
-    // to execute. The bit patterns follow the Intel SDM Vol. 3A requirements
-    // for enabling SSE (OSFXSR) and AVX (OSXSAVE + XCR0.YMM). We perform
-    // CPUID checks before enabling XSAVE/AVX to avoid #UD on older CPUs.
-    unsafe {
-        // CR0: clear EM (bit 2), set MP (bit 1) — enable FPU/SSE
-        let mut cr0: u64;
-        core::arch::asm!("mov {}, cr0", out(reg) cr0);
-        cr0 &= !(1 << 2); // clear EM (Emulation) — allows native FPU
-        cr0 |= 1 << 1;    // set MP (Monitor Coprocessor) — enables WAIT/FWAIT monitoring
-        core::arch::asm!("mov cr0, {}", in(reg) cr0);
-
-        // CR4: set OSFXSR (bit 9) + OSXMMEXCPT (bit 10) — enable SSE
-        let mut cr4: u64;
-        core::arch::asm!("mov {}, cr4", out(reg) cr4);
-        cr4 |= (1 << 9) | (1 << 10); // OSFXSR: OS supports FXSAVE/FXRSTOR, OSXMMEXCPT: OS handles #XM
-
-        // Check if XSAVE is supported (CPUID.01H:ECX bit 26)
-        // If so, enable OSXSAVE in CR4 and set XCR0 for AVX
-        let cpuid_result = core::arch::x86_64::__cpuid(1).ecx;
-        let xsave_supported = (cpuid_result & (1 << 26)) != 0;
-        let avx_supported = (cpuid_result & (1 << 28)) != 0;
-
-        if xsave_supported && avx_supported {
-            cr4 |= 1 << 18; // OSXSAVE — enables XGETBV/XSETBV instructions
-            core::arch::asm!("mov cr4, {}", in(reg) cr4);
-
-            // XCR0: enable x87 (bit 0) + SSE (bit 1) + AVX (bit 2)
-            // This tells the CPU which state components to save/restore with XSAVE.
-            let xcr0: u64 = (1 << 0) | (1 << 1) | (1 << 2);
-            core::arch::asm!(
-                "xsetbv",
-                in("ecx") 0u32,       // XCR0 selector
-                in("edx") (xcr0 >> 32) as u32,
-                in("eax") xcr0 as u32,
-            );
-        } else {
-            core::arch::asm!("mov cr4, {}", in(reg) cr4);
-        }
-    }
+    // Visual checkpoint #0 (white) — reached Phase 0 (past bars).
+    fb_checkpoint(0, (255, 255, 255));
 
     // ── Phase 0a: Serial debug output (available immediately) ─────────
+    // (SSE/XSAVE was already enabled in `_start` before we touched the
+    // framebuffer; nothing to do here.)
     serial::init();
+    fb_checkpoint(1, (255, 255, 255));
 
     // ── Phase 0b: Logger (so all subsequent log::* calls produce output) ──
     logger::init();
     log::info!("[boot] ClaudioOS v{} starting", env!("CARGO_PKG_VERSION"));
     log::info!("[boot] SSE/SSE2 enabled");
     log::info!("[boot] bootloader handed off control");
+    fb_checkpoint(2, (255, 255, 255));
 
     // ── Phase 1: CPU structures ──────────────────────────────────────
     gdt::init();
     log::info!("[boot] GDT initialized with TSS");
+    fb_checkpoint(3, (255, 255, 255));
 
     // ── Phase 2: Memory management ───────────────────────────────────
     // Must initialize heap BEFORE enabling interrupts, because the IDT
     // lazy-init and interrupt handlers may allocate.
-    let phys_mem_offset = boot_info
-        .physical_memory_offset
-        .into_option()
-        .expect("bootloader must map physical memory");
+    let phys_mem_offset = HHDM_REQUEST
+        .get_response()
+        .expect("limine must provide HHDM response")
+        .offset();
 
     // Store phys_mem_offset globally so subsystems like networking can use it.
     PHYS_MEM_OFFSET.store(phys_mem_offset, Ordering::Relaxed);
 
-    let memory_map = &boot_info.memory_regions;
+    let memory_map = MEMORY_MAP_REQUEST
+        .get_response()
+        .expect("limine must provide memory map response")
+        .entries();
     memory::init(phys_mem_offset, memory_map);
     log::info!("[boot] heap allocator initialized");
+    fb_checkpoint(4, (255, 255, 255));
 
     // ── Phase 2b: Storage / VFS (needs heap; must precede anything that
     // reads credentials or config through claudio-fs) ───────────────────
     storage::init();
+    fb_checkpoint(5, (255, 255, 255));
 
     // Drain any log lines buffered before the VFS was online and arm the
     // logger's file sink so subsequent log::* calls land in
     // /claudio/logs/kernel.log.
     logger::flush_ring_buffer_to_vfs();
+    fb_checkpoint(6, (255, 255, 255));
 
     // ── Phase 3: Interrupts (needs heap for keyboard queue allocs) ────
     interrupts::init();
     log::info!("[boot] IDT loaded, PIC initialized (interrupts still disabled)");
+    fb_checkpoint(7, (255, 255, 255));
 
     // ── Phase 3b: Keyboard decoder ────────────────────────────────────
     keyboard::init();
+    fb_checkpoint(8, (255, 255, 255));
 
     // ── Phase 3c: Real-Time Clock ────────────────────────────────────
     rtc::init();
+    fb_checkpoint(9, (255, 255, 255));
 
     // ── Phase 3c2: CSPRNG ────────────────────────────────────────────
     // Initialize the cryptographically secure RNG (needs PIT + RTC for entropy).
     csprng::init();
+    fb_checkpoint(10, (255, 255, 255));
 
-    // ── Phase 3c3: Local LLM model from bootloader ramdisk ───────────
-    // If the disk image was built with `--ramdisk <model.gguf>`, the
-    // bootloader exposes it via BootInfo::ramdisk_addr/ramdisk_len.
-    // Hand it to claudio-llm so the local-model tool handler has a real
-    // model to run instead of always erroring out.
+    // ── Phase 3c3: Local LLM model from bootloader module ────────────
+    // Limine's ModuleResponse exposes any files we told it to load alongside
+    // the kernel (see limine.conf). We treat any module named "model.gguf"
+    // (or matching the substring "gguf") as the local LLM weights and hand
+    // them to claudio-llm so the local-model tool handler has a real model
+    // to run instead of always erroring out.
+    // Phase 3c3: LLM module/VFS model load — ONLY try Limine's module list.
+    // The VFS fallback (claudio_fs::read_file) deadlocks on real 12th-gen
+    // hardware in a way it doesn't in QEMU; the model isn't required to
+    // reach the dashboard, so we skip it here and let the local-LLM tool
+    // return its usual "no model loaded" error at runtime if invoked.
     {
-        let addr = boot_info.ramdisk_addr.into_option();
-        let len = boot_info.ramdisk_len as usize;
-        if let (Some(addr), true) = (addr, len > 0) {
-            log::info!("[boot] ramdisk: addr={:#x} len={} bytes ({:.2} MB)",
-                addr, len, len as f64 / 1024.0 / 1024.0);
-            let bytes: &[u8] = unsafe {
-                core::slice::from_raw_parts(addr as *const u8, len)
-            };
+        fb_checkpoint(11, (0, 255, 255));
+        let module_resp = MODULE_REQUEST.get_response();
+        fb_checkpoint(12, (0, 255, 255));
+        let gguf_module = module_resp.and_then(|mods| {
+            fb_checkpoint(13, (0, 255, 255));
+            mods.modules().iter().copied().find(|f| {
+                let path = f.path().to_bytes();
+                path.windows(4).any(|w| w == b"gguf")
+                    || path.windows(9).any(|w| w == b"model.gguf")
+            })
+        });
+        fb_checkpoint(14, (0, 255, 255));
+
+        if let Some(file) = gguf_module {
+            let addr = file.addr() as usize;
+            let len = file.size() as usize;
+            log::info!(
+                "[boot] module: addr={:#x} len={} bytes ({:.2} MB) path={:?}",
+                addr,
+                len,
+                len as f64 / 1024.0 / 1024.0,
+                file.path(),
+            );
+            let bytes: &[u8] =
+                unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
             match agent_loop::init_local_model_from_bytes(bytes) {
-                Ok(()) => log::info!("[boot] local LLM model loaded from ramdisk"),
+                Ok(()) => log::info!("[boot] local LLM model loaded from module"),
                 Err(e) => log::warn!("[boot] local LLM init failed: {}", e),
             }
         } else {
-            // No ramdisk — fall back to VFS lookup at a well-known path.
-            // This lets deployments ship a model on the FAT32 data partition
-            // instead of baking it into the boot image.
-            const VFS_MODEL_PATH: &str = "/claudio/models/default.gguf";
-            match claudio_fs::read_file(VFS_MODEL_PATH) {
-                Ok(bytes) => {
-                    log::info!(
-                        "[boot] loaded model from VFS at {} ({} bytes, {:.2} MB)",
-                        VFS_MODEL_PATH,
-                        bytes.len(),
-                        bytes.len() as f64 / 1024.0 / 1024.0,
-                    );
-                    match agent_loop::init_local_model_from_bytes(&bytes) {
-                        Ok(()) => log::info!(
-                            "[boot] local LLM model loaded from {}",
-                            VFS_MODEL_PATH,
-                        ),
-                        Err(e) => log::warn!(
-                            "[boot] local LLM init from VFS failed: {}",
-                            e,
-                        ),
-                    }
-                }
-                Err(_) => {
-                    log::info!(
-                        "[boot] no ramdisk and no {} — local LLM tool will return stub error",
-                        VFS_MODEL_PATH,
-                    );
-                }
-            }
+            log::info!(
+                "[boot] no ramdisk module, VFS fallback disabled on real HW — \
+                 local LLM tool will return stub error",
+            );
         }
     }
+    // Phase 3c3 done — yellow
+    fb_checkpoint(17, (255, 255, 0));
 
     // ── Phase 3d: ACPI table discovery ───────────────────────────────
     // Parse ACPI tables for hardware discovery: CPU cores (MADT), power
     // management (FADT), precision timer (HPET), PCIe ECAM (MCFG).
     // Must run after heap init (allocates) but before networking.
     {
-        let rsdp_addr = boot_info.rsdp_addr.into_option();
+        let rsdp_addr = RSDP_REQUEST.get_response().map(|r| r.address() as u64);
         acpi_init::init(rsdp_addr);
     }
+    fb_checkpoint(18, (255, 255, 0)); // ACPI done
 
     // ── Phase 4: Framebuffer ─────────────────────────────────────────
-    if let Some(fb) = boot_info.framebuffer.as_mut() {
-        let info = fb.info();
-        log::info!(
-            "[boot] framebuffer: {}x{} stride={} bpp={:?}",
-            info.width,
-            info.height,
-            info.stride,
-            info.pixel_format,
-        );
-        log::info!("[boot] clearing framebuffer...");
-        framebuffer::init(fb, phys_mem_offset);
-        log::info!("[boot] framebuffer initialized");
+    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.get_response() {
+        if let Some(fb) = fb_resp.framebuffers().next() {
+            log::info!(
+                "[boot] framebuffer: {}x{} pitch={} bpp={}",
+                fb.width(),
+                fb.height(),
+                fb.pitch(),
+                fb.bpp(),
+            );
+            log::info!("[boot] clearing framebuffer...");
+            framebuffer::init(framebuffer::LimineFramebufferInfo {
+                addr: fb.addr(),
+                width: fb.width() as usize,
+                height: fb.height() as usize,
+                pitch: fb.pitch() as usize,
+                bpp: fb.bpp(),
+            });
+            log::info!("[boot] framebuffer initialized");
+        } else {
+            log::warn!("[boot] framebuffer response had no framebuffers");
+        }
     } else {
         log::warn!("[boot] no framebuffer available, serial-only mode");
     }
 
+    fb_checkpoint(19, (255, 255, 0)); // Framebuffer::init done
+
     // ── Phase 4b: Boot splash screen + chime ────────────────────────
     // Show the ClaudioOS splash with progress bar and play the boot chime.
     // This runs BEFORE networking, so it's visible even if DHCP/TLS stalls.
+    // NOTE: splash clears the screen — the rainbow bars + checkpoint squares
+    // disappear here. If we stop seeing them and don't see the ClaudioOS logo,
+    // splash is where we hung.
     splash::show_splash(splash::BootStage::Hardware);
+    fb_checkpoint(30, (0, 255, 0)); // green: splash returned
+
     boot_sound::boot_chime();
+    fb_checkpoint(31, (0, 255, 0)); // green: boot_chime done
 
     // ── Phase 4c: Virtual consoles ──────────────────────────────────
     vconsole::init();
+    fb_checkpoint(32, (0, 255, 0)); // green: vconsole done
 
     // ── Phase 5: PCI enumeration + device discovery ──────────────────
     log::info!("[boot] starting PCI enumeration...");
     pci::enumerate();
     log::info!("[boot] PCI enumeration complete");
+    fb_checkpoint(33, (0, 255, 0)); // green: PCI enumerated
 
     // ── Phase 5b: USB (xHCI) host controller + keyboard + mouse ───────
-    usb::init();
-    mouse::init();
+    // TEMPORARILY DISABLED on real hardware — xHCI init hangs on the HP
+    // Victus (12th gen Intel). Needs a proper port reset sequence and
+    // likely interrupt-driven event ring handling that our QEMU-tuned driver
+    // skips. Mouse init depends on USB so is also gated. Re-enable once
+    // the xHCI driver has been hardened for real silicon.
+    const USB_ON_REAL_HW: bool = false;
+    if USB_ON_REAL_HW {
+        usb::init();
+        mouse::init();
+    } else {
+        log::warn!("[boot] USB/mouse init skipped (disabled on real hardware)");
+    }
+    fb_checkpoint(34, (0, 255, 0)); // green: past usb/mouse phase
 
     // ── Phase 5c: SMP — boot application processors ─────────────────
-    // Uses MADT data from acpi_init to discover CPU cores, configure the
-    // Local APIC on the BSP, install AP trampoline at 0x8000, and boot
-    // all APs via INIT-SIPI-SIPI. After this, all cores are running.
-    smp_init::init();
+    // TEMPORARILY DISABLED on real hardware. The 12th-gen Intel hybrid
+    // P-core + E-core topology breaks our QEMU-tuned INIT-SIPI-SIPI
+    // trampoline (wrong CPU feature expectations on E-cores, LAPIC
+    // timing deltas, and the trampoline at 0x8000 collides with UEFI
+    // memory on some HP firmware). Boot stays single-core until smp_init
+    // has been reworked for real silicon.
+    const SMP_ON_REAL_HW: bool = false;
+    if SMP_ON_REAL_HW {
+        smp_init::init();
+    } else {
+        log::warn!("[boot] SMP init skipped (disabled on real hardware, single-core boot)");
+    }
+    fb_checkpoint(36, (0, 255, 0)); // green: past SMP phase
 
     // ── Phase 5d: Block device registry ──────────────────────────────
     // Walk PCI for mass-storage controllers (AHCI / NVMe), instantiate

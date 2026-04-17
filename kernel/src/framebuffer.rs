@@ -13,47 +13,44 @@
 //! 3. **Dirty region tracking** — the dashboard tells us which pixel rows
 //!    changed, so we only copy those rows to the front buffer.
 //!
-//! This eliminates:
-//! - ~1M mutex lock/unlock cycles per frame (was: one per pixel)
-//! - Tearing (was: pixels written directly to hardware mid-scanout)
-//! - Redundant rendering (was: every pane re-rendered on every keypress)
-//!
 //! ## Framebuffer address mapping
 //!
-//! The bootloader v0.11 maps the framebuffer at its OWN virtual address
-//! (e.g. 0x20000000000), separate from the physical memory offset mapping.
-//! Writing to that address can cause a page fault if the bootloader's mapping
-//! has restrictive flags. Instead, we translate the framebuffer's virtual
-//! address to its physical address via page table walk, then access it through
-//! the physical memory offset mapping which is known to be PRESENT + WRITABLE.
+//! Limine already maps the framebuffer into the higher-half direct map (HHDM).
+//! The `addr()` pointer returned by the Limine framebuffer struct is a valid
+//! writable virtual address — no extra page-table walking required (unlike
+//! the `bootloader` 0.11 crate, which mapped the framebuffer at a separate
+//! address that could lack the WRITABLE flag).
 
 extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use bootloader_api::info::FrameBuffer;
 use spin::Mutex;
-use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
-use x86_64::VirtAddr;
 
 static FB: Mutex<Option<FrameBufferState>> = Mutex::new(None);
 
+/// Thin adapter struct so the rest of the kernel doesn't have to know about
+/// the Limine framebuffer type directly. Populated in `init()` from the
+/// `limine::framebuffer::Framebuffer` returned by the bootloader.
+pub struct LimineFramebufferInfo {
+    /// Pointer to the first byte of the framebuffer.
+    pub addr: *mut u8,
+    /// Width in pixels.
+    pub width: usize,
+    /// Height in pixels.
+    pub height: usize,
+    /// Pitch in bytes (distance between two rows — may exceed `width*bpp/8`).
+    pub pitch: usize,
+    /// Bits per pixel (typically 32 for BGR/RGB8888).
+    pub bpp: u16,
+}
+
 /// Core state for the double-buffered framebuffer.
-///
-/// # Memory layout
-///
-/// For a 1280x800x4bpp display:
-/// - `front`: 4,096,000 bytes of MMIO-mapped video memory (writes are visible)
-/// - `back`:  4,096,000 bytes of heap memory (writes are invisible until blit)
-///
-/// All rendering writes to `back`. When a frame is complete, dirty regions are
-/// copied from `back` to `front` via `blit_rows()` or `blit_full()`.
 pub struct FrameBufferState {
-    /// Hardware framebuffer (front buffer) — memory-mapped via the bootloader's
-    /// physical memory offset.  Writes to this are immediately visible on screen.
+    /// Hardware framebuffer (front buffer) — memory-mapped via the Limine
+    /// HHDM.  Writes to this are immediately visible on screen.
     pub front: &'static mut [u8],
-    /// Off-screen back buffer — heap-allocated.  All rendering targets this
-    /// to avoid tearing and reduce mutex contention.
+    /// Off-screen back buffer — heap-allocated.  All rendering targets this.
     pub back: Vec<u8>,
     /// Display width in pixels.
     pub width: usize,
@@ -65,47 +62,34 @@ pub struct FrameBufferState {
     pub bytes_per_pixel: usize,
 }
 
-pub fn init(fb: &'static mut FrameBuffer, phys_mem_offset: u64) {
-    let info = fb.info();
-    let buf_len = fb.buffer().len();
+/// Initialize the framebuffer state from a Limine framebuffer description.
+///
+/// `info.addr` must be a valid writable pointer to `info.pitch * info.height`
+/// bytes for the lifetime of the kernel. Limine maps it into the HHDM, so this
+/// precondition is satisfied as long as the bootloader's page tables remain in
+/// effect (which they do for the entire ClaudioOS lifetime).
+pub fn init(info: LimineFramebufferInfo) {
+    let bytes_per_pixel = ((info.bpp as usize) + 7) / 8;
+    let buf_len = info.pitch * info.height;
+    let stride_pixels = if bytes_per_pixel > 0 {
+        info.pitch / bytes_per_pixel
+    } else {
+        info.width
+    };
 
-    // The bootloader's buffer_mut() returns a slice at the bootloader's chosen
-    // virtual address for the framebuffer. This address may not be writable
-    // (the bootloader's mapping can lack WRITABLE flag or have cache attributes
-    // that cause faults). Instead, we find the physical address and access it
-    // through the physical memory offset mapping.
-    let bootloader_virt = fb.buffer_mut().as_mut_ptr() as u64;
     log::info!(
-        "[fb] bootloader mapped buffer at {:#x}, {} bytes",
-        bootloader_virt,
-        buf_len
+        "[fb] limine framebuffer: addr={:p} {}x{} pitch={} bpp={}",
+        info.addr,
+        info.width,
+        info.height,
+        info.pitch,
+        info.bpp,
     );
 
-    // Walk the page table to find the physical address of the framebuffer
-    let phys_offset_virt = VirtAddr::new(phys_mem_offset);
-    let page_table = unsafe {
-        let (level_4_frame, _) = x86_64::registers::control::Cr3::read();
-        let phys = level_4_frame.start_address();
-        let virt = phys_offset_virt + phys.as_u64();
-        let ptr: *mut PageTable = virt.as_mut_ptr();
-        &mut *ptr
-    };
-    let mapper = unsafe { OffsetPageTable::new(page_table, phys_offset_virt) };
-
-    let fb_virt_addr = VirtAddr::new(bootloader_virt);
-    let fb_phys_addr = mapper
-        .translate_addr(fb_virt_addr)
-        .expect("[fb] failed to translate framebuffer virtual address to physical");
-
-    log::info!("[fb] framebuffer physical address: {:#x}", fb_phys_addr.as_u64());
-
-    // Access the framebuffer through the physical memory offset mapping.
-    // This mapping is set up by the bootloader with PRESENT + WRITABLE flags.
-    let fb_via_phys_map = phys_mem_offset + fb_phys_addr.as_u64();
-    log::info!("[fb] using phys-offset mapped address: {:#x}", fb_via_phys_map);
-
+    // SAFETY: the caller guarantees the pointer is valid for `buf_len` bytes
+    // and remains mapped + writable for the kernel's lifetime.
     let front = unsafe {
-        core::slice::from_raw_parts_mut(fb_via_phys_map as *mut u8, buf_len)
+        core::slice::from_raw_parts_mut(info.addr, buf_len)
     };
 
     // Allocate the back buffer on the heap — same size as the front buffer.
@@ -122,26 +106,26 @@ pub fn init(fb: &'static mut FrameBuffer, phys_mem_offset: u64) {
         back,
         width: info.width,
         height: info.height,
-        stride: info.stride,
-        bytes_per_pixel: info.bytes_per_pixel,
+        stride: stride_pixels,
+        bytes_per_pixel,
     };
 
-    // Clear both buffers to black to prove writes work.
-    // Front buffer: use write_volatile since it's memory-mapped hardware.
-    for byte in state.front.iter_mut() {
-        unsafe {
-            core::ptr::write_volatile(byte as *mut u8, 0);
-        }
-    }
-    log::info!("[fb] front buffer cleared to black ({} bytes)", buf_len);
+    // Intentionally NOT clearing the front buffer. Phase -2's RGB proof-of-
+    // life bars must stay visible until a higher layer (splash, vconsole)
+    // draws real content over them. A black-after-bars transition on real
+    // hardware is indistinguishable from "kernel died silently."
+    log::info!(
+        "[fb] front buffer ready — {} bytes visible, proof-of-life bars preserved",
+        buf_len,
+    );
 
     *FB.lock() = Some(state);
     log::info!(
         "[fb] framebuffer ready: {}x{} stride={} bpp={} double-buffered",
         info.width,
         info.height,
-        info.stride,
-        info.bytes_per_pixel
+        stride_pixels,
+        bytes_per_pixel
     );
 }
 
@@ -174,7 +158,6 @@ pub fn put_pixel(x: usize, y: usize, r: u8, g: u8, b: u8) {
             return;
         }
         let offset = (y * fb.stride + x) * fb.bytes_per_pixel;
-        // Write to the back buffer (not directly to hardware).
         if offset + 2 < fb.back.len() {
             fb.back[offset] = b;
             fb.back[offset + 1] = g;
@@ -184,9 +167,6 @@ pub fn put_pixel(x: usize, y: usize, r: u8, g: u8, b: u8) {
 }
 
 /// Blit the entire back buffer to the front (hardware) buffer.
-///
-/// Uses `copy_nonoverlapping` for maximum throughput — one memcpy for the
-/// entire framebuffer. On a 1280x800x4 display this copies ~4 MiB.
 pub fn blit_full() {
     if let Some(ref mut fb) = *FB.lock() {
         let len = fb.back.len().min(fb.front.len());
@@ -202,10 +182,6 @@ pub fn blit_full() {
 }
 
 /// Blit only the specified pixel rows from the back buffer to the front buffer.
-///
-/// This is the dirty-region fast path: when a single character row is typed,
-/// only ~16 pixel rows need copying (~80 KiB for 1280x4x16) instead of the
-/// full ~4 MiB framebuffer.
 pub fn blit_rows(y_start: usize, y_end: usize) {
     if let Some(ref mut fb) = *FB.lock() {
         let y_start = y_start.min(fb.height);
@@ -235,15 +211,6 @@ pub fn blit_rows(y_start: usize, y_end: usize) {
 }
 
 /// Acquire the back buffer for direct rendering.
-///
-/// The caller gets mutable access to the back buffer along with dimensions,
-/// enabling the `DrawTarget` to write pixels directly without going through
-/// the `put_pixel` function (which would re-acquire the mutex on each call).
-///
-/// # Safety
-///
-/// The closure must not call any other `framebuffer::` functions (deadlock).
-/// It receives `(back_buffer, width, height, stride, bytes_per_pixel)`.
 pub fn with_back_buffer<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut [u8], usize, usize, usize, usize) -> R,
@@ -262,17 +229,14 @@ where
 }
 
 /// XOR a single pixel in the back buffer with white (0xFFFFFF).
-///
-/// Used by the mouse cursor renderer for visibility on any background.
-/// The caller must ensure (x, y) are within bounds.
 #[inline]
 pub fn xor_pixel_backbuf(x: usize, y: usize, stride: usize, bpp: usize) {
     if let Some(ref mut fb) = *FB.lock() {
         let offset = (y * stride + x) * bpp;
         if offset + 2 < fb.back.len() {
-            fb.back[offset] ^= 0xFF;     // B
-            fb.back[offset + 1] ^= 0xFF; // G
-            fb.back[offset + 2] ^= 0xFF; // R
+            fb.back[offset] ^= 0xFF;
+            fb.back[offset + 1] ^= 0xFF;
+            fb.back[offset + 2] ^= 0xFF;
         }
     }
 }

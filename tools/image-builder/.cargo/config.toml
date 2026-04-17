@@ -1,6 +1,12 @@
 # Override parent workspace config — this tool runs on the HOST, not bare-metal.
 [build]
-target = "x86_64-pc-windows-msvc"
+target = "x86_64-pc-windows-gnu"
+
+[unstable]
+# Clear the workspace's build-std so byteorder/etc. don't try to recompile
+# core for the host target (causes "duplicate lang item" link errors).
+build-std = []
+build-std-features = []
 
 [env]
 LIB = "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.43.34808/lib/onecore/x64;C:/Program Files (x86)/Windows Kits/10/Lib/10.0.22621.0/ucrt/x64;C:/Program Files (x86)/Windows Kits/10/Lib/10.0.22621.0/um/x64"
