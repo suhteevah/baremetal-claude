@@ -47,24 +47,32 @@ except ImportError as e:
 
 # Base model — selected via --size flag (default 7B, best coding model in 8GB w/ QLoRA)
 SIZE_CONFIG = {
-    "1.5b": {
-        "base_model": "Qwen/Qwen2.5-Coder-1.5B",
-        "output_subdir": "claudio-coder-1.5b-lora",
-        "merged_subdir": "claudio-coder-1.5b-merged",
+    "1.5b": "Qwen/Qwen2.5-Coder-1.5B",
+    "7b":   "Qwen/Qwen2.5-Coder-7B",
+}
+
+# Task dictates: training data file, LoRA dir prefix, and the system prompt
+# baked into the rendered examples (already in each training-data line's
+# "system" role, so this is used only for future generation templates).
+TASK_CONFIG = {
+    "code": {
+        "data_file": "training-data.jsonl",
+        "lora_prefix": "claudio-coder",
+        "merged_prefix": "claudio-coder",
     },
-    "7b": {
-        "base_model": "Qwen/Qwen2.5-Coder-7B",
-        "output_subdir": "claudio-coder-7b-lora",
-        "merged_subdir": "claudio-coder-7b-merged",
+    "manual": {
+        "data_file": "manual-training-data.jsonl",
+        "lora_prefix": "claudio-manual",
+        "merged_prefix": "claudio-manual",
     },
 }
 
 # Module-level defaults; overridden in main() after arg parsing
-BASE_MODEL = SIZE_CONFIG["7b"]["base_model"]
+BASE_MODEL = SIZE_CONFIG["7b"]
 REPO_ROOT = Path(__file__).parent.parent
-TRAINING_DATA = REPO_ROOT / "tools" / "training-data.jsonl"
-OUTPUT_DIR = REPO_ROOT / "models" / SIZE_CONFIG["7b"]["output_subdir"]
-MERGED_DIR = REPO_ROOT / "models" / SIZE_CONFIG["7b"]["merged_subdir"]
+TRAINING_DATA = REPO_ROOT / "tools" / TASK_CONFIG["code"]["data_file"]
+OUTPUT_DIR = REPO_ROOT / "models" / f"{TASK_CONFIG['code']['lora_prefix']}-7b-lora"
+MERGED_DIR = REPO_ROOT / "models" / f"{TASK_CONFIG['code']['merged_prefix']}-7b-merged"
 
 # Training hyperparameters (tuned for 3070 Ti 8GB)
 LORA_R = 16                    # LoRA rank — 16 is good quality/memory tradeoff
@@ -274,6 +282,13 @@ def parse_args():
         help="Model size to train. 1.5b trains fast, 7b is stronger. Default: 7b.",
     )
     p.add_argument(
+        "--task",
+        choices=list(TASK_CONFIG.keys()),
+        default="code",
+        help="Task: 'code' (Rust code-gen) or 'manual' (ClaudioOS Q&A offline manual). "
+             "Switches the training data file and the LoRA output dir. Default: code.",
+    )
+    p.add_argument(
         "--output-suffix",
         default="",
         help="Optional suffix on the output LoRA dir (e.g. '-v2'). "
@@ -298,16 +313,17 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Resolve per-size paths, allowing an output-dir suffix for v2/v3/etc.
-    global BASE_MODEL, OUTPUT_DIR, MERGED_DIR
-    cfg = SIZE_CONFIG[args.size]
-    BASE_MODEL = cfg["base_model"]
-    OUTPUT_DIR = REPO_ROOT / "models" / f"{cfg['output_subdir']}{args.output_suffix}"
-    MERGED_DIR = REPO_ROOT / "models" / f"{cfg['merged_subdir']}{args.output_suffix}"
+    # Resolve per-size + per-task paths, allowing a suffix for v2/v3/etc.
+    global BASE_MODEL, OUTPUT_DIR, MERGED_DIR, TRAINING_DATA
+    BASE_MODEL = SIZE_CONFIG[args.size]
+    tcfg = TASK_CONFIG[args.task]
+    TRAINING_DATA = REPO_ROOT / "tools" / tcfg["data_file"]
+    OUTPUT_DIR = REPO_ROOT / "models" / f"{tcfg['lora_prefix']}-{args.size}-lora{args.output_suffix}"
+    MERGED_DIR = REPO_ROOT / "models" / f"{tcfg['merged_prefix']}-{args.size}-merged{args.output_suffix}"
 
     print("=" * 60)
     print("ClaudioOS Model Fine-Tuning")
-    print(f"Size: {args.size}   Base model: {BASE_MODEL}")
+    print(f"Task: {args.task}   Size: {args.size}   Base: {BASE_MODEL}")
     print(f"Training data: {TRAINING_DATA}")
     print(f"Output LoRA:   {OUTPUT_DIR}")
     print(f"Target GPU: RTX 3070 Ti (8GB VRAM)")

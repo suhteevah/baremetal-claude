@@ -43,11 +43,15 @@ mod gdt;
 mod init;
 mod interrupts;
 mod intel_nic;
+mod rtl8168_nic;
 mod ipc;
 mod keyboard;
 mod logger;
 mod memory;
 mod pci;
+mod mmio_repl;
+mod qr;
+mod wifi_init;
 mod rtc;
 mod serial;
 mod smp_init;
@@ -561,6 +565,12 @@ fn kernel_main() -> ! {
     log::info!("[boot] PCI enumeration complete");
     fb_checkpoint(33, (0, 255, 0)); // green: PCI enumerated
 
+    // ── Phase 5a: Wi-Fi probe (gated, safe to always run) ────────────────
+    // Captures what Wi-Fi adapter (if any) is on the PCI bus so the fallback
+    // terminal can render it. Real MMIO init is behind WIFI_ON_REAL_HW inside
+    // `wifi_init`; today only the Realtek stub arm is active for the Victus.
+    wifi_init::init();
+
     // ── Phase 5b: USB (xHCI) host controller + keyboard + mouse ───────
     // TEMPORARILY DISABLED on real hardware — xHCI init hangs on the HP
     // Victus (12th gen Intel). Needs a proper port reset sequence and
@@ -717,14 +727,50 @@ async fn main_async() {
     } else {
         None
     };
+
+    // Try RTL8168 if VirtIO-net and Intel NIC both absent (HP Victus 04:00.0).
+    let rtl_stack = if virtio_dev.is_none() && intel_stack.is_none() {
+        log::info!("[main] no Intel NIC found, probing for Realtek RTL8168...");
+        fb_checkpoint(44, (255, 255, 0)); // yellow: rtl8168 probe starting
+        match rtl8168_nic::init_rtl8168_network(now) {
+            Some(Ok(rstack)) => {
+                log::info!("[main] RTL8168 active — DHCP complete");
+                if let Some(addr) = rstack.ipv4_addr() {
+                    log::info!("[main] RTL8168 IP: {}", addr);
+                }
+                if let Some(gw) = rstack.gateway {
+                    log::info!("[main] RTL8168 gateway: {}", gw);
+                }
+                for dns in &rstack.dns_servers {
+                    log::info!("[main] RTL8168 DNS: {}", dns);
+                }
+                fb_checkpoint(45, (0, 255, 0)); // green: rtl8168 DHCP done
+                Some(rstack)
+            }
+            Some(Err(e)) => {
+                log::error!("[main] RTL8168 init failed: {}", e);
+                None
+            }
+            None => {
+                log::info!("[main] no RTL8168 found either");
+                None
+            }
+        }
+    } else {
+        None
+    };
     fb_checkpoint(43, (255, 128, 0)); // orange: NIC detection phase done
 
     let nic_dev = virtio_dev;
 
     match nic_dev {
-        None if intel_stack.is_none() => {
+        None if intel_stack.is_none() && rtl_stack.is_none() => {
             log::warn!("[main] no supported NIC found — skipping networking");
-            fb_checkpoint(44, (255, 128, 0)); // orange: no NIC, continuing without net
+            fb_checkpoint(46, (255, 128, 0)); // orange: no NIC, continuing without net
+        }
+        None if rtl_stack.is_some() => {
+            log::info!("[main] RTL8168 networking active");
+            log::info!("[main] NOTE: Full API client requires generic NetworkStack");
         }
         None => {
             // Intel NIC path — network is up via IntelNetworkStack.
@@ -1617,34 +1663,252 @@ async fn main_async() {
     let mut layout = claudio_terminal::Layout::new(fb_w, fb_h);
     fb_checkpoint(47, (255, 128, 0)); // orange: terminal layout created
 
-    {
-        let pane = layout.focused_pane_mut();
-        pane.write_str("\x1b[96mClaudioOS v0.1.0\x1b[0m — \x1b[93mBare Metal AI Agent Terminal\x1b[0m\r\n");
-        pane.write_str("\x1b[90m────────────────────────────────────────────────────\x1b[0m\r\n");
-        pane.write_str("\r\n");
-        pane.write_str("  \x1b[32mPhase 1\x1b[0m: Boot to terminal ............. \x1b[92mOK\x1b[0m\r\n");
-        pane.write_str("  \x1b[33mPhase 2\x1b[0m: Networking ................... \x1b[91mN/A\x1b[0m\r\n");
-        pane.write_str("\r\n");
-        pane.write_str("\x1b[90mNo network/API key — keyboard echo mode.\x1b[0m\r\n");
-        pane.write_str("\x1b[97m$ \x1b[0m");
-    }
+    // Build the debug dump as a flat list of pre-rendered lines. Each entry
+    // is one terminal row. We paginate this list against pane.rows() and let
+    // the user page through with SPACE. Phone-photo workflow: photograph each
+    // page, advance, repeat — no scroll-off bug.
+    let mut lines: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    lines.push("\x1b[96mClaudioOS v0.1.0\x1b[0m — \x1b[93mBare Metal AI Agent Terminal\x1b[0m".into());
+    lines.push("\x1b[90m────────────────────────────────────────────────────\x1b[0m".into());
+    lines.push("".into());
+    lines.push("  \x1b[32mPhase 1\x1b[0m: Boot to terminal ............. \x1b[92mOK\x1b[0m".into());
+    lines.push("  \x1b[33mPhase 2\x1b[0m: Networking ................... \x1b[91mN/A\x1b[0m".into());
+    lines.push("".into());
 
-    layout.render_all(&mut draw_target);
-    framebuffer::blit_full(); // flush back buffer to the visible front buffer
-    fb_checkpoint(48, (255, 128, 0)); // orange: terminal rendered — screen should now show prompt
+    lines.push("\x1b[96mPCI bus — Intel / network devices:\x1b[0m".into());
+    let devs = crate::pci::snapshot();
+    let mut shown = 0usize;
+    for d in &devs {
+        let is_intel = d.vendor_id == 0x8086;
+        let is_net = d.class == 0x02;
+        if !is_intel && !is_net {
+            continue;
+        }
+        let tag = match (is_intel, is_net, d.subclass) {
+            (true, true, 0x80) => "\x1b[91m[WIFI?]\x1b[0m",
+            (true, true, _) => "\x1b[93m[NET ]\x1b[0m",
+            (true, false, _) => "\x1b[90m[INTEL]\x1b[0m",
+            (_, true, _) => "\x1b[93m[NET ]\x1b[0m",
+            _ => "      ",
+        };
+        lines.push(alloc::format!(
+            "  {} {:02x}:{:02x}.{} {:04x}:{:04x} cls={:02x}/{:02x} bar0={:08x} irq={}",
+            tag, d.bus, d.device, d.function,
+            d.vendor_id, d.device_id, d.class, d.subclass,
+            d.bar0, d.irq_line
+        ));
+        shown += 1;
+    }
+    if shown == 0 {
+        lines.push("  \x1b[91m(no Intel / network devices found)\x1b[0m".into());
+    }
+    lines.push("".into());
+
+    // Track where the Wi-Fi register block starts so we can render the QR
+    // dump only on pages that contain register data (otherwise the QR gets
+    // overpainted by the next-page redraw, or shown on irrelevant pages).
+    let mut regs_first_line: Option<usize> = None;
+    let mut regs_last_line: Option<usize> = None;
+
+    lines.push("\x1b[96mWi-Fi probe:\x1b[0m".into());
+    match crate::wifi_init::snapshot() {
+        Some(w) => {
+            lines.push(alloc::format!(
+                "  \x1b[93m[{}]\x1b[0m {} ids={} irq={}",
+                w.bdf, w.chip, w.ids, w.irq_line
+            ));
+            for bar_line in w.bars_formatted.lines() {
+                lines.push(alloc::format!("    \x1b[90m{}\x1b[0m", bar_line));
+            }
+            if w.rtw_mmio_bar != 0 {
+                lines.push(alloc::format!(
+                    "    \x1b[92mRealtek MMIO (BAR2) = 0x{:016x}\x1b[0m",
+                    w.rtw_mmio_bar
+                ));
+            }
+            regs_first_line = Some(lines.len());
+            for reg_line in w.probe_regs.lines() {
+                lines.push(alloc::format!("    \x1b[96m{}\x1b[0m", reg_line));
+            }
+            regs_last_line = Some(lines.len().saturating_sub(1));
+            lines.push(alloc::format!("  \x1b[90m-> {}\x1b[0m", w.outcome));
+        }
+        None => {
+            lines.push("  \x1b[91m(wifi_init did not run)\x1b[0m".into());
+        }
+    }
+    lines.push("".into());
+
+    // RTL8168 (wired ethernet) probe + init + DHCP status — populated by
+    // rtl8168_nic::init_rtl8168_network() during main_async.
+    lines.push("\x1b[96mRTL8168 (wired ethernet):\x1b[0m".into());
+    match crate::rtl8168_nic::snapshot() {
+        Some(s) => {
+            if !s.found {
+                lines.push("  \x1b[90mno RTL8168 found on PCI bus\x1b[0m".into());
+            } else {
+                lines.push(alloc::format!(
+                    "  found at {}, BAR2 kind={} phys={:#x}",
+                    s.bdf, s.bar2_kind, s.bar2_phys
+                ));
+                match s.mac {
+                    Some(m) => lines.push(alloc::format!(
+                        "  \x1b[92mMAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\x1b[0m",
+                        m[0], m[1], m[2], m[3], m[4], m[5],
+                    )),
+                    None => lines.push("  \x1b[91mMAC: (not read — init did not complete)\x1b[0m".into()),
+                }
+                if let Some(e) = &s.init_err {
+                    lines.push(alloc::format!("  \x1b[91minit error: {}\x1b[0m", e));
+                }
+                if let Some(ip) = &s.ipv4 {
+                    lines.push(alloc::format!("  \x1b[92mDHCP: IP {}\x1b[0m", ip));
+                }
+                if let Some(gw) = &s.gateway {
+                    lines.push(alloc::format!("  \x1b[92mgateway: {}\x1b[0m", gw));
+                }
+                if let Some(e) = &s.dhcp_err {
+                    lines.push(alloc::format!("  \x1b[91mDHCP: {}\x1b[0m", e));
+                }
+                if let Some(d) = &s.diag {
+                    let link = if d.phy_status & 0x02 != 0 { "UP" } else { "\x1b[91mDOWN\x1b[0m" };
+                    let speed = if d.phy_status & 0x10 != 0 { "1000M" }
+                        else if d.phy_status & 0x08 != 0 { "100M" }
+                        else if d.phy_status & 0x04 != 0 { "10M" }
+                        else { "?" };
+                    lines.push(alloc::format!(
+                        "  diag: CR={:#04x} ISR={:#06x} IMR={:#06x} PHY={:#04x} link={} speed={}",
+                        d.cr, d.isr, d.imr, d.phy_status, link, speed,
+                    ));
+                    lines.push(alloc::format!(
+                        "  diag: RXCR={:#010x} TXCR={:#010x} rx_head={} tx_tail={}",
+                        d.rxcr, d.txcr, d.rx_head, d.tx_tail,
+                    ));
+                    lines.push(alloc::format!(
+                        "  diag: CPlusCmd={:#06x} MaxTxPkt={:#04x}",
+                        d.cplus_cmd, d.max_tx_pkt,
+                    ));
+                    lines.push(alloc::format!(
+                        "  diag: rx_head_opts1={:#010x} tx_tail_opts1={:#010x}",
+                        d.rx_head_opts1, d.tx_head_opts1,
+                    ));
+                }
+            }
+        }
+        None => lines.push("  \x1b[90m(rtl8168_nic did not run)\x1b[0m".into()),
+    }
+    lines.push("".into());
+    lines.push("\x1b[90mNo network/API key — keyboard echo mode.\x1b[0m".into());
+
+    // Build QR payload once — rendered on pages overlapping the reg block.
+    let qr_payload: alloc::string::String = {
+        let mut payload = alloc::string::String::from("CLAUDIOS PROBE/1 ");
+        if let Some(w) = crate::wifi_init::snapshot() {
+            payload.push_str(&alloc::format!(
+                "CHIP:{} BDF:{} IDS:{} BAR2:{:016X} IRQ:{} ",
+                w.chip.to_ascii_uppercase().replace(' ', "-"),
+                w.bdf.replace(':', "-").replace('.', "-"),
+                w.ids.to_ascii_uppercase(),
+                w.rtw_mmio_bar,
+                w.irq_line,
+            ));
+            for line in w.probe_regs.lines() {
+                if let Some((off, val)) = line.split_once('=') {
+                    payload.push_str(&alloc::format!(
+                        "R:{}:{} ",
+                        off.to_ascii_uppercase(),
+                        val.to_ascii_uppercase()
+                    ));
+                }
+            }
+        }
+        payload
+    };
+
+    // QR render is gated off by default — iOS Camera refuses to surface raw
+    // (non-URL) decoded text as "no usable data", and the paginated text
+    // dump is already fully photographable. Flip to true (or wrap payload
+    // as `https://x/?d=...`) if we ever want to revive the QR path.
+    const QR_ENABLED: bool = false;
+    let _ = &qr_payload; // keep builder alive even when QR is gated off
+
+    let rows_per_page = layout.focused_pane().rows().saturating_sub(2).max(4);
+    let total_pages = (lines.len() + rows_per_page - 1) / rows_per_page;
+
+    // Render one page. Returns true if this page overlaps the register block
+    // (caller then draws the QR).
+    let render_page = |layout: &mut claudio_terminal::Layout,
+                       draw_target: &mut terminal::FramebufferDrawTarget,
+                       page_idx: usize| -> bool {
+        let start = page_idx * rows_per_page;
+        let end = (start + rows_per_page).min(lines.len());
+        let pane = layout.focused_pane_mut();
+        pane.write_str("\x1b[2J\x1b[H"); // ED+CUP: clear pane and home cursor
+        for line in &lines[start..end] {
+            pane.write_str(line);
+            pane.write_str("\r\n");
+        }
+        // Footer
+        if page_idx + 1 < total_pages {
+            pane.write_str(&alloc::format!(
+                "\x1b[90m[page {}/{} — SPACE: next]\x1b[0m",
+                page_idx + 1, total_pages
+            ));
+        } else {
+            pane.write_str("\x1b[97m$ \x1b[0m");
+        }
+        layout.render_all(draw_target);
+
+        let overlaps_regs = match (regs_first_line, regs_last_line) {
+            (Some(lo), Some(hi)) => start <= hi && end > lo,
+            _ => false,
+        };
+        if QR_ENABLED && overlaps_regs {
+            crate::qr::render_payload(&qr_payload);
+        }
+        framebuffer::blit_full();
+        overlaps_regs
+    };
+
+    let mut page_idx = 0usize;
+    render_page(&mut layout, &mut draw_target, page_idx);
+    fb_checkpoint(48, (255, 128, 0)); // orange: first page rendered
 
     let stream = keyboard::ScancodeStream::new();
+    let mut line_buf = alloc::string::String::new();
     loop {
         let key = stream.next_key().await;
         match key {
             pc_keyboard::DecodedKey::Unicode(c) => {
                 crate::serial_print!("{}", c);
+                // Pagination mode: SPACE advances until we're out of pages,
+                // then we drop into the REPL on the final page.
+                if page_idx + 1 < total_pages {
+                    if c == ' ' {
+                        page_idx += 1;
+                        render_page(&mut layout, &mut draw_target, page_idx);
+                    }
+                    continue;
+                }
+                // REPL mode (final page). Line-buffer until Enter, then
+                // dispatch to `mmio_repl::handle`.
                 let pane = layout.focused_pane_mut();
                 if c == '\n' {
-                    pane.write_str("\r\n\x1b[97m$ \x1b[0m");
+                    pane.write_str("\r\n");
+                    let cmd_line: alloc::string::String = line_buf.clone();
+                    line_buf.clear();
+                    let out = mmio_repl::handle(&cmd_line);
+                    for l in out {
+                        pane.write_str(&l);
+                        pane.write_str("\r\n");
+                    }
+                    pane.write_str("\x1b[97m$ \x1b[0m");
                 } else if c == '\u{8}' {
-                    pane.write_str("\x08 \x08");
+                    if line_buf.pop().is_some() {
+                        pane.write_str("\x08 \x08");
+                    }
                 } else {
+                    line_buf.push(c);
                     let mut buf = [0u8; 4];
                     let s = c.encode_utf8(&mut buf);
                     pane.write_str(s);

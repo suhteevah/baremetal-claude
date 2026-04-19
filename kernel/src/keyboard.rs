@@ -16,6 +16,22 @@ use spin::Mutex;
 /// Ring buffer of raw scancodes, written by the ISR, read by the async stream.
 static SCANCODE_QUEUE: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 
+/// Ctrl+Alt+Del detection state. Modifier bits tracked from raw scancodes so
+/// it works anywhere — the fallback terminal loop, the dashboard, a panic
+/// handler — as long as the keyboard ISR is still firing.
+static CAD_STATE: Mutex<CadState> = Mutex::new(CadState {
+    ctrl: false,
+    alt: false,
+    extended: false,
+});
+
+struct CadState {
+    ctrl: bool,
+    alt: bool,
+    /// True if the previous byte was 0xE0 (extended scancode prefix).
+    extended: bool,
+}
+
 /// Waker stored by the async reader so the ISR can wake it when a key arrives.
 static KEYBOARD_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
 
@@ -39,6 +55,33 @@ pub fn init() {
 /// This function is called with interrupts disabled (inside an ISR),
 /// so it must not allocate or block.
 pub fn push_scancode(scancode: u8) {
+    // Ctrl+Alt+Del detection (scancode set 1).
+    // Ctrl:  0x1D make / 0x9D break   (E0-prefixed = right ctrl)
+    // Alt:   0x38 make / 0xB8 break   (E0-prefixed = right alt / AltGr)
+    // Del:   0xE0 0x53 (extended only — the 0x53 without E0 is keypad '.')
+    {
+        let mut s = CAD_STATE.lock();
+        match scancode {
+            0xE0 => {
+                s.extended = true;
+            }
+            0x1D => { s.ctrl = true; s.extended = false; }
+            0x9D => { s.ctrl = false; s.extended = false; }
+            0x38 => { s.alt = true; s.extended = false; }
+            0xB8 => { s.alt = false; s.extended = false; }
+            0x53 if s.extended && s.ctrl && s.alt => {
+                // Ctrl+Alt+Del pressed. Reboot immediately — ACPI reset
+                // register (with keyboard-controller fallback) is safe to call
+                // from any context; it does a port write and never returns.
+                drop(s);
+                crate::acpi_init::reboot();
+            }
+            _ => {
+                s.extended = false;
+            }
+        }
+    }
+
     SCANCODE_QUEUE.lock().push_back(scancode);
 
     // Wake the async reader if one is waiting.

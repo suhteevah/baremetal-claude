@@ -17,6 +17,8 @@ vte = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smoltcp = { workspace = true }
+qrcodegen-no-heap = { version = "1.8", default-features = false }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 
 # Internal crates
 claudio-terminal = { path = "../crates/terminal" }
@@ -35,6 +37,8 @@ claudio-ntfs = { path = "../crates/ntfs" }
 claudio-ahci = { path = "../crates/ahci" }
 claudio-nvme = { path = "../crates/nvme" }
 claudio-intel-nic = { path = "../crates/intel-nic" }
+claudio-rtl8168 = { path = "../crates/rtl8168" }
+claudio-wifi = { path = "../crates/wifi" }
 claudio-acpi = { path = "../crates/acpi" }
 claudio-hda = { path = "../crates/hda" }
 claudio-smp = { path = "../crates/smp" }

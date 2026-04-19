@@ -1,0 +1,10 @@
+[package]
+name = "claudio-rtl8168"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std Realtek RTL8168/RTL8111 GigE NIC driver for ClaudioOS"
+
+[dependencies]
+log = { workspace = true }

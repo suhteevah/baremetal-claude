@@ -166,6 +166,38 @@ pub fn put_pixel(x: usize, y: usize, r: u8, g: u8, b: u8) {
     }
 }
 
+/// Return (width, height) in pixels, or (0, 0) if not initialised.
+pub fn dimensions() -> (usize, usize) {
+    FB.lock().as_ref().map_or((0, 0), |fb| (fb.width, fb.height))
+}
+
+/// Fill an axis-aligned rectangle on the back buffer with a solid color. Takes
+/// the framebuffer mutex once per call, so it's dramatically faster than a
+/// `put_pixel` loop for large areas (as used by the QR renderer). Clips to
+/// framebuffer bounds.
+pub fn fill_rect(x: usize, y: usize, w: usize, h: usize, (r, g, b): (u8, u8, u8)) {
+    if let Some(ref mut fb) = *FB.lock() {
+        let x_end = (x + w).min(fb.width);
+        let y_end = (y + h).min(fb.height);
+        if x >= fb.width || y >= fb.height {
+            return;
+        }
+        let bpp = fb.bytes_per_pixel;
+        let stride_bytes = fb.stride * bpp;
+        for yy in y..y_end {
+            let row_off = yy * stride_bytes;
+            for xx in x..x_end {
+                let off = row_off + xx * bpp;
+                if off + 2 < fb.back.len() {
+                    fb.back[off] = b;
+                    fb.back[off + 1] = g;
+                    fb.back[off + 2] = r;
+                }
+            }
+        }
+    }
+}
+
 /// Blit the entire back buffer to the front (hardware) buffer.
 pub fn blit_full() {
     if let Some(ref mut fb) = *FB.lock() {

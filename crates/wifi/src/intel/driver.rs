@@ -6,12 +6,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::commands;
-use crate::firmware::{self, FirmwareImage};
 use crate::ieee80211;
-use crate::pci::WifiDevice;
+use crate::intel::commands;
+use crate::intel::firmware;
+use crate::intel::pci::WifiDevice;
+use crate::intel::tx_rx::{self, TxQueue, RxQueue, RxStatus, RXQ_SIZE};
 use crate::scan::{ScanConfig, ScanResults, ScannedNetwork};
-use crate::tx_rx::{self, TxQueue, RxQueue, RxStatus, RXQ_SIZE};
 use crate::wpa;
 use crate::WifiVariant;
 
@@ -72,7 +72,7 @@ pub struct ConnectionInfo {
 ///
 /// Manages the full lifecycle: PCI detection, firmware load, scanning,
 /// connection, WPA2 handshake, and data path.
-pub struct WifiController {
+pub struct IntelController {
     /// MMIO base address (mapped from BAR0).
     mmio_base: *mut u8,
     /// Physical memory offset for virt-to-phys conversion.
@@ -109,7 +109,7 @@ pub struct WifiController {
     ip: Option<IpConfig>,
 }
 
-impl WifiController {
+impl IntelController {
     /// Initialize the WiFi controller from a detected PCI device.
     ///
     /// # Safety

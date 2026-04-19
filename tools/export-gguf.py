@@ -33,8 +33,13 @@ except ImportError as e:
 REPO_ROOT = Path(__file__).parent.parent
 
 SIZES = {
-    "1.5b": ("Qwen/Qwen2.5-Coder-1.5B", "claudio-coder-1.5b"),
-    "7b":   ("Qwen/Qwen2.5-Coder-7B",   "claudio-coder-7b"),
+    "1.5b": "Qwen/Qwen2.5-Coder-1.5B",
+    "7b":   "Qwen/Qwen2.5-Coder-7B",
+}
+
+TASK_SLUGS = {
+    "code":   "claudio-coder",
+    "manual": "claudio-manual",
 }
 
 # Filled in by main() once args are parsed.
@@ -124,15 +129,20 @@ def main():
     global BASE_MODEL, LORA_DIR, MERGED_DIR, GGUF_F16, GGUF_Q4
     ap = argparse.ArgumentParser()
     ap.add_argument("--size", choices=SIZES.keys(), default="7b")
+    ap.add_argument("--task", choices=TASK_SLUGS.keys(), default="code",
+                    help="Which fine-tuned LoRA to export: 'code' (coder) or 'manual' (offline manual).")
+    ap.add_argument("--suffix", default="",
+                    help="Optional suffix on LoRA dir (e.g. '-v2').")
     ap.add_argument("--no-quantize", action="store_true",
                     help="skip Q4_0 quantization (useful when llama-quantize is not built)")
     args = ap.parse_args()
 
-    BASE_MODEL, slug = SIZES[args.size]
-    LORA_DIR   = REPO_ROOT / "models" / f"{slug}-lora"
-    MERGED_DIR = REPO_ROOT / "models" / f"{slug}-merged"
-    GGUF_F16   = REPO_ROOT / "models" / f"{slug}-f16.gguf"
-    GGUF_Q4    = REPO_ROOT / "models" / f"{slug}-q4_0.gguf"
+    BASE_MODEL = SIZES[args.size]
+    slug = f"{TASK_SLUGS[args.task]}-{args.size}"
+    LORA_DIR   = REPO_ROOT / "models" / f"{slug}-lora{args.suffix}"
+    MERGED_DIR = REPO_ROOT / "models" / f"{slug}-merged{args.suffix}"
+    GGUF_F16   = REPO_ROOT / "models" / f"{slug}-f16{args.suffix}.gguf"
+    GGUF_Q4    = REPO_ROOT / "models" / f"{slug}-q4_0{args.suffix}.gguf"
 
     print("=" * 60)
     print(f"ClaudioOS Model Export to GGUF — {args.size}")

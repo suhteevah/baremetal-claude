@@ -8,6 +8,8 @@
 //! other subsystems (e.g. the network stack) can look them up by
 //! vendor/device ID.
 
+extern crate alloc;
+
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
@@ -32,8 +34,43 @@ pub struct PciDevice {
     /// BAR0 value (I/O port base for legacy VirtIO, MMIO base for others).
     /// For I/O space BARs, bit 0 is set; the actual port base is `bar0 & !0x3`.
     pub bar0: u32,
+    /// All six BARs resolved to full 64-bit addresses (adjacent BARs are paired
+    /// for 64-bit MMIO BARs). `bars[i].kind == Unused` for the high half of a
+    /// 64-bit pair or an empty slot. See [`BarKind`] for the encoding.
+    ///
+    /// Realtek Wi-Fi exposes MMIO at BAR2 on PCIe (BAR0 is legacy I/O); Intel
+    /// AHCI exposes MMIO at BAR5; virtio-legacy uses BAR0 I/O. Drivers should
+    /// select the BAR index they need and check `kind` before dereferencing.
+    pub bars: [Bar; 6],
     /// The PCI interrupt line (from config register 0x3C, bits 7:0).
     pub irq_line: u8,
+}
+
+/// A single PCI Base Address Register, resolved to kind + address.
+#[derive(Debug, Clone, Copy)]
+pub struct Bar {
+    pub kind: BarKind,
+    /// For MMIO: the 64-bit physical base address, with type/flag bits masked
+    /// off. For I/O: the 16-bit port base zero-extended. 0 when unused.
+    pub addr: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarKind {
+    /// Slot unused (reported 0 / 0xFFFFFFFF, or the upper half of a 64-bit BAR).
+    Unused,
+    /// Memory-mapped I/O, 32-bit address space.
+    Mmio32,
+    /// Memory-mapped I/O, 64-bit address space (occupies this slot + next).
+    Mmio64,
+    /// Legacy I/O port space.
+    Io,
+}
+
+impl Bar {
+    pub const fn unused() -> Self {
+        Self { kind: BarKind::Unused, addr: 0 }
+    }
 }
 
 impl PciDevice {
@@ -123,65 +160,107 @@ where
 }
 
 pub fn enumerate() {
-    log::info!("[pci] scanning bus 0...");
+    log::info!("[pci] scanning all buses (0..=255)...");
 
     let mut devices = PCI_DEVICES.lock();
 
-    // Only scan bus 0 for now — QEMU places all devices there.
-    for device in 0..32u8 {
-        let vendor = read_config(0, device, 0, 0x00) as u16;
-        if vendor == 0xFFFF {
-            continue;
-        }
-        let device_id = (read_config(0, device, 0, 0x00) >> 16) as u16;
-        let class_reg = read_config(0, device, 0, 0x08);
-        let class = (class_reg >> 24) as u8;
-        let subclass = (class_reg >> 16) as u8;
-        let prog_if = (class_reg >> 8) as u8;
-        let bar0 = read_config(0, device, 0, 0x10);
-        let irq_line = read_config(0, device, 0, 0x3C) as u8;
-
-        log::info!(
-            "[pci] 00:{:02x}.0 vendor={:#06x} device={:#06x} class={:#04x}/{:#04x} bar0={:#010x} irq={}",
-            device, vendor, device_id, class, subclass, bar0, irq_line
-        );
-
-        let pci_dev = PciDevice {
-            bus: 0,
-            device,
-            function: 0,
-            vendor_id: vendor,
-            device_id,
-            class,
-            subclass,
-            prog_if,
-            bar0,
-            irq_line,
-        };
-
-        match (vendor, device_id) {
-            (0x1AF4, 0x1000) => {
-                log::info!("[pci]   -> VirtIO network device (I/O base: {:#x})", pci_dev.io_base());
-                // Enable bus mastering so the device can DMA to/from host memory.
-                enable_bus_master(0, device, 0);
+    // Brute-force scan every bus/slot/function. Intel CNVi Wi-Fi and many
+    // NVMe/xHCI devices live on bus > 0 on real hardware (behind root ports).
+    // Bus 0 only was a QEMU-only assumption that lost us every device behind
+    // a PCIe root port on the Victus. Full scan costs a few thousand port
+    // reads at boot and returns once 0xFFFF.
+    for bus in 0u8..=255 {
+        for device in 0u8..32 {
+            // Probe function 0 first; if it's populated, check whether it's a
+            // multi-function device (header_type bit 7 set) and iterate fns.
+            let vendor0 = read_config(bus, device, 0, 0x00) as u16;
+            if vendor0 == 0xFFFF {
+                continue;
             }
-            (0x1AF4, 0x1001) => log::info!("[pci]   -> VirtIO block device"),
-            (0x8086, did) => {
-                // Check if this is a supported Intel NIC.
-                if let Some(variant) = claudio_intel_nic::NicVariant::from_pci_ids(0x8086, did) {
-                    log::info!("[pci]   -> Intel NIC: {}", variant.name());
-                    enable_bus_master(0, device, 0);
-                } else if did == 0x10D3 {
-                    log::info!("[pci]   -> Intel 82574L (unsupported by driver)");
-                    enable_bus_master(0, device, 0);
+            let header_type = (read_config(bus, device, 0, 0x0C) >> 16) as u8;
+            let max_fn = if header_type & 0x80 != 0 { 8u8 } else { 1u8 };
+
+            for func in 0u8..max_fn {
+                let vendor = read_config(bus, device, func, 0x00) as u16;
+                if vendor == 0xFFFF {
+                    continue;
                 }
-            }
-            _ => {}
-        }
+                let device_id = (read_config(bus, device, func, 0x00) >> 16) as u16;
+                let class_reg = read_config(bus, device, func, 0x08);
+                let class = (class_reg >> 24) as u8;
+                let subclass = (class_reg >> 16) as u8;
+                let prog_if = (class_reg >> 8) as u8;
+                let bar0 = read_config(bus, device, func, 0x10);
+                let irq_line = read_config(bus, device, func, 0x3C) as u8;
+                let bars = read_all_bars(bus, device, func);
 
-        devices.push(pci_dev);
+                log::info!(
+                    "[pci] {:02x}:{:02x}.{} vendor={:#06x} device={:#06x} class={:#04x}/{:#04x} bar0={:#010x} irq={}",
+                    bus, device, func, vendor, device_id, class, subclass, bar0, irq_line
+                );
+
+                let pci_dev = PciDevice {
+                    bus,
+                    device,
+                    function: func,
+                    vendor_id: vendor,
+                    device_id,
+                    class,
+                    subclass,
+                    prog_if,
+                    bar0,
+                    bars,
+                    irq_line,
+                };
+
+                match (vendor, device_id) {
+                    (0x1AF4, 0x1000) => {
+                        log::info!("[pci]   -> VirtIO network device (I/O base: {:#x})", pci_dev.io_base());
+                        enable_bus_master(bus, device, func);
+                    }
+                    (0x1AF4, 0x1001) => log::info!("[pci]   -> VirtIO block device"),
+                    (0x8086, did) => {
+                        if let Some(variant) = claudio_intel_nic::NicVariant::from_pci_ids(0x8086, did) {
+                            log::info!("[pci]   -> Intel NIC: {}", variant.name());
+                            enable_bus_master(bus, device, func);
+                        } else if did == 0x10D3 {
+                            log::info!("[pci]   -> Intel 82574L (unsupported by driver)");
+                            enable_bus_master(bus, device, func);
+                        } else if class == 0x02 {
+                            // Unknown Intel network controller — almost certainly
+                            // a Wi-Fi adapter (AX200/AX201/AX210/AX211). Logged
+                            // so the PCI-dump terminal line surfaces the device
+                            // ID for driver probing.
+                            log::info!(
+                                "[pci]   -> Intel network class device 0x{:04x} (possible Wi-Fi)",
+                                did
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+
+                devices.push(pci_dev);
+            }
+        }
     }
     log::info!("[pci] scan complete, {} devices found", devices.count);
+}
+
+/// Return a snapshot of all enumerated PCI devices.
+///
+/// Used by the fallback terminal to render a human-readable dump so Matt can
+/// photograph the Victus screen and read off Intel device IDs (no serial on
+/// real HW). Caller must not hold `PCI_DEVICES` concurrently.
+pub fn snapshot() -> alloc::vec::Vec<PciDevice> {
+    let devs = PCI_DEVICES.lock();
+    let mut out = alloc::vec::Vec::with_capacity(devs.count);
+    for i in 0..devs.count {
+        if let Some(dev) = devs.devices[i] {
+            out.push(dev);
+        }
+    }
+    out
 }
 
 /// Enable PCI bus mastering for a specific device (public interface).
@@ -190,6 +269,21 @@ pub fn enumerate() {
 /// rather than the fixed match table in `enumerate()`.
 pub fn enable_bus_master_for(bus: u8, device: u8, func: u8) {
     enable_bus_master(bus, device, func);
+}
+
+/// Set both the Memory Space Enable (bit 1) and Bus Master Enable (bit 2)
+/// bits in the PCI Command register. Needed before touching a device's MMIO
+/// BAR — UEFI usually pre-enables both, but don't assume.
+pub fn enable_mem_and_bus_master(bus: u8, device: u8, func: u8) {
+    let cmd = read_config(bus, device, func, 0x04);
+    let want = cmd | (1 << 1) | (1 << 2);
+    if want != cmd {
+        write_config(bus, device, func, 0x04, want);
+        log::debug!(
+            "[pci] enabled mem+bus-master for {:02x}:{:02x}.{} (was {:#06x} -> {:#06x})",
+            bus, device, func, cmd & 0xFFFF, want & 0xFFFF
+        );
+    }
 }
 
 /// Read a PCI config register (public interface).
@@ -216,6 +310,39 @@ fn enable_bus_master(bus: u8, device: u8, func: u8) {
             func
         );
     }
+}
+
+/// Read all six BARs (config offsets 0x10..0x28) and decode kind + 64-bit
+/// address. Handles 64-bit BAR pairing: if BAR N is a 64-bit MMIO BAR, its
+/// upper half is in BAR N+1 and that slot is marked `Unused`.
+fn read_all_bars(bus: u8, device: u8, func: u8) -> [Bar; 6] {
+    let mut out = [Bar::unused(); 6];
+    let mut i = 0usize;
+    while i < 6 {
+        let raw = read_config(bus, device, func, 0x10 + (i as u8) * 4);
+        if raw == 0 || raw == 0xFFFF_FFFF {
+            i += 1;
+            continue;
+        }
+        if raw & 0x1 != 0 {
+            // I/O BAR — always 32-bit, bits 2+ are the port base.
+            out[i] = Bar { kind: BarKind::Io, addr: (raw & !0x3) as u64 };
+            i += 1;
+        } else {
+            let ty = (raw >> 1) & 0x3; // 00 = 32-bit, 10 = 64-bit
+            let base32 = (raw & 0xFFFF_FFF0) as u64;
+            if ty == 0x2 && i + 1 < 6 {
+                let hi = read_config(bus, device, func, 0x10 + ((i as u8) + 1) * 4) as u64;
+                out[i] = Bar { kind: BarKind::Mmio64, addr: base32 | (hi << 32) };
+                // upper half slot stays Unused
+                i += 2;
+            } else {
+                out[i] = Bar { kind: BarKind::Mmio32, addr: base32 };
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32 {

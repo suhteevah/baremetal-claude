@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -459,6 +465,7 @@ dependencies = [
  "claudio-ntfs",
  "claudio-nvme",
  "claudio-pe-loader",
+ "claudio-rtl8168",
  "claudio-rustc",
  "claudio-shell",
  "claudio-smp",
@@ -469,6 +476,7 @@ dependencies = [
  "claudio-vfs",
  "claudio-vulkan",
  "claudio-wasm-runtime",
+ "claudio-wifi",
  "claudio-win32",
  "claudio-winrt",
  "claudio-xhci",
@@ -476,7 +484,9 @@ dependencies = [
  "limine",
  "linked_list_allocator",
  "log",
+ "miniz_oxide",
  "pc-keyboard",
+ "qrcodegen-no-heap",
  "serde",
  "serde_json",
  "smoltcp",
@@ -489,6 +499,13 @@ dependencies = [
 
 [[package]]
 name = "claudio-pe-loader"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "claudio-rtl8168"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -584,6 +601,14 @@ dependencies = [
 
 [[package]]
 name = "claudio-wasm-runtime"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "spin",
+]
+
+[[package]]
+name = "claudio-wifi"
 version = "0.1.0"
 dependencies = [
  "log",
@@ -1269,6 +1294,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+]
+
+[[package]]
 name = "ml-dsa"
 version = "0.1.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1419,6 +1453,12 @@ version = "0.1.0"
 dependencies = [
  "log",
 ]
+
+[[package]]
+name = "qrcodegen-no-heap"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0e2c0bf8be8a1c4a4f48973dabf26943f05da2bfc2d3180aae62409dbba6f0c"
 
 [[package]]
 name = "quote"

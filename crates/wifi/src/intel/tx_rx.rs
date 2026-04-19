@@ -216,9 +216,10 @@ impl RxQueue {
         }
 
         let len = status.len as usize;
+        let flags = status.flags;
         let data = &self.bufs[idx][..len.min(RX_BUF_SIZE)];
 
-        log::trace!("wifi::tx_rx: RX idx={} len={} flags=0x{:04X}", idx, len, status.flags);
+        log::trace!("wifi::tx_rx: RX idx={} len={} flags=0x{:04X}", idx, len, flags);
 
         self.read_idx += 1;
         Some((idx, data))
