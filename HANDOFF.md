@@ -1,4 +1,132 @@
-# Session Handoff — 2026-04-17
+# Session Handoff — 2026-04-19
+
+## Last Updated
+2026-04-19
+
+## Project Status
+🟡 **RTL8168 wired-ethernet driver runs on real HW. Link up at 1000M, TX works, RX blocked.** DHCP times out because chip fires zero RX interrupts / doesn't deliver frames. Likely needs chip-variant-specific init (Linux r8169-style CPlusCmd + Config regs). Next session: read chip version register (XID 0x40) and implement the matching variant init.
+
+## What Was Done This Session
+
+### Ethernet cable arrived → architectural pivot
+- Matt's "no ethernet possible" constraint (memory `feedback_no_ethernet_dev_loop.md`) was revoked 2026-04-18 when a cable arrived. Wi-Fi (rtw89) was paused in favor of RTL8168 first — far simpler driver, real iterate-and-debug loop over the wire instead of photograph-QR workflow.
+- See memory `project_wifi_still_wanted.md` — Wi-Fi not dropped, just deprioritized; don't strip `crates/wifi/`.
+
+### RTL8168 driver — new crate `claudio-rtl8168`
+Files created:
+- `crates/rtl8168/Cargo.toml`
+- `crates/rtl8168/src/lib.rs`
+- `crates/rtl8168/src/regs.rs` (MMIO register offsets, 45 lines incl. PHY/CPlusCmd/MaxTxPkt added later)
+- `crates/rtl8168/src/descriptors.rs` (Descriptor struct, ring alloc, 16-byte legacy format, 256 entries)
+- `crates/rtl8168/src/driver.rs` (~250 lines: init sequence + TX + RX + diag_regs())
+
+Init sequence:
+1. CR.RST reset, poll until clears
+2. Read MAC from IDR0/IDR4
+3. CR9346 unlock
+4. **Re-write MAC to IDR0/IDR4** (some variants drop it on reset)
+5. **Clear CPlusCmd (0xE0)** — Linux always does this, prevents silent TX corruption
+6. **Set MaxTxPacketSize (0xEC) = 0x3F** — 8064 byte ceiling
+7. Alloc 256×16-byte rx_ring + tx_ring (256-byte aligned) + 256×2KB DMA buffers each
+8. Populate RX descriptors (OWN=1, EOR on last, buf phys addr)
+9. Write RDSAR_{LOW,HIGH} + TNPDS_{LOW,HIGH}
+10. Set RXCR (promiscuous for diag: AAP|AM|APM|AB|DMA burst 1024) + TXCR + RXMPS
+11. CR.RE | CR.TE — enable RX+TX
+12. IMR = ROK|RER|TOK|TER|LINK
+13. CR9346 lock
+
+TX impl: find tx_tail desc, check OWN=0, copy frame, set addr + OWN|FS|LS|len (preserving EOR), release fence, kick TPPOLL.NPQ, advance tail.
+
+RX impl: check rx_head.OWN, acquire fence, check error bits (RES/RUNT/CRC), strip 4-byte FCS, copy to caller, recycle descriptor (OWN=1 + buf addr + preserve EOR), advance head.
+
+Compiles clean, zero warnings on `x86_64-claudio.json`.
+
+### Kernel glue — `kernel/src/rtl8168_nic.rs` (~260 lines)
+Mirrors `kernel/src/intel_nic.rs`:
+- `find_rtl8168()` via PCI.
+- `init_rtl8168()` — maps BAR2 (MMIO, 64-bit), enables bus mastering + memory space.
+- `virt_to_phys()` — verbatim page-table walk from intel_nic.rs.
+- `Rtl8168SmoltcpDevice` implementing `smoltcp::phy::Device`.
+- `Rtl8168NetworkStack::new + poll + process_dhcp`.
+- `init_rtl8168_network(now_fn)` — full pipeline to DHCP, 200k-poll timeout.
+- **Status snapshot mechanism**: `Rtl8168Status` struct behind `Mutex<Option<_>>`, populated at each stage (found, init, DHCP). Rendered by fallback terminal so we can diagnose on real HW without serial.
+
+### Kernel wire-in
+- `Cargo.toml` workspace: added `"crates/rtl8168"` to members.
+- `kernel/Cargo.toml`: added `claudio-rtl8168 = { path = "../crates/rtl8168" }`.
+- `kernel/src/main.rs`:
+  - `mod rtl8168_nic;`
+  - In `main_async()` after Intel NIC branch: chain RTL8168 probe (runs when both VirtIO and Intel NIC absent).
+  - `fb_checkpoint(44/45)` yellow → green on RTL8168 probe/DHCP.
+  - Fallback terminal now renders a full `RTL8168 (wired ethernet):` section: found? BAR2? MAC? init err? IPv4? gateway? DHCP err? diag regs (CR, ISR, IMR, PHY+link+speed, RXCR, TXCR, CPlusCmd, MaxTxPkt, rx_head, tx_tail, rx_head_opts1, tx_tail_opts1).
+
+### Flash + boot results (on Victus, via USB)
+
+**Run 1 (initial)** — Limine panic: `ELF file type is ET_DYN, but PT_DYNAMIC segment missing`. Cause: built with `--target x86_64-unknown-none` (generic) instead of the project's custom `x86_64-claudio.json` target. Plain `cargo build --release` uses the right target per `.cargo/config.toml`. Wheel saved: `memory/wheel_cargo_build_target.md`.
+
+**Run 2** — Kernel boots. RTL8168 probe completes: device found at 04:00.0, BAR2 decoded, **MAC read 24:fb:e3:be:18:e1**, init clean. DHCP timeout at 200k polls.
+
+**Run 3 (diag regs added)**:
+- CR=0x0C (RE|TE both enabled ✓)
+- ISR=0x0000 (zero events fired — suspicious)
+- IMR=0x402F (chip added bit 14 to what we wrote)
+- PHY=0x93, **link=UP, speed=1000M** — gigabit physical link confirmed
+- RXCR=0x0002060F, TXCR=0x57100F00 (chip added default bits on top of ours)
+- rx_head=0, tx_tail=1 — **we sent exactly 1 packet (DHCP DISCOVER)**
+- rx_head_opts1=0xB0000800 — NIC is touching this (FS|LS set) but not clearing OWN (weird)
+- tx_tail_opts1=0x00000000 — descriptor reclaimed by NIC, **TX successful at DMA level**
+
+**Run 4 (+ promiscuous mode, MAC rewrite, CPlusCmd=0, MaxTxPkt=0x3F)** — queued, awaiting USB re-insert and boot.
+
+## Current State
+
+### Working
+- Limine boot on real HW (inherited from prior session, no regression)
+- RTL8168 driver scaffold compiles clean
+- RTL8168 probe + MMIO decode + chip reset + MAC read
+- Physical link UP at 1000M
+- TX path sends DHCP DISCOVER (NIC reclaims descriptor)
+- Fallback terminal prints full RTL8168 diagnostic section
+
+### Broken / Blocked
+- **RX delivers zero frames.** Promiscuous mode enabled, no change. Likely chip-variant init missing.
+- DHCP consequently never completes.
+- ISR=0 despite successful TX (TOK should fire) — chip is in a state where it won't emit events.
+
+### Stubbed
+- No chip-variant detection (register XID 0x40 not read).
+- No PHY init (relying on BIOS leftover state — which gave us link=UP, so not a hard blocker yet).
+- No interrupt-driven RX (polled only).
+- Full `claudio_net::NetworkStack` generic-over-Device still not done — RTL8168 stack is standalone, can't plug into existing TLS/HTTPS pipeline yet.
+
+## Blocking Issues
+
+1. **RX silence on real hardware.** Best next move: read XID register (0x40 bits 24-31) to identify chip variant, then implement the Linux r8169 `rtl_hw_start_8168X_Y` equivalent for that variant. Without variant-specific init, many rtl8168 chips accept/ignore packets silently.
+
+## What's Next (prioritized)
+
+1. **Read chip version (XID reg)** and print in fallback terminal. This unblocks all further work. One hour.
+2. **Port Linux r8169 per-variant init sequence** for whatever variant the Victus reports. Expect another ~200 lines of driver code. A day.
+3. **Once RX works**: verify DHCP, get IPv4, verify ping from kokonoe.
+4. **Bring up `crates/sshd`** — already in workspace, scaffolded. Bind to DHCP-assigned IP.
+5. **Self-reflash loop** (see `memory/project_self_reflash_loop.md`): SCP kernel → Victus rewrites USB → ACPI reset. Requires xHCI + USB-MSC + btrfs binding on top of current FAT32. Days.
+6. **Repartition USB** to add btrfs log partition (Matt's longstanding design: OS in RAM, USB = ESP + logs only). Needs Linux mkfs.btrfs. Hours.
+7. **Return to RTL8852BE Wi-Fi** (see `memory/project_wifi_still_wanted.md`) once the wired loop is established.
+
+## Notes for Next Session
+
+- **Do not use `--target x86_64-unknown-none`** for kernel builds. `cargo build --release` alone is correct. See `memory/wheel_cargo_build_target.md`.
+- **TX works, RX doesn't.** Don't get distracted debugging TX; focus on why RX buffers never get written.
+- The RX descriptor `0xB0000800` mystery (OWN still set but FS|LS appearing) is probably a clue. May indicate the NIC is writing *metadata* but aborting the actual buffer fill. Could be related to CPlusCmd not being set before rings are published.
+- **Reboot scratch/rtl8168-plan.md** — full design doc with all register references.
+- **Current USB layout**: FAT32 only, CLAUDIO label, contains `/kernel.elf`, `/EFI/BOOT/BOOTX64.EFI`, `/limine.cfg`. No btrfs yet.
+- The fallback terminal is paginated (SPACE advances). Matt photographs each page separately. RTL8168 section lives on page 2 (after PCI + WiFi probe).
+- **Flashing command when USB is on kokonoe**: `cp "/j/baremetal claude/target/x86_64-claudio/release/claudio-os" /v/kernel.elf && sync`. That's it — no BOOTX64.EFI update needed unless Limine itself changes.
+- Matt's style: execute autonomously, don't ask for permission to continue. Subagents in parallel for independent work. Verify before claiming complete.
+
+---
+
+
 
 ## Last Updated
 2026-04-17
